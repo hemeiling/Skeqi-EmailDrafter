@@ -356,7 +356,9 @@ function renderContacts(contacts, companyLabel) {
       </td>
       <td><span class="badge ${badgeClass}">${escapeHtml(c.relevance)}</span></td>
       <td>${escapeHtml(c.location)}</td>
-      <td><button class="btn-sm btn-primary draft-email-btn" data-idx="${i}">Draft Email</button></td>
+      <td id="draft-action-${i}">${c.draft_subject
+        ? `<button class="btn-sm btn-saved view-draft-btn" data-idx="${i}">View Draft</button>`
+        : `<button class="btn-sm btn-primary draft-email-btn" data-idx="${i}">Draft Email</button>`}</td>
     </tr>`;
   }).join("");
 
@@ -381,6 +383,9 @@ function renderContacts(contacts, companyLabel) {
   });
   resultsEl.querySelectorAll(".draft-email-btn").forEach(btn => {
     btn.addEventListener("click", () => openEmailDraft(Number(btn.dataset.idx)));
+  });
+  resultsEl.querySelectorAll(".view-draft-btn").forEach(btn => {
+    btn.addEventListener("click", () => openSavedDraft(Number(btn.dataset.idx)));
   });
   resultsEl.querySelectorAll(".reveal-btn").forEach(btn => {
     btn.addEventListener("click", () => revealEmail(Number(btn.dataset.idx)));
@@ -508,7 +513,40 @@ async function openEmailDraft(idx) {
     _currentContacts[idx].draft_body      = d.body       || "";
     _currentContacts[idx].draft_followup  = d.followup   || "";
     _currentContacts[idx].draft_rationale = d.rationale  || "";
+    setDraftActionButton(idx);
   });
+}
+
+function setDraftActionButton(idx) {
+  const cell = document.getElementById(`draft-action-${idx}`);
+  if (!cell) return;
+  cell.innerHTML = `<button class="btn-sm btn-saved view-draft-btn" data-idx="${idx}">View Draft</button>`;
+  cell.querySelector(".view-draft-btn").addEventListener("click", () => openSavedDraft(idx));
+}
+
+function openSavedDraft(idx) {
+  const contact = _currentContacts[idx];
+  if (!contact) return;
+  _modalContact = contact;
+  _modalOnUpdate = (d) => {
+    _currentContacts[idx].draft_subject   = d.subject   || "";
+    _currentContacts[idx].draft_body      = d.body       || "";
+    _currentContacts[idx].draft_followup  = d.followup   || "";
+    _currentContacts[idx].draft_rationale = d.rationale  || "";
+  };
+  document.getElementById("modal-title").textContent = `Draft email to ${contact.name}`;
+  document.getElementById("modal-contact-info").textContent =
+    `${contact.title || ""} · ${contact.company || ""} · ${contact.department || ""}`;
+  document.getElementById("modal-mode-select").value = "cold_outreach";
+  document.getElementById("modal-extra-instructions").value = "";
+  document.getElementById("email-modal").classList.add("open");
+  renderDraft({
+    subject: contact.draft_subject || "",
+    body: contact.draft_body || "",
+    followup: contact.draft_followup || "",
+    rationale: contact.draft_rationale || "",
+    claude_configured: true,
+  }, contact);
 }
 
 // Generic entry point for drafting an email to any contact -- used by the
@@ -692,6 +730,8 @@ async function autoProcessContacts() {
     : "all drafts loaded from cache";
   const cacheMsg = skipped ? `, ${skipped} reused from cache (no Claude tokens used)` : "";
   label.textContent = `Done — ${draftMsg}${cacheMsg}. Download Excel/CSV to see all.`;
+  renderContacts(_currentContacts, _currentCompanies.join(", "));
+  if (_currentCompanies[0]) renderExportBar(_currentCompanies[0]);
   setTimeout(() => { prog.style.display = "none"; }, 4000);
   refreshUsage();
 }
