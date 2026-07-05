@@ -1533,6 +1533,35 @@ async function openContactDetailModal(c) {
     }
   }
 
+  // Load email history
+  const emailHistEl = document.getElementById("cd-email-history");
+  if (emailHistEl) {
+    emailHistEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">Loading…</span>`;
+    try {
+      const r = await fetch(`/api/contacts/${c.id}/emails`);
+      const data = await r.json();
+      const emails = data.emails || [];
+      if (!emails.length) {
+        emailHistEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">No imported emails yet</span>`;
+      } else {
+        emailHistEl.innerHTML = emails.map(e => `
+          <div class="email-hist-item">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <span style="font-weight:500;">${escapeHtml(e.subject || "(no subject)")}</span>
+              <span class="badge-category cat-${e.category || 'other'}">${(e.category || 'other').replace(/_/g,' ')}</span>
+            </div>
+            <div class="email-hist-meta">
+              ${e.sent_at ? new Date(e.sent_at).toLocaleDateString() : 'Unknown date'}
+              &nbsp;·&nbsp; From: ${escapeHtml(e.from_name || e.from_email || '')}
+            </div>
+            ${e.body ? `<div style="font-size:0.75rem;color:#6b7280;margin-top:3px;white-space:pre-wrap;max-height:60px;overflow:hidden;">${escapeHtml(e.body.slice(0,200))}${e.body.length>200?'…':''}</div>` : ''}
+          </div>`).join("");
+      }
+    } catch (e) {
+      emailHistEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">Could not load email history</span>`;
+    }
+  }
+
   document.getElementById("cd-event").value = "";
   document.getElementById("cd-booth").value = c.booth_number || "";
   document.getElementById("cd-date").value = c.meeting_date || "";
@@ -1654,3 +1683,191 @@ loadSenderProfile();
 loadDraftModes();
 loadCrmContacts();
 refreshUsage();
+
+// =========================================================================
+// Import Email modal
+// =========================================================================
+
+const importEmailModal = document.getElementById("import-email-modal");
+let _importResult = null; // holds ingest API response during confirm step
+
+const EMAIL_CATEGORIES = [
+  { value: 'cold_outreach',        label: 'Cold outreach' },
+  { value: 'follow_up',            label: 'Follow-up' },
+  { value: 'conference_outreach',  label: 'Conference outreach' },
+  { value: 'partnership_discussion', label: 'Partnership discussion' },
+  { value: 'sales_discussion',     label: 'Sales discussion' },
+  { value: 'innovation_update',    label: 'Innovation update' },
+  { value: 'meeting_recap',        label: 'Meeting recap' },
+  { value: 'other',                label: 'Other' }
+];
+
+function populateCategorySelect(sel, selectedValue) {
+  sel.innerHTML = EMAIL_CATEGORIES.map(c =>
+    `<option value="${c.value}" ${c.value === selectedValue ? 'selected' : ''}>${c.label}</option>`
+  ).join('');
+}
+
+document.getElementById("crm-import-email-btn").addEventListener("click", () => {
+  document.getElementById("import-email-form").style.display = "";
+  document.getElementById("import-email-confirm").style.display = "none";
+  document.getElementById("import-email-result").style.display = "none";
+  document.getElementById("import-email-raw").value = "";
+  document.getElementById("import-from").value = "";
+  document.getElementById("import-to").value = "";
+  document.getElementById("import-subject").value = "";
+  document.getElementById("import-date").value = "";
+  document.getElementById("import-body").value = "";
+  _importResult = null;
+  importEmailModal.classList.add("open");
+});
+
+document.getElementById("import-email-close").addEventListener("click", () => {
+  importEmailModal.classList.remove("open");
+});
+importEmailModal.addEventListener("click", e => {
+  if (e.target === importEmailModal) importEmailModal.classList.remove("open");
+});
+
+document.getElementById("import-email-submit-btn").addEventListener("click", async () => {
+  const btn = document.getElementById("import-email-submit-btn");
+  const raw = document.getElementById("import-email-raw").value.trim();
+  const from = document.getElementById("import-from").value.trim();
+  const to = document.getElementById("import-to").value.trim();
+  const subject = document.getElementById("import-subject").value.trim();
+  const date = document.getElementById("import-date").value;
+  const body = document.getElementById("import-body").value.trim();
+
+  if (!raw && !from && !subject && !body) {
+    alert("Please paste an email or fill in at least From / Subject / Body.");
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = "Parsing…";
+  try {
+    const r = await fetch("/api/emails/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ raw_text: raw || undefined, from: from || undefined, to: to || undefined, subject: subject || undefined, body: body || undefined, sent_at: date || undefined })
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) { alert("Error: " + (d.error || "Unknown")); return; }
+
+    _importResult = d;
+
+    // Show confirm step
+    const matchedEl = document.getElementById("import-matched-contact");
+    if (d.contact_name) {
+      matchedEl.textContent = d.contact_name + (d.company_name ? ` · ${d.company_name}` : '');
+      matchedEl.style.color = d.review_needed ? "#ea580c" : "#111827";
+      if (d.review_needed) {
+        matchedEl.textContent += " (new stub — please verify)";
+      }
+    } else {
+      matchedEl.textContent = "No contact matched";
+      matchedEl.style.color = "#9ca3af";
+    }
+
+    const catSel = document.getElementById("import-category-select");
+    populateCategorySelect(catSel, d.category || 'other');
+
+    document.getElementById("import-email-form").style.display = "none";
+    document.getElementById("import-email-confirm").style.display = "";
+  } catch (e) {
+    alert("Network error: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Parse & Save";
+  }
+});
+
+document.getElementById("import-back-btn").addEventListener("click", () => {
+  document.getElementById("import-email-form").style.display = "";
+  document.getElementById("import-email-confirm").style.display = "none";
+});
+
+document.getElementById("import-confirm-btn").addEventListener("click", async () => {
+  if (!_importResult) return;
+  const btn = document.getElementById("import-confirm-btn");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const catSel = document.getElementById("import-category-select");
+    const overrideSel = document.getElementById("import-contact-override");
+    const newContactId = overrideSel.value ? Number(overrideSel.value) : undefined;
+    const newCategory = catSel.value;
+
+    // Update if category or contact changed
+    if (newCategory !== _importResult.category || newContactId) {
+      await fetch(`/api/emails/${_importResult.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          category: newCategory,
+          contact_id: newContactId || _importResult.contact_id,
+          review_needed: false
+        })
+      });
+    } else if (_importResult.review_needed) {
+      await fetch(`/api/emails/${_importResult.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ review_needed: false })
+      });
+    }
+
+    const resultEl = document.getElementById("import-email-result");
+    resultEl.style.display = "";
+    resultEl.innerHTML = `Saved: <strong>${escapeHtml(_importResult.subject || "(no subject)")}</strong> → <strong>${escapeHtml(_importResult.contact_name || "unmatched")}</strong> as <em>${newCategory.replace(/_/g,' ')}</em>`;
+    document.getElementById("import-email-confirm").style.display = "none";
+    document.getElementById("import-email-form").style.display = "";
+
+    loadCrmContacts(document.getElementById("crm-search-input").value);
+    refreshNeedsReviewBadge();
+    _importResult = null;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Confirm & Save";
+  }
+});
+
+document.getElementById("import-change-contact-btn").addEventListener("click", async () => {
+  const sel = document.getElementById("import-contact-override");
+  if (sel.style.display === "none") {
+    // Lazy-load contact list into the select
+    if (sel.options.length <= 1) {
+      try {
+        const r = await fetch("/api/contacts?limit=500");
+        const d = await r.json();
+        (d.contacts || []).forEach(c => {
+          const opt = document.createElement("option");
+          opt.value = c.id;
+          opt.textContent = `${c.full_name || "Unnamed"} · ${c.company || ""}`;
+          sel.appendChild(opt);
+        });
+      } catch (_) {}
+    }
+    sel.style.display = "";
+  } else {
+    sel.style.display = "none";
+  }
+});
+
+// Needs-review badge in CRM title
+async function refreshNeedsReviewBadge() {
+  try {
+    const r = await fetch("/api/emails/needs-review-count");
+    const d = await r.json();
+    const badge = document.getElementById("crm-review-badge");
+    if (!badge) return;
+    if (d.count > 0) {
+      badge.style.display = "";
+      badge.innerHTML = `<span class="needs-review-badge">${d.count} needs review</span>`;
+    } else {
+      badge.style.display = "none";
+    }
+  } catch (_) {}
+}
+
+refreshNeedsReviewBadge();

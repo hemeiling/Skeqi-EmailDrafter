@@ -163,6 +163,25 @@ async function initDb() {
       value TEXT
     )
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_history (
+      id SERIAL PRIMARY KEY,
+      contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+      company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+      from_email TEXT,
+      from_name TEXT,
+      to_email TEXT,
+      subject TEXT,
+      body TEXT,
+      sent_at TIMESTAMPTZ,
+      category TEXT DEFAULT 'other',
+      source TEXT DEFAULT 'manual_paste',
+      review_needed BOOLEAN DEFAULT FALSE,
+      raw_payload TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
 }
 
 // ===========================================================================
@@ -663,6 +682,98 @@ async function listEmailDraftsForContact(contactId) {
 }
 
 // ===========================================================================
+// Lookup helpers used by email ingestion
+// ===========================================================================
+
+async function findContactByEmail(email) {
+  if (!email) return null;
+  return q1(`SELECT * FROM contacts WHERE LOWER(email) = LOWER($1) LIMIT 1`, [email]);
+}
+
+async function findContactByEmailDomain(domain) {
+  if (!domain) return null;
+  return q1(`SELECT * FROM contacts WHERE email ILIKE $1 ORDER BY id DESC LIMIT 1`, [`%@${domain}`]);
+}
+
+async function findCompanyByDomain(domain) {
+  if (!domain) return null;
+  return q1(`SELECT * FROM companies WHERE website ILIKE $1 LIMIT 1`, [`%${domain}%`]);
+}
+
+async function countNeedsReviewEmails() {
+  const row = await q1(`SELECT COUNT(*)::int AS count FROM email_history WHERE review_needed = TRUE`);
+  return row ? row.count : 0;
+}
+
+// ===========================================================================
+// Email history (forwarded / imported emails)
+// ===========================================================================
+
+async function insertEmailHistory(e) {
+  const [row] = await q(`
+    INSERT INTO email_history
+      (contact_id, company_id, from_email, from_name, to_email,
+       subject, body, sent_at, category, source, review_needed, raw_payload)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    RETURNING *
+  `, [
+    e.contact_id || null, e.company_id || null,
+    e.from_email || '', e.from_name || '', e.to_email || '',
+    e.subject || '', e.body || '',
+    e.sent_at || null,
+    e.category || 'other', e.source || 'manual_paste',
+    Boolean(e.review_needed), e.raw_payload || ''
+  ]);
+  return row;
+}
+
+async function listEmailHistoryForContact(contactId) {
+  return q(`
+    SELECT * FROM email_history
+    WHERE contact_id = $1
+    ORDER BY sent_at DESC NULLS LAST, created_at DESC
+  `, [contactId]);
+}
+
+async function listNeedsReviewEmails(limit = 50) {
+  return q(`
+    SELECT eh.*,
+      c.full_name AS contact_name, c.company AS contact_company,
+      co.name AS company_name
+    FROM email_history eh
+    LEFT JOIN contacts c ON c.id = eh.contact_id
+    LEFT JOIN companies co ON co.id = eh.company_id
+    WHERE eh.review_needed = TRUE
+    ORDER BY eh.created_at DESC
+    LIMIT $1
+  `, [limit]);
+}
+
+async function listRecentEmailHistory(limit = 100) {
+  return q(`
+    SELECT eh.*,
+      c.full_name AS contact_name, c.company AS contact_company
+    FROM email_history eh
+    LEFT JOIN contacts c ON c.id = eh.contact_id
+    ORDER BY eh.sent_at DESC NULLS LAST, eh.created_at DESC
+    LIMIT $1
+  `, [limit]);
+}
+
+async function updateEmailHistory(id, fields) {
+  const sets = [];
+  const vals = [];
+  let i = 1;
+  if (fields.contact_id !== undefined) { sets.push(`contact_id=$${i++}`); vals.push(fields.contact_id); }
+  if (fields.company_id !== undefined) { sets.push(`company_id=$${i++}`); vals.push(fields.company_id); }
+  if (fields.category !== undefined) { sets.push(`category=$${i++}`); vals.push(fields.category); }
+  if (fields.review_needed !== undefined) { sets.push(`review_needed=$${i++}`); vals.push(Boolean(fields.review_needed)); }
+  if (!sets.length) return;
+  vals.push(id);
+  await q(`UPDATE email_history SET ${sets.join(', ')} WHERE id=$${i}`, vals);
+}
+
+// ===========================================================================
 // Settings
 // ===========================================================================
 
@@ -696,6 +807,10 @@ module.exports = {
   updateCachedLeadDraft, logApolloResult, listApolloResults,
   // email drafts
   insertEmailDraftVersion, listEmailDraftsForContact,
+  // email history (forwarded / imported)
+  insertEmailHistory, listEmailHistoryForContact, listNeedsReviewEmails,
+  listRecentEmailHistory, updateEmailHistory,
+  findContactByEmail, findContactByEmailDomain, findCompanyByDomain, countNeedsReviewEmails,
   // settings
   getSetting, setSetting
 };

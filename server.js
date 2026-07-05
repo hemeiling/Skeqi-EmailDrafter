@@ -15,6 +15,9 @@ const {
   getCompanySearchCache, setCompanySearchCache, updateCachedLeadDraft,
   logApolloResult, listApolloResults,
   insertEmailDraftVersion, listEmailDraftsForContact,
+  insertEmailHistory, listEmailHistoryForContact, listNeedsReviewEmails,
+  listRecentEmailHistory, updateEmailHistory,
+  findContactByEmail, findContactByEmailDomain, findCompanyByDomain, countNeedsReviewEmails,
   searchContacts, filterContacts, patchContactCrmFields, logContactActivity, listContactActivity,
   getSetting, setSetting, listEvents
 } = require('./db');
@@ -28,7 +31,7 @@ const {
   revealPersonEmail
 } = require('./apollo');
 const { doCompanySearch, CRM_FIELDS } = require('./leads');
-const { draftEmail, listDraftModes } = require('./claude');
+const { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES } = require('./claude');
 const { contactsToCsv, contactsToXml, contactsToXlsx, safeFilename } = require('./export');
 const { parseCompanyFile } = require('./companyImport');
 const { normalizeFileToImages } = require('./cardBatch');
@@ -737,6 +740,212 @@ app.get('/api/debug/contact/:id', async (req, res) => {
 });
 
 // =========================================================================
+// =========================================================================
+// Email history (forwarded / imported emails)
+// =========================================================================
+
+// Parses raw pasted email text into { from, to, subject, date, body }
+function parseRawEmail(text) {
+  if (!text) return {};
+  const lines = text.split('\n');
+  let from = '', to = '', subject = '', date = '', bodyStart = -1;
+
+  for (let i = 0; i < Math.min(lines.length, 40); i++) {
+    // Strip forwarded-email quote markers (>, > >, etc.)
+    const line = lines[i].replace(/^(>+\s?)+/, '').trim();
+    if (!from    && /^from\s*:/i.test(line))    from    = line.replace(/^from\s*:\s*/i, '').trim();
+    else if (!to && /^to\s*:/i.test(line))      to      = line.replace(/^to\s*:\s*/i,   '').trim();
+    else if (!subject && /^subject\s*:/i.test(line)) subject = line.replace(/^subject\s*:\s*/i, '').trim();
+    else if (!date && /^date\s*:/i.test(line))  date    = line.replace(/^date\s*:\s*/i,  '').trim();
+
+    // Body starts after first blank line that follows at least one header
+    if (bodyStart === -1 && (from || subject) && line === '') {
+      bodyStart = i + 1;
+      break;
+    }
+  }
+
+  const bodyLines = lines
+    .slice(bodyStart >= 0 ? bodyStart : 0)
+    .map(l => l.replace(/^(>+\s?)+/, '')); // strip quote markers from body too
+  const body = bodyLines.join('\n').trim();
+
+  return { from, to, subject, date, body };
+}
+
+function parseEmailAddress(str) {
+  if (!str) return { name: '', email: '' };
+  const angleMatch = str.match(/^(.+?)\s*<([^>]+)>\s*$/);
+  if (angleMatch) {
+    return {
+      name: angleMatch[1].replace(/^["']|["']$/g, '').trim(),
+      email: angleMatch[2].trim().toLowerCase()
+    };
+  }
+  const emailMatch = str.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+  return { name: str.replace(emailMatch ? emailMatch[0] : '', '').trim(), email: emailMatch ? emailMatch[0].toLowerCase() : '' };
+}
+
+function domainFromEmail(email) {
+  const at = (email || '').indexOf('@');
+  return at >= 0 ? email.slice(at + 1).toLowerCase() : '';
+}
+
+// POST /api/emails/ingest — parse + match + categorize + save
+app.post('/api/emails/ingest', async (req, res) => {
+  try {
+    const { raw_text, from: rawFrom, to: rawTo, subject: rawSubject, body: rawBody, sent_at, source = 'manual_paste' } = req.body;
+
+    // Parse raw pasted text if provided, else use explicit fields
+    let from = rawFrom || '', to = rawTo || '', subject = rawSubject || '', body = rawBody || '', dateStr = sent_at || '';
+    if (raw_text) {
+      const parsed = parseRawEmail(raw_text);
+      from    = from    || parsed.from    || '';
+      to      = to      || parsed.to      || '';
+      subject = subject || parsed.subject || '';
+      body    = body    || parsed.body    || '';
+      dateStr = dateStr || parsed.date    || '';
+    }
+
+    const { name: fromName, email: fromEmail } = parseEmailAddress(from);
+    const sentAt = dateStr ? new Date(dateStr) : null;
+    const validSentAt = sentAt && !isNaN(sentAt.getTime()) ? sentAt.toISOString() : null;
+
+    // ── Contact matching ──────────────────────────────────────────────────
+    let contact = null;
+    let reviewNeeded = false;
+    const PERSONAL_DOMAINS = ['gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com','me.com'];
+
+    if (fromEmail) {
+      contact = await findContactByEmail(fromEmail);
+    }
+
+    // Fallback: match by email domain (only for company domains, not personal)
+    if (!contact && fromEmail) {
+      const domain = domainFromEmail(fromEmail);
+      if (domain && !PERSONAL_DOMAINS.includes(domain)) {
+        contact = await findContactByEmailDomain(domain);
+      }
+    }
+
+    // No match → create stub contact flagged for review
+    if (!contact && (fromEmail || fromName)) {
+      const domain = domainFromEmail(fromEmail);
+      const companyHint = domain && !PERSONAL_DOMAINS.includes(domain)
+        ? domain.split('.')[0] : '';
+      const { id: newId } = await upsertContact({
+        full_name: fromName || fromEmail,
+        email: fromEmail,
+        company: companyHint,
+        source: 'email_import',
+        email_lookup_status: fromEmail ? 'found' : 'not_checked'
+      });
+      contact = await getContact(newId);
+      reviewNeeded = true;
+    }
+
+    const contactId = contact ? contact.id : null;
+
+    // ── Company matching ──────────────────────────────────────────────────
+    let companyId = contact ? contact.company_id : null;
+    if (!companyId && contact && contact.company) {
+      const co = await findCompanyByName(contact.company);
+      companyId = co ? co.id : null;
+    }
+    if (!companyId && fromEmail) {
+      const domain = domainFromEmail(fromEmail);
+      if (domain && !PERSONAL_DOMAINS.includes(domain)) {
+        const co = await findCompanyByDomain(domain);
+        companyId = co ? co.id : null;
+      }
+    }
+
+    // ── Categorize ────────────────────────────────────────────────────────
+    const { category, rationale } = await categorizeEmail(subject, body, fromName, fromEmail);
+
+    // ── Save ──────────────────────────────────────────────────────────────
+    const record = await insertEmailHistory({
+      contact_id: contactId,
+      company_id: companyId,
+      from_email: fromEmail,
+      from_name: fromName,
+      to_email: to,
+      subject,
+      body,
+      sent_at: validSentAt,
+      category,
+      source,
+      review_needed: reviewNeeded,
+      raw_payload: raw_text || ''
+    });
+
+    if (contactId) {
+      await logContactActivity(contactId, 'email_imported', `Imported email: "${subject || '(no subject)'}"`);
+    }
+
+    res.json({
+      ok: true,
+      id: record.id,
+      contact_id: contactId,
+      contact_name: contact ? contact.full_name : null,
+      company_id: companyId,
+      company_name: contact ? contact.company : null,
+      category,
+      category_rationale: rationale,
+      review_needed: reviewNeeded,
+      from_email: fromEmail,
+      from_name: fromName,
+      subject
+    });
+  } catch (err) {
+    console.error('Email ingest error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/emails — recent email history
+app.get('/api/emails', async (req, res) => {
+  try {
+    const needsReview = req.query.needs_review === 'true';
+    const emails = needsReview ? await listNeedsReviewEmails(100) : await listRecentEmailHistory(100);
+    res.json({ ok: true, emails });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/emails/needs-review-count
+app.get('/api/emails/needs-review-count', async (req, res) => {
+  try {
+    const count = await countNeedsReviewEmails();
+    res.json({ ok: true, count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/contacts/:id/emails — email history for one contact
+app.get('/api/contacts/:id/emails', async (req, res) => {
+  try {
+    const emails = await listEmailHistoryForContact(Number(req.params.id));
+    res.json({ ok: true, emails });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/emails/:id — correct contact/company/category after review
+app.patch('/api/emails/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { contact_id, company_id, category, review_needed } = req.body;
+    await updateEmailHistory(id, { contact_id, company_id, category, review_needed });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Email drafting (Claude)
 // =========================================================================
 

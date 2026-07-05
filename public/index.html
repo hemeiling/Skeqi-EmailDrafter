@@ -86,6 +86,22 @@
     .crm-sb-list   { display: flex; flex-direction: column; gap: 1px; }
     .crm-sb-item   { font-size: 0.75rem; padding: 5px 6px; border-radius: 4px; cursor: pointer; color: #374151; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .crm-sb-item:hover { background: #e5e7eb; }
+    /* Email category badges */
+    .badge-category { display:inline-block;padding:1px 7px;border-radius:10px;font-size:0.68rem;font-weight:600;white-space:nowrap; }
+    .cat-cold_outreach       { background:#dbeafe;color:#1e40af; }
+    .cat-follow_up           { background:#fef9c3;color:#713f12; }
+    .cat-conference_outreach { background:#ede9fe;color:#5b21b6; }
+    .cat-partnership_discussion { background:#d1fae5;color:#065f46; }
+    .cat-sales_discussion    { background:#fee2e2;color:#991b1b; }
+    .cat-innovation_update   { background:#ffedd5;color:#9a3412; }
+    .cat-meeting_recap       { background:#e0f2fe;color:#0c4a6e; }
+    .cat-other               { background:#f3f4f6;color:#6b7280; }
+    /* Email history list inside contact detail */
+    .email-hist-item { padding:7px 0;border-bottom:1px solid #f3f4f6;font-size:0.8rem; }
+    .email-hist-item:last-child { border-bottom:none; }
+    .email-hist-meta { color:#9ca3af;font-size:0.72rem;margin-top:2px; }
+    /* Needs-review badge */
+    .needs-review-badge { display:inline-block;background:#ef4444;color:#fff;border-radius:10px;font-size:0.68rem;font-weight:700;padding:1px 7px;margin-left:6px; }
     /* CRM pagination */
     #crm-pagination { display: flex; align-items: center; gap: 10px; justify-content: center; margin-top: 12px; min-height: 32px; }
 
@@ -449,6 +465,7 @@
   <div class="card">
     <div class="card-title" id="crm-toggle">
       CRM — Saved Contacts &amp; Companies
+      <span id="crm-review-badge" style="display:none;"></span>
       <span class="toggle-icon" id="crm-toggle-icon">▼</span>
     </div>
     <div id="crm-body">
@@ -462,6 +479,7 @@
               <input type="text" id="crm-search-input" placeholder="Search by name, company, email, or tag…" />
             </div>
             <button class="btn-ghost" id="crm-refresh-btn">Refresh</button>
+            <button class="btn-ghost" id="crm-import-email-btn" style="white-space:nowrap;">+ Import Email</button>
           </div>
 
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
@@ -536,6 +554,54 @@
   </div>
 
   <!-- ── Contact detail editor modal (conference fields) ── -->
+  <!-- ── Import Email modal ── -->
+  <div class="modal-overlay" id="import-email-modal">
+    <div class="modal" style="max-width:580px;">
+      <button class="modal-close" id="import-email-close" title="Close">×</button>
+      <h2>Import Email</h2>
+      <p style="font-size:0.82rem;color:#6b7280;margin:0 0 14px;">Paste a forwarded or sent email. The app will match it to a contact, categorize it, and save it to CRM history.</p>
+
+      <div id="import-email-result" style="display:none;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:0.82rem;"></div>
+
+      <div id="import-email-form">
+        <div class="field" style="margin-bottom:10px;">
+          <label style="font-size:0.8rem;font-weight:600;">Paste email (full text including headers)</label>
+          <textarea id="import-email-raw" rows="10" style="width:100%;box-sizing:border-box;font-size:0.8rem;font-family:monospace;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;resize:vertical;" placeholder="---------- Forwarded message ----------&#10;From: John Smith &lt;john@company.com&gt;&#10;Date: Thu, Jul 3, 2026 at 2:30 PM&#10;Subject: Follow up&#10;To: you@email.com&#10;&#10;Hi, ..."></textarea>
+        </div>
+        <details style="margin-bottom:12px;">
+          <summary style="font-size:0.78rem;color:#6b7280;cursor:pointer;">Or enter fields manually</summary>
+          <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <div class="field"><label>From</label><input type="text" id="import-from" placeholder="John Smith &lt;john@co.com&gt;" /></div>
+            <div class="field"><label>To</label><input type="text" id="import-to" placeholder="you@email.com" /></div>
+            <div class="field"><label>Subject</label><input type="text" id="import-subject" /></div>
+            <div class="field"><label>Date sent</label><input type="datetime-local" id="import-date" /></div>
+          </div>
+          <div class="field" style="margin-top:8px;"><label>Body</label><textarea id="import-body" rows="4" style="width:100%;box-sizing:border-box;font-size:0.82rem;padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;resize:vertical;"></textarea></div>
+        </details>
+        <button class="btn-primary" id="import-email-submit-btn" style="width:100%;">Parse &amp; Save</button>
+      </div>
+
+      <div id="import-email-confirm" style="display:none;">
+        <div style="margin-bottom:12px;">
+          <div style="font-size:0.78rem;color:#6b7280;margin-bottom:4px;">Matched contact</div>
+          <div id="import-matched-contact" style="font-size:0.9rem;font-weight:600;"></div>
+          <select id="import-contact-override" style="width:100%;margin-top:6px;font-size:0.8rem;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;background:#fff;display:none;">
+            <option value="">— keep matched contact —</option>
+          </select>
+          <button id="import-change-contact-btn" style="font-size:0.75rem;color:#6b7280;background:none;border:none;cursor:pointer;padding:2px 0;">Change contact ▾</button>
+        </div>
+        <div style="margin-bottom:12px;">
+          <div style="font-size:0.78rem;color:#6b7280;margin-bottom:4px;">Category</div>
+          <select id="import-category-select" style="width:100%;font-size:0.85rem;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;background:#fff;"></select>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn-primary" id="import-confirm-btn" style="flex:1;">Confirm &amp; Save</button>
+          <button class="btn-ghost" id="import-back-btn" style="flex:1;">← Back</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="contact-detail-modal">
     <div class="modal">
       <button class="modal-close" id="contact-detail-close" title="Close">×</button>
@@ -548,7 +614,11 @@
           <span id="cd-email-display" style="font-size:0.85rem;color:#374151;"></span>
         </div>
         <div style="font-size:0.75rem;font-weight:600;color:#6b7280;margin-bottom:4px;">Draft history</div>
-        <div id="cd-draft-history" style="max-height:140px;overflow-y:auto;"></div>
+        <div id="cd-draft-history" style="max-height:130px;overflow-y:auto;"></div>
+        <div style="font-size:0.75rem;font-weight:600;color:#6b7280;margin:10px 0 4px;">Sent / imported emails</div>
+        <div id="cd-email-history" style="max-height:160px;overflow-y:auto;">
+          <div style="font-size:0.75rem;color:#9ca3af;">Loading…</div>
+        </div>
       </div>
 
       <div class="field-row">

@@ -316,4 +316,69 @@ async function draftEmail(contact, sender, mode, context) {
   }
 }
 
-module.exports = { draftEmail, listDraftModes };
+const EMAIL_CATEGORIES = [
+  'cold_outreach', 'follow_up', 'conference_outreach',
+  'partnership_discussion', 'sales_discussion',
+  'innovation_update', 'meeting_recap', 'other'
+];
+
+// Keyword-based fallback for when Claude isn't configured
+function classifyByKeywords(subject, body) {
+  const text = `${subject} ${body}`.toLowerCase();
+  if (/follow.?up|following up|circling back|checking in/.test(text)) return 'follow_up';
+  if (/conference|event|booth|trade show|meeting at|saw you at/.test(text)) return 'conference_outreach';
+  if (/partner|partnership|collaboration|collaborate|joint/.test(text)) return 'partnership_discussion';
+  if (/demo|pricing|quote|proposal|purchase|buy|sale|offer/.test(text)) return 'sales_discussion';
+  if (/launch|new product|innovation|update|announcement|release/.test(text)) return 'innovation_update';
+  if (/recap|summary|as discussed|as we discussed|meeting notes|action items/.test(text)) return 'meeting_recap';
+  if (/introduction|intro|reaching out|came across your|connect/.test(text)) return 'cold_outreach';
+  return 'other';
+}
+
+async function categorizeEmail(subject, body, fromName, fromEmail) {
+  const apiKey = CLAUDE_API_KEY;
+  const bodyExcerpt = (body || '').slice(0, 600);
+
+  if (!apiKey) {
+    const category = classifyByKeywords(subject, body);
+    return { category, rationale: 'Classified by keyword matching (Claude not configured).', claude_configured: false };
+  }
+
+  const prompt =
+    `Classify this email into exactly ONE of these categories:\n` +
+    `cold_outreach, follow_up, conference_outreach, partnership_discussion,\n` +
+    `sales_discussion, innovation_update, meeting_recap, other\n\n` +
+    `From: ${fromName || ''} <${fromEmail || ''}>\n` +
+    `Subject: ${subject || '(no subject)'}\n` +
+    `Body excerpt:\n${bodyExcerpt}\n\n` +
+    `Return ONLY a raw JSON object: { "category": "...", "rationale": "one sentence" }\n` +
+    `No markdown. No code fences. Just the JSON.`;
+
+  try {
+    const res = await fetch(CLAUDE_MESSAGES_URL, {
+      method: 'POST',
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 200, messages: [{ role: 'user', content: prompt }] })
+    });
+    if (!res.ok) {
+      const category = classifyByKeywords(subject, body);
+      return { category, rationale: 'Keyword fallback (Claude API error).', claude_configured: true };
+    }
+    const data = await res.json();
+    recordClaudeUsage(data.usage || {});
+    const raw = (data.content && data.content[0] && data.content[0].text) || '';
+    try {
+      const parsed = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || raw);
+      const category = EMAIL_CATEGORIES.includes(parsed.category) ? parsed.category : 'other';
+      return { category, rationale: parsed.rationale || '', claude_configured: true };
+    } catch {
+      const category = classifyByKeywords(subject, body);
+      return { category, rationale: 'Keyword fallback (parse error).', claude_configured: true };
+    }
+  } catch (err) {
+    const category = classifyByKeywords(subject, body);
+    return { category, rationale: `Keyword fallback (network error: ${err.message}).`, claude_configured: true };
+  }
+}
+
+module.exports = { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES };
