@@ -88,6 +88,8 @@ async function initDb() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // Migration: add has_email column to existing databases that predate it
+  await pool.query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS has_email BOOLEAN DEFAULT FALSE`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS business_cards (
@@ -298,12 +300,12 @@ async function insertContact(c) {
       draft_subject, draft_body, draft_followup, draft_rationale,
       tags, follow_up_status, last_contacted_at,
       event_id, booth_number, meeting_date, meeting_notes, interest_level,
-      products_discussed, assigned_salesperson
+      products_discussed, assigned_salesperson, has_email
     ) VALUES (
       $1,  $2,  $3,  $4,  $5,  $6,  $7,  $8,  $9,  $10,
       $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
       $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
-      $31, $32, $33, $34, $35
+      $31, $32, $33, $34, $35, $36
     ) RETURNING id
   `, [
     first_name, last_name, c.full_name || '', c.job_title || '', c.department || '', c.seniority || '',
@@ -316,7 +318,8 @@ async function insertContact(c) {
     c.draft_subject || '', c.draft_body || '', c.draft_followup || '', c.draft_rationale || '',
     c.tags || '', c.follow_up_status || 'not_contacted', c.last_contacted_at || '',
     eventId, c.booth_number || '', c.meeting_date || '', c.meeting_notes || '', c.interest_level || '',
-    c.products_discussed || '', c.assigned_salesperson || ''
+    c.products_discussed || '', c.assigned_salesperson || '',
+    c.has_email !== undefined ? Boolean(c.has_email) : false
   ]);
   return id;
 }
@@ -427,7 +430,8 @@ async function updateContact(id, c) {
     meeting_notes: pick(c.meeting_notes, existing.meeting_notes),
     interest_level: pick(c.interest_level, existing.interest_level),
     products_discussed: pick(c.products_discussed, existing.products_discussed),
-    assigned_salesperson: pick(c.assigned_salesperson, existing.assigned_salesperson)
+    assigned_salesperson: pick(c.assigned_salesperson, existing.assigned_salesperson),
+    has_email: c.has_email !== undefined ? Boolean(c.has_email) : Boolean(existing.has_email)
   };
 
   await q(`
@@ -439,9 +443,9 @@ async function updateContact(id, c) {
       draft_subject=$22, draft_body=$23, draft_followup=$24, draft_rationale=$25,
       tags=$26,       follow_up_status=$27, last_contacted_at=$28,
       event_id=$29,   booth_number=$30, meeting_date=$31,    meeting_notes=$32,   interest_level=$33,
-      products_discussed=$34, assigned_salesperson=$35,
+      products_discussed=$34, assigned_salesperson=$35, has_email=$36,
       updated_at=NOW()
-    WHERE id=$36
+    WHERE id=$37
   `, [
     merged.first_name, merged.last_name, merged.full_name, merged.job_title, merged.department, merged.seniority,
     merged.email, merged.phone, merged.website, merged.linkedin_url, merged.company, merged.company_id,
@@ -450,7 +454,7 @@ async function updateContact(id, c) {
     merged.draft_subject, merged.draft_body, merged.draft_followup, merged.draft_rationale,
     merged.tags, merged.follow_up_status, merged.last_contacted_at,
     merged.event_id, merged.booth_number, merged.meeting_date, merged.meeting_notes, merged.interest_level,
-    merged.products_discussed, merged.assigned_salesperson,
+    merged.products_discussed, merged.assigned_salesperson, merged.has_email,
     id
   ]);
 }

@@ -692,7 +692,7 @@ async function autoProcessContacts() {
     try {
       const resp = await fetch("/api/reveal-email", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apollo_id: c.apollo_id }),
+        body: JSON.stringify({ apollo_id: c.apollo_id, contact_id: c.contact_id }),
       });
       const d = await resp.json();
       if (d.email) _currentContacts[i].email = d.email;
@@ -750,7 +750,7 @@ async function revealEmail(idx) {
   try {
     const r = await fetch("/api/reveal-email", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apollo_id: contact.apollo_id }),
+      body: JSON.stringify({ apollo_id: contact.apollo_id, contact_id: contact.contact_id }),
     });
     const d = await r.json();
     if (d.error) {
@@ -1220,6 +1220,7 @@ function renderCrmTable(contacts) {
       <td>${escapeHtml(c.full_name || "Unnamed")}</td>
       <td>${escapeHtml(c.job_title)}</td>
       <td>${escapeHtml(c.company)}</td>
+      <td style="font-size:0.76rem;">${c.email ? escapeHtml(c.email) : '<span style="color:#9ca3af">N/A</span>'}</td>
       <td><span class="badge badge-source">${escapeHtml(c.source || "manual")}</span></td>
       <td><input type="text" class="crm-tags-input" data-id="${c.id}" value="${escapeAttr(c.tags || "")}"
             style="width:100px;font-size:12px;padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;" placeholder="tags…"></td>

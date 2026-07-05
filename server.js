@@ -8,7 +8,7 @@ const Tesseract = require('tesseract.js');
 const {
   initDb,
   insertContact, listContacts, getContact, listContactsByCompany, deleteContact,
-  updateContactDraft, findExistingContact, upsertContact,
+  updateContactDraft, findExistingContact, upsertContact, updateContact,
   upsertCompany, findCompanyByName, getCompany, listCompanies, getCompanyContacts,
   insertBusinessCard, listBusinessCardsForContact,
   getApolloCache, setApolloCache,
@@ -470,7 +470,7 @@ function contactRowToLeadFormat(c) {
   return {
     name: c.full_name, title: c.job_title, company: c.company, department: c.department,
     email: c.email, linkedin: c.linkedin_url, confidence: c.confidence, relevance: c.relevance,
-    location: c.address, apollo_id: c.apollo_person_id, has_email: Boolean(c.email),
+    location: c.address, apollo_id: c.apollo_person_id, has_email: Boolean(c.email) || Boolean(c.has_email),
     draft_subject: c.draft_subject, draft_body: c.draft_body,
     draft_followup: c.draft_followup, draft_rationale: c.draft_rationale,
     contact_id: c.id
@@ -526,7 +526,8 @@ app.post('/api/leads/search', async (req, res) => {
           company: c.company, website: c.company_website,
           email: cleanEmail, linkedin_url: c.linkedin, address: c.location,
           confidence: c.confidence, relevance: c.relevance,
-          apollo_person_id: c.apollo_id, source: 'apollo'
+          apollo_person_id: c.apollo_id, source: 'apollo',
+          has_email: Boolean(c.has_email) || Boolean(cleanEmail)
         });
         c.contact_id = id;
         await logContactActivity(id, 'apollo_search', updated ? `Refreshed via Apollo search for ${companyName}` : `Found via Apollo search for ${companyName}`);
@@ -551,12 +552,13 @@ app.post('/api/leads/search', async (req, res) => {
 app.post('/api/leads/save', async (req, res) => {
   try {
     const c = req.body;
+    const saveEmail = c.email && !String(c.email).includes('N/A') && !String(c.email).includes('not returned') ? c.email : '';
     const { id, updated } = await upsertContact({
       full_name: c.name,
       job_title: c.title,
       company: c.company,
       website: c.company_website,
-      email: c.email && !String(c.email).includes('N/A') && !String(c.email).includes('not returned') ? c.email : '',
+      email: saveEmail,
       linkedin_url: c.linkedin,
       address: c.location,
       department: c.department,
@@ -565,6 +567,7 @@ app.post('/api/leads/save', async (req, res) => {
       relevance: c.relevance,
       apollo_person_id: c.apollo_id,
       source: 'apollo',
+      has_email: Boolean(c.has_email) || Boolean(saveEmail),
       draft_subject: c.draft_subject,
       draft_body: c.draft_body,
       draft_followup: c.draft_followup,
@@ -582,11 +585,18 @@ app.post('/api/leads/save', async (req, res) => {
 app.post('/api/reveal-email', async (req, res) => {
   try {
     const apolloId = (req.body.apollo_id || '').trim();
+    const contactId = req.body.contact_id || null;
     if (!apolloId) return res.status(400).json({ error: 'No apollo_id provided' });
     if (!apolloConfigured()) return res.status(400).json({ error: 'Apollo API key not configured' });
 
     const result = await revealPersonEmail(apolloId, config.APOLLO_API_KEY);
     if (result.error) return res.status(502).json({ error: result.error });
+
+    // Persist revealed email so it survives page reload
+    if (contactId && result.email && !result.email.startsWith('(')) {
+      await updateContact(contactId, { email: result.email });
+    }
+
     res.json({ email: result.email });
   } catch (err) {
     res.status(500).json({ error: err.message });
