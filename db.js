@@ -674,7 +674,7 @@ module.exports = {
   upsertCompany, findCompanyByName, getCompany, listCompanies, getCompanyContacts,
   // contacts
   insertContact, listContacts, getContact, listContactsByCompany, deleteContact,
-  updateContactDraft, findExistingContact, upsertContact, splitName,
+  updateContact, updateContactDraft, findExistingContact, upsertContact, splitName,
   searchContacts, filterContacts, patchContactCrmFields, logContactActivity, listContactActivity,
   // business cards
   insertBusinessCard, listBusinessCardsForContact,
