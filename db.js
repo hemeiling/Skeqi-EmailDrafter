@@ -188,6 +188,25 @@ async function initDb() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // email_history must exist before we migrate from it
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_history (
+      id SERIAL PRIMARY KEY,
+      contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+      company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+      from_email TEXT,
+      from_name TEXT,
+      to_email TEXT,
+      subject TEXT,
+      body TEXT,
+      sent_at TIMESTAMPTZ,
+      category TEXT DEFAULT 'other',
+      source TEXT DEFAULT 'manual_paste',
+      review_needed BOOLEAN DEFAULT FALSE,
+      raw_payload TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
   // Migrate email_drafts → communications (idempotent via conflict guard)
   await pool.query(`
     INSERT INTO communications
@@ -216,25 +235,6 @@ async function initDb() {
       WHERE c.comm_type = 'imported_email'
         AND LOWER(COALESCE(c.from_email,'')) = LOWER(COALESCE(eh.from_email,''))
         AND LOWER(COALESCE(c.subject,'')) = LOWER(COALESCE(eh.subject,''))
-    )
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS email_history (
-      id SERIAL PRIMARY KEY,
-      contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
-      company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
-      from_email TEXT,
-      from_name TEXT,
-      to_email TEXT,
-      subject TEXT,
-      body TEXT,
-      sent_at TIMESTAMPTZ,
-      category TEXT DEFAULT 'other',
-      source TEXT DEFAULT 'manual_paste',
-      review_needed BOOLEAN DEFAULT FALSE,
-      raw_payload TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 }
