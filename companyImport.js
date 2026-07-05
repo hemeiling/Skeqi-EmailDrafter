@@ -116,4 +116,4 @@ async function parseCompanyFile(buffer, filename) {
   return parseCsvCompanies(buffer);
 }
 
-module.exports = { parseCompanyFile, parseCsvCompanies, parseXlsxCompanies, parsePriority, CSV_COLS };
+module.exports = { parseCompanyFile };

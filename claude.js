@@ -316,4 +316,4 @@ async function draftEmail(contact, sender, mode, context) {
   }
 }
 
-module.exports = { draftEmail, isConfigured, listDraftModes, buildPromptForMode };
+module.exports = { draftEmail, listDraftModes };

@@ -71,6 +71,7 @@ new API key or service later, it gets one line in `config.js`, not scattered
 `process.env.X` calls across the codebase.
 
 ```
+DATABASE_URL=       # PostgreSQL connection string (required) -- Neon free tier works
 APOLLO_API_KEY=     # Apollo.io API key -- enables card enrichment + lead search
 CLAUDE_API_KEY=     # Anthropic API key -- enables AI email drafting
 APP_USERNAME=       # optional login gate username
@@ -93,7 +94,8 @@ PORT=               # optional, defaults to 3000
 
 ## Requirements
 
-- Node.js **22.5+** (built-in `node:sqlite`). Check with `node -v`.
+- Node.js **22+**. Check with `node -v`.
+- A PostgreSQL database (`DATABASE_URL` env var). [Neon](https://neon.tech) free tier works great.
 - Internet access on first run (Tesseract.js downloads its OCR language
   model once, then caches it).
 
@@ -208,7 +210,7 @@ whether it's a header-naming mismatch or simply the wrong kind of file
 
 ## One unified SQL database
 
-Single SQLite file (`contacts.db`), one schema:
+Single PostgreSQL database (hosted on Neon, schema auto-created on first startup):
 
 | Table | Purpose |
 |---|---|
@@ -228,7 +230,7 @@ Single SQLite file (`contacts.db`), one schema:
 card-scanner/
 ├── config.js          Centralized env var loading -- the ONLY file that reads process.env
 ├── server.js           Express server + all API routes + login gate
-├── db.js               SQLite schema + all data access + CRM helpers
+├── db.js               PostgreSQL schema + all data access + CRM helpers
 ├── companyImport.js     CSV/XLSX company-list parsing
 ├── cardBatch.js          Batch upload: HEIC conversion + multi-page PDF rasterization
 ├── parse.js             OCR text -> structured card fields

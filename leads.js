@@ -266,11 +266,4 @@ async function doCompanySearch(company, apiKey, page = 1) {
 
 const CRM_FIELDS = ['name', 'title', 'company', 'department', 'email', 'linkedin', 'confidence', 'relevance', 'location'];
 
-module.exports = {
-  doCompanySearch,
-  CRM_FIELDS,
-  formatPerson,
-  getConfidenceScore,
-  getRelevanceTag,
-  isLeadershipContact
-};
+module.exports = { doCompanySearch, CRM_FIELDS };
