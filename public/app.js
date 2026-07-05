@@ -688,14 +688,22 @@ async function autoProcessContacts() {
     const { c, i } = revealable[r];
     label.textContent = `Revealing emails… ${r + 1} / ${revealable.length}`;
     fill.style.width = Math.round((r / (revealable.length + total)) * 100) + "%";
-    if (!c.apollo_id) continue;
+    if (!c.apollo_id && !c.contact_id) continue;
     try {
-      const resp = await fetch("/api/reveal-email", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apollo_id: c.apollo_id, contact_id: c.contact_id }),
-      });
-      const d = await resp.json();
-      if (d.email) _currentContacts[i].email = d.email;
+      let d;
+      if (c.contact_id) {
+        const resp = await fetch(`/api/contacts/${c.contact_id}/enrich-email`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+        });
+        d = await resp.json();
+      } else {
+        const resp = await fetch("/api/reveal-email", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apollo_id: c.apollo_id }),
+        });
+        d = await resp.json();
+      }
+      if (d.email && !d.email.startsWith("(")) _currentContacts[i].email = d.email;
     } catch (e) { /* skip */ }
   }
 
@@ -742,17 +750,25 @@ async function revealEmail(idx) {
   const contact = _currentContacts[idx];
   if (!contact) return;
   const cell = document.getElementById(`email-cell-${idx}`);
-  if (!contact.apollo_id) {
+  if (!contact.apollo_id && !contact.contact_id) {
     if (cell) cell.innerHTML = `<span class="email-note">No Apollo ID — cannot reveal</span>`;
     return;
   }
   if (cell) cell.innerHTML = '<span class="spinner"></span> Revealing…';
   try {
-    const r = await fetch("/api/reveal-email", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apollo_id: contact.apollo_id, contact_id: contact.contact_id }),
-    });
-    const d = await r.json();
+    let d;
+    if (contact.contact_id) {
+      const r = await fetch(`/api/contacts/${contact.contact_id}/enrich-email`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+      });
+      d = await r.json();
+    } else {
+      const r = await fetch("/api/reveal-email", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apollo_id: contact.apollo_id }),
+      });
+      d = await r.json();
+    }
     if (d.error) {
       if (cell) cell.innerHTML = `<span class="email-note">Error: ${escapeHtml(d.error)}</span>`;
       return;
@@ -1494,13 +1510,13 @@ async function openContactDetailModal(c) {
 
 async function enrichCrmEmail(idx) {
   const c = _crmContacts[idx];
-  if (!c || !c.apollo_person_id) return;
+  if (!c || !c.id) return;
   const cell = document.getElementById(`crm-email-cell-${idx}`);
   if (cell) cell.innerHTML = `<span style="font-size:0.73rem;color:#6b7280;">Enriching…</span>`;
   try {
-    const r = await fetch("/api/reveal-email", {
+    // Smart endpoint: checks stored apollo_raw_json first (free), then reveal API
+    const r = await fetch(`/api/contacts/${c.id}/enrich-email`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apollo_id: c.apollo_person_id, contact_id: c.id }),
     });
     const d = await r.json();
     if (d.email && !d.email.startsWith("(")) {

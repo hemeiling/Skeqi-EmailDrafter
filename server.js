@@ -24,6 +24,7 @@ const {
   buildCacheKey,
   fetchApolloPerson,
   summarizeApolloPerson,
+  extractApolloEmail,
   revealPersonEmail
 } = require('./apollo');
 const { doCompanySearch, CRM_FIELDS } = require('./leads');
@@ -530,16 +531,20 @@ app.post('/api/leads/search', async (req, res) => {
       const companyId = companyResult ? companyResult.id : null;
 
       for (const c of contacts) {
-        const cleanEmail = c.email && !String(c.email).includes('N/A') && !String(c.email).includes('not returned') ? c.email : '';
+        const cleanEmail = c.email && !String(c.email).startsWith('(') && !String(c.email).includes('N/A') ? c.email : '';
+        const rawJson = c._apollo_raw ? JSON.stringify(c._apollo_raw) : undefined;
+        console.log(`[leads/search] ${c.name} @ ${c.company}: apollo_email_fields={email:${JSON.stringify(c._apollo_raw && c._apollo_raw.email)}, personal_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.personal_emails)}, business_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.business_emails)}, has_email:${c._apollo_raw && c._apollo_raw.has_email}} cleanEmail=${JSON.stringify(cleanEmail)}`);
         const { id, updated } = await upsertContact({
           full_name: c.name, job_title: c.title, department: c.department, seniority: c.seniority,
           company: c.company, website: c.company_website,
           email: cleanEmail, linkedin_url: c.linkedin, address: c.location,
           confidence: c.confidence, relevance: c.relevance,
           apollo_person_id: c.apollo_id, source: 'apollo',
-          has_email: Boolean(c.has_email) || Boolean(cleanEmail)
+          has_email: Boolean(c.has_email) || Boolean(cleanEmail),
+          apollo_raw_json: rawJson
         });
         c.contact_id = id;
+        console.log(`[leads/search] -> contact_id=${id} updated=${updated} email_saved=${JSON.stringify(cleanEmail)}`);
         await logContactActivity(id, 'apollo_search', updated ? `Refreshed via Apollo search for ${companyName}` : `Found via Apollo search for ${companyName}`);
       }
 
@@ -608,6 +613,116 @@ app.post('/api/reveal-email', async (req, res) => {
     }
 
     res.json({ email: result.email });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/contacts/:id/enrich-email
+// Smart enrich: checks apollo_raw_json first (free), then falls back to reveal API.
+app.post('/api/contacts/:id/enrich-email', async (req, res) => {
+  try {
+    const contactId = Number(req.params.id);
+    const contact = await getContact(contactId);
+    if (!contact) return res.status(404).json({ error: 'Contact not found' });
+
+    if (contact.email) {
+      return res.json({ ok: true, email: contact.email, source: 'neon_cached' });
+    }
+
+    let email = '';
+    let source = '';
+
+    // Step 1: try to extract from stored apollo_raw_json (free, no API call)
+    if (contact.apollo_raw_json) {
+      try {
+        const rawPerson = JSON.parse(contact.apollo_raw_json);
+        const candidate = extractApolloEmail(rawPerson);
+        if (candidate) { email = candidate; source = 'apollo_raw_json'; }
+        console.log(`[enrich-email] contact_id=${contactId} raw_json_check: email=${JSON.stringify(candidate)}`);
+      } catch (e) {
+        console.warn(`[enrich-email] contact_id=${contactId} failed to parse apollo_raw_json: ${e.message}`);
+      }
+    }
+
+    // Step 2: if still missing and we have an Apollo ID, call the reveal API
+    if (!email && contact.apollo_person_id) {
+      if (!apolloConfigured()) {
+        return res.json({ ok: true, email: '', message: 'Apollo not configured' });
+      }
+      console.log(`[enrich-email] contact_id=${contactId} calling reveal for apollo_id=${contact.apollo_person_id}`);
+      const result = await revealPersonEmail(contact.apollo_person_id, config.APOLLO_API_KEY);
+      if (result.error) {
+        return res.status(502).json({ error: result.error });
+      }
+      if (result.email && !result.email.startsWith('(')) {
+        email = result.email;
+        source = 'apollo_reveal';
+        // Also save the raw reveal response for future free lookups
+        if (result.raw) {
+          await updateContact(contactId, { email, apollo_raw_json: JSON.stringify(result.raw) });
+        } else {
+          await updateContact(contactId, { email });
+        }
+      }
+    } else if (email) {
+      await updateContact(contactId, { email });
+    }
+
+    console.log(`[enrich-email] contact_id=${contactId} result: email=${JSON.stringify(email)} source=${source}`);
+    res.json({ ok: true, email, source });
+  } catch (err) {
+    console.error('Enrich email error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/debug/contact/:id — diagnostic info for an individual contact
+app.get('/api/debug/contact/:id', async (req, res) => {
+  try {
+    const contact = await getContact(Number(req.params.id));
+    if (!contact) return res.status(404).json({ error: 'Not found' });
+
+    let rawEmailFields = null;
+    if (contact.apollo_raw_json) {
+      try {
+        const raw = JSON.parse(contact.apollo_raw_json);
+        rawEmailFields = {
+          email: raw.email,
+          email_address: raw.email_address,
+          work_email: raw.work_email,
+          personal_emails: raw.personal_emails,
+          business_emails: raw.business_emails,
+          has_email: raw.has_email,
+          extractedEmail: extractApolloEmail(raw)
+        };
+      } catch (e) { rawEmailFields = { parseError: e.message }; }
+    }
+
+    res.json({
+      contact: {
+        id: contact.id,
+        full_name: contact.full_name,
+        company: contact.company,
+        email: contact.email,
+        has_email: contact.has_email,
+        apollo_person_id: contact.apollo_person_id,
+        has_apollo_raw_json: Boolean(contact.apollo_raw_json),
+        source: contact.source
+      },
+      apollo_raw_email_fields: rawEmailFields,
+      diagnosis: {
+        emailInNeon: Boolean(contact.email),
+        hasApolloId: Boolean(contact.apollo_person_id),
+        hasRawJson: Boolean(contact.apollo_raw_json),
+        emailInRawJson: Boolean(rawEmailFields && rawEmailFields.extractedEmail),
+        recommendation: contact.email
+          ? 'Email already stored in Neon — no action needed'
+          : contact.apollo_person_id
+            ? 'POST /api/contacts/:id/enrich-email to fetch via Apollo'
+            : 'No Apollo ID — manual entry required'
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

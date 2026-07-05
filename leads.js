@@ -113,8 +113,18 @@ function extractName(person) {
 }
 
 function extractEmail(person) {
-  const email = person.email || person.email_address || person.work_email;
-  if (email) return email;
+  // Check every field name Apollo has used across API versions and endpoints
+  if (person.email) return person.email;
+  if (person.email_address) return person.email_address;
+  if (person.work_email) return person.work_email;
+  const personal = Array.isArray(person.personal_emails)
+    ? person.personal_emails.find(e => e && !String(e).includes('catch-all'))
+    : null;
+  if (personal) return personal;
+  const business = Array.isArray(person.business_emails)
+    ? person.business_emails.find(e => e && !String(e).includes('catch-all'))
+    : null;
+  if (business) return business;
   if (person.has_email) return '(email available via Apollo, not returned in payload)';
   return 'N/A';
 }
@@ -166,7 +176,8 @@ function formatPerson(person, companyHint = '') {
     relevance: getRelevanceTag(title, dept),
     location,
     apollo_id: person.id || '',
-    has_email: hasEmail
+    has_email: hasEmail,
+    _apollo_raw: person
   };
 }
 

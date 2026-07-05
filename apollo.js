@@ -97,6 +97,24 @@ async function fetchApolloPerson(scannedFields) {
   }
 }
 
+// Extracts the best available email from any Apollo person object, checking
+// every field name Apollo has used across API versions and endpoints.
+function extractApolloEmail(person) {
+  if (!person) return '';
+  if (person.email) return person.email;
+  if (person.email_address) return person.email_address;
+  if (person.work_email) return person.work_email;
+  const personal = Array.isArray(person.personal_emails)
+    ? person.personal_emails.find(e => e && !String(e).includes('catch-all'))
+    : null;
+  if (personal) return personal;
+  const business = Array.isArray(person.business_emails)
+    ? person.business_emails.find(e => e && !String(e).includes('catch-all'))
+    : null;
+  if (business) return business;
+  return '';
+}
+
 // Reduces Apollo's (large, deeply-nested) raw person object down to the
 // handful of fields the review form actually merges into the contact.
 // The full raw object is stored separately (see server.js) so nothing is lost.
@@ -106,7 +124,7 @@ function summarizeApolloPerson(person) {
   return {
     person_id: person.id || '',
     title: person.title || '',
-    email: person.email || '',
+    email: extractApolloEmail(person),
     linkedin_url: person.linkedin_url || '',
     twitter_url: person.twitter_url || '',
     photo_url: person.photo_url || '',
@@ -144,8 +162,8 @@ async function revealPersonEmail(apolloId, apiKey) {
     }
     const data = await res.json();
     const person = data.person || {};
-    const email = person.email || person.email_address || person.work_email || '';
-    return { email };
+    const email = extractApolloEmail(person);
+    return { email, raw: person };
   } catch (err) {
     return { error: err.message };
   }
@@ -158,5 +176,6 @@ module.exports = {
   buildCacheKey,
   fetchApolloPerson,
   summarizeApolloPerson,
+  extractApolloEmail,
   revealPersonEmail
 };
