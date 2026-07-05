@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Apollo Leadership Contact Search</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      font-size: 14px; color: #1a1a1a; background: #f8f9fa; min-height: 100vh;
+      padding-bottom: 42px;
+    }
+
+    header {
+      background: #1a2e4a; color: #fff; padding: 16px 32px;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      flex-wrap: wrap;
+    }
+    header h1 { font-size: 1.2rem; font-weight: 600; letter-spacing: 0.01em; }
+    header .subtitle { font-size: 0.8rem; color: #8ba3c0; margin-top: 2px; }
+    .btn-scan-card {
+      background: #ea580c; color: #fff; border: none; border-radius: 6px;
+      padding: 9px 18px; font-size: 13px; font-weight: 600; cursor: pointer;
+      white-space: nowrap; display: flex; align-items: center; gap: 6px;
+    }
+    .btn-scan-card:hover { background: #c2410c; }
+
+    .container { max-width: 1280px; margin: 0 auto; padding: 24px 32px; }
+
+    .card {
+      background: #fff; border: 1px solid #e0e4ea;
+      border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;
+    }
+    .card-title {
+      font-size: 0.85rem; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.06em; color: #555; margin-bottom: 14px;
+      cursor: pointer; user-select: none;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .card-title .toggle-icon { font-size: 0.7rem; color: #999; }
+
+    .sender-grid {
+      display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;
+    }
+    .sender-grid label { display: block; font-size: 0.8rem; color: #555; margin-bottom: 4px; }
+
+    input[type="text"] {
+      width: 100%; padding: 8px 12px; border: 1px solid #d1d5db;
+      border-radius: 6px; font-size: 14px; color: #1a1a1a;
+      transition: border-color 0.15s; background: #fff;
+    }
+    input[type="text"]:focus {
+      outline: none; border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+    }
+
+    button {
+      padding: 8px 18px; border: none; border-radius: 6px;
+      font-size: 14px; font-weight: 500; cursor: pointer;
+      transition: background 0.15s, opacity 0.15s; white-space: nowrap;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+    .btn-sm { padding: 5px 12px; font-size: 12px; }
+    .btn-ghost { background: transparent; color: #2563eb; border: 1px solid #2563eb; }
+    .btn-ghost:hover { background: #eff6ff; }
+    .btn-orange { background: #ea580c; color: #fff; }
+    .btn-orange:hover:not(:disabled) { background: #c2410c; }
+
+    .search-row { display: flex; gap: 10px; align-items: flex-end; }
+    .search-row .input-wrap { flex: 1; }
+    .search-row label { display: block; font-size: 0.8rem; color: #555; margin-bottom: 4px; }
+
+    /* ── CSV/Excel upload area ── */
+    .upload-zone {
+      border: 2px dashed #cbd5e1; border-radius: 8px;
+      padding: 28px; text-align: center; cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      background: #f8fafc;
+    }
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: #2563eb; background: #eff6ff;
+    }
+    .upload-zone input[type="file"] { display: none; }
+    .upload-icon { font-size: 2rem; margin-bottom: 8px; color: #94a3b8; }
+    .upload-hint { font-size: 0.82rem; color: #64748b; margin-top: 4px; }
+    .upload-hint code { background: #e2e8f0; padding: 1px 5px; border-radius: 3px; }
+
+    /* ── Company list panel (shown after upload) ── */
+    #csv-panel { display: none; }
+    .csv-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 12px; flex-wrap: wrap; gap: 8px;
+    }
+    .csv-count { font-size: 0.85rem; color: #555; }
+    .csv-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .csv-search-wrap { margin-bottom: 10px; }
+
+    .priority-stars { color: #f59e0b; font-size: 0.85rem; letter-spacing: -1px; }
+    .priority-0 { color: #cbd5e1; }
+
+    .company-table td, .company-table th { font-size: 0.82rem; }
+    .company-table .col-check { width: 32px; }
+    .company-table .col-prio { width: 70px; text-align: center; }
+    .company-table .col-booth { width: 60px; }
+    .company-table .col-opp { max-width: 280px; }
+    .opp-text {
+      max-width: 280px; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; color: #555; font-size: 0.78rem;
+    }
+    .tip-text { color: #6b7280; font-size: 0.78rem; }
+
+    /* Progress bar for batch search */
+    #batch-progress { display: none; margin-bottom: 14px; }
+    .progress-bar-wrap {
+      background: #e5e7eb; border-radius: 4px; height: 8px; overflow: hidden;
+    }
+    .progress-bar-fill {
+      background: #2563eb; height: 100%;
+      border-radius: 4px; transition: width 0.3s;
+    }
+    .progress-label { font-size: 0.8rem; color: #555; margin-bottom: 4px; }
+
+    /* ── Messages ── */
+    #messages { margin-bottom: 14px; }
+    .msg-info {
+      background: #eff6ff; border: 1px solid #bfdbfe;
+      color: #1e40af; padding: 10px 14px; border-radius: 6px;
+      font-size: 0.85rem; margin-bottom: 8px;
+    }
+    .msg-warn {
+      background: #fffbeb; border: 1px solid #fde68a;
+      color: #92400e; padding: 10px 14px; border-radius: 6px;
+      font-size: 0.85rem; margin-bottom: 8px;
+    }
+    .msg-error {
+      background: #fef2f2; border: 1px solid #fecaca;
+      color: #991b1b; padding: 10px 14px; border-radius: 6px;
+      font-size: 0.85rem; margin-bottom: 8px;
+    }
+    .msg-cache {
+      background: #f0fdf4; border: 1px solid #86efac;
+      color: #166534; padding: 10px 14px; border-radius: 6px;
+      font-size: 0.85rem; margin-bottom: 8px;
+    }
+
+    /* ── Export bar ── */
+    #export-bar {
+      background: #f0fdf4; border: 1px solid #bbf7d0;
+      border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; display: none;
+    }
+    .export-label { font-size: 0.8rem; color: #166534; font-weight: 600; margin-bottom: 8px; }
+    .export-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+    .export-buttons a, .export-buttons button {
+      font-size: 12px; padding: 5px 12px; text-decoration: none;
+      background: #fff; border: 1px solid #d1d5db; border-radius: 5px;
+      color: #1a1a1a; cursor: pointer;
+    }
+    .export-buttons a:hover, .export-buttons button:hover { background: #f3f4f6; }
+    .export-sep { color: #9ca3af; display: flex; align-items: center; padding: 0 4px; font-size: 11px; }
+
+    /* ── Contact results table ── */
+    #results { margin-top: 8px; }
+    .results-header {
+      display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;
+      flex-wrap: wrap; gap: 8px;
+    }
+    .results-count { font-size: 0.85rem; color: #555; }
+
+    .table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid #e0e4ea; }
+    table { width: 100%; border-collapse: collapse; background: #fff; }
+    thead { background: #f1f5f9; }
+    th {
+      padding: 10px 12px; text-align: left; font-size: 0.75rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.05em; color: #475569;
+      white-space: nowrap; border-bottom: 1px solid #e0e4ea;
+    }
+    td {
+      padding: 10px 12px; font-size: 0.85rem;
+      border-bottom: 1px solid #f1f5f9; vertical-align: middle;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f8fafc; }
+
+    .badge {
+      display: inline-block; padding: 2px 8px;
+      border-radius: 12px; font-size: 0.72rem; font-weight: 600;
+    }
+    .badge-dm { background: #dbeafe; color: #1e40af; }
+    .badge-eb { background: #dcfce7; color: #166534; }
+    .badge-ti { background: #fef3c7; color: #92400e; }
+    .badge-ch { background: #f3e8ff; color: #6b21a8; }
+    .badge-source { background: #e0e7ff; color: #3730a3; }
+
+    .confidence-bar { display: flex; align-items: center; gap: 6px; }
+    .conf-track { width: 56px; height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; }
+    .conf-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, #22c55e, #84cc16); }
+    .conf-fill.med { background: linear-gradient(90deg, #f59e0b, #eab308); }
+    .conf-fill.low { background: linear-gradient(90deg, #ef4444, #f97316); }
+    .conf-num { font-size: 0.75rem; color: #555; min-width: 24px; }
+
+    .linkedin-link { color: #0a66c2; text-decoration: none; font-size: 0.8rem; }
+    .linkedin-link:hover { text-decoration: underline; }
+    .email-note { color: #6b7280; font-style: italic; font-size: 0.8rem; }
+    .btn-reveal { background: #f0fdf4; color: #166534; border: 1px solid #86efac; padding: 2px 8px; font-size: 11px; border-radius: 4px; cursor: pointer; margin-left: 4px; }
+    .btn-reveal:hover { background: #dcfce7; }
+
+    .org-table th { background: #fdf4ff; color: #581c87; }
+
+    #pagination { display: flex; gap: 8px; margin-top: 16px; justify-content: center; }
+    #pagination button { min-width: 80px; }
+
+    /* ── Spinner ── */
+    .spinner {
+      display: inline-block; width: 18px; height: 18px;
+      border: 2px solid #e5e7eb; border-top-color: #2563eb;
+      border-radius: 50%; animation: spin 0.6s linear infinite;
+      vertical-align: middle; margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Modals (email draft + scan business card) ── */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.45); z-index: 1000;
+      align-items: center; justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: #fff; border-radius: 10px;
+      width: min(680px, 94vw); max-height: 90vh;
+      overflow-y: auto; padding: 28px 32px;
+      position: relative; box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+    }
+    .modal-wide { width: min(780px, 96vw); }
+    .modal-close {
+      position: absolute; top: 14px; right: 16px;
+      background: none; border: none; font-size: 1.4rem;
+      color: #666; cursor: pointer; line-height: 1; padding: 4px 8px; border-radius: 4px;
+    }
+    .modal-close:hover { background: #f3f4f6; color: #1a1a1a; }
+    .modal h2 { font-size: 1.05rem; margin-bottom: 6px; }
+    .modal .contact-info { font-size: 0.8rem; color: #555; margin-bottom: 18px; }
+
+    .draft-section { margin-bottom: 16px; }
+    .draft-label {
+      font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.06em; color: #555; margin-bottom: 4px;
+    }
+    .draft-value {
+      background: #f8f9fa; border: 1px solid #e0e4ea; border-radius: 6px;
+      padding: 10px 14px; font-size: 0.88rem; line-height: 1.5;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .draft-note { font-size: 0.78rem; color: #f59e0b; margin-top: 6px; }
+
+    .modal-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px; }
+    .copy-btn { background: #f3f4f6; color: #1a1a1a; border: 1px solid #d1d5db; }
+    .copy-btn:hover { background: #e5e7eb; }
+    .copy-btn.copied { background: #dcfce7; border-color: #86efac; color: #166534; }
+
+    /* ── Scan Business Card modal specifics ── */
+    .viewfinder {
+      position: relative; width: 100%; aspect-ratio: 16/10;
+      border-radius: 8px; background: #0c0e12; overflow: hidden;
+      display: flex; align-items: center; justify-content: center; margin-bottom: 14px;
+    }
+    .viewfinder img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .viewfinder .placeholder { color: #94a3b8; font-size: 0.82rem; text-align: center; padding: 0 20px; }
+    .corner { position: absolute; width: 20px; height: 20px; border: 2px solid #ea580c; opacity: 0.9; }
+    .corner.tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+    .corner.tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+    .corner.bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
+    .corner.br { bottom: 8px; right: 8px; border-left: none; border-top: none; }
+    .scanline {
+      position: absolute; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, transparent, #ea580c, transparent);
+      box-shadow: 0 0 10px 2px #ea580c; top: 0; display: none;
+    }
+    .scanning .scanline { display: block; animation: sweep 1.5s ease-in-out infinite; }
+    @keyframes sweep { 0% { top: 6%; } 50% { top: 92%; } 100% { top: 6%; } }
+    .scan-status-line { font-size: 0.8rem; color: #ea580c; margin-bottom: 10px; min-height: 16px; }
+    .scan-actions { display: flex; gap: 10px; margin-bottom: 16px; }
+    .review-form { display: none; }
+    .review-form.visible { display: block; }
+    .review-form .field { margin-bottom: 10px; }
+    .review-form .field label {
+      display: block; font-size: 0.78rem; color: #555; margin-bottom: 3px;
+    }
+    .review-form .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .badge-green { background: #dcfce7; color: #166534; }
+    .matched-banner {
+      background: #f0fdf4; border: 1px solid #86efac; color: #166534;
+      padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; margin-bottom: 12px; display: none;
+    }
+    .raw-toggle { font-size: 0.76rem; color: #6b7280; cursor: pointer; text-decoration: underline; display: inline-block; margin: 6px 0; }
+    .raw-text {
+      display: none; white-space: pre-wrap; font-size: 0.76rem; color: #555;
+      background: #f8f9fa; border-radius: 6px; padding: 8px; margin-bottom: 10px;
+      max-height: 140px; overflow-y: auto;
+    }
+    .raw-text.visible { display: block; }
+
+    @media (max-width: 700px) {
+      .container { padding: 16px; }
+      .sender-grid { grid-template-columns: 1fr; }
+      header { padding: 14px 16px; }
+      .csv-actions { flex-direction: column; align-items: flex-start; }
+      .review-form .field-row { grid-template-columns: 1fr; }
+    }
+
+    /* ── Usage bar (fixed bottom) ── */
+    #usage-bar {
+      position: fixed; bottom: 0; left: 0; right: 0; z-index: 500;
+      background: #1a2e4a; color: #c8d8eb;
+      padding: 7px 24px; font-size: 0.76rem;
+      display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+      border-top: 1px solid #243d5c;
+    }
+    #usage-bar .u-label { color: #8ba3c0; font-weight: 700; text-transform: uppercase; font-size: 0.68rem; letter-spacing: 0.06em; margin-right: 2px; }
+    #usage-bar .u-cost  { color: #4ade80; font-weight: 700; }
+    #usage-bar .u-sep   { color: #3d5a7a; }
+    #usage-bar .u-reset {
+      margin-left: auto; background: none; border: 1px solid #3d5a7a;
+      color: #8ba3c0; padding: 3px 10px; border-radius: 4px;
+      font-size: 0.72rem; cursor: pointer; transition: background 0.15s;
+    }
+    #usage-bar .u-reset:hover { background: #243d5c; color: #fff; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Apollo Leadership Contact Search</h1>
+    <div class="subtitle">Upload a company list or type a name → find VP+/C-suite contacts → draft outreach emails</div>
+  </div>
+  <button class="btn-scan-card" id="open-scan-modal-btn">📇 Scan Business Card</button>
+</header>
+
+<div class="container">
+
+  <!-- ── Sender profile card ── -->
+  <div class="card">
+    <div class="card-title">Your Profile <span style="font-weight:400;font-size:0.82rem;color:#9ca3af">(used to personalise outreach emails)</span></div>
+    <div class="sender-grid">
+      <div>
+        <label for="sender-name">Your Name</label>
+        <input type="text" id="sender-name" placeholder="e.g. Sarah Chen" />
+      </div>
+      <div>
+        <label for="sender-title">Your Title</label>
+        <input type="text" id="sender-title" placeholder="e.g. VP of Business Development" />
+      </div>
+      <div>
+        <label for="sender-company">Your Company</label>
+        <input type="text" id="sender-company" placeholder="e.g. Acme Energy Solutions" />
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Company list upload card ── -->
+  <div class="card">
+    <div class="card-title">Upload Company List (CSV or Excel)</div>
+    <div class="upload-zone" id="upload-zone">
+      <input type="file" id="csv-file" accept=".csv,.xlsx,.xls,text/csv" />
+      <div class="upload-icon">📋</div>
+      <div><strong>Click to browse</strong> or drag-and-drop your CSV/Excel file here</div>
+      <div class="upload-hint">
+        Expects columns: <code>英文名</code> (required), <code>优先级</code>, <code>参与机会</code>, <code>联系建议</code>, etc.
+      </div>
+    </div>
+
+    <!-- Company list — shown after upload -->
+    <div id="csv-panel" style="display:none; margin-top:18px;">
+      <div class="csv-header">
+        <div class="csv-count" id="csv-count"></div>
+        <div class="csv-actions">
+          <label style="font-size:0.8rem;color:#555;cursor:pointer">
+            <input type="checkbox" id="csv-select-all"> Select all
+          </label>
+          <button class="btn-sm btn-ghost" id="filter-3star">⭐⭐⭐ Only</button>
+          <button class="btn-sm btn-ghost" id="filter-2star">⭐⭐+ Only</button>
+          <button class="btn-sm btn-ghost" id="filter-all">Show all</button>
+          <label style="font-size:0.78rem;color:#888;cursor:pointer" title="Ignore saved local data and re-fetch from Apollo">
+            <input type="checkbox" id="force-refresh"> Force refresh
+          </label>
+          <button class="btn-orange btn-sm" id="csv-search-btn">Search Selected</button>
+        </div>
+      </div>
+      <div class="csv-search-wrap">
+        <input type="text" id="csv-filter-input" placeholder="Search this table by name, industry, booth…" />
+      </div>
+      <div class="table-wrap">
+        <table class="company-table">
+          <thead>
+            <tr>
+              <th class="col-check"></th>
+              <th class="col-booth">Booth</th>
+              <th class="col-prio">Priority</th>
+              <th>Company (EN)</th>
+              <th>Company (中文)</th>
+              <th>Industry</th>
+              <th class="col-opp">Engagement Opportunity</th>
+              <th>Contact Tip</th>
+            </tr>
+          </thead>
+          <tbody id="csv-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Manual search card ── -->
+  <div class="card">
+    <div class="card-title">Manual Search</div>
+    <div class="search-row">
+      <div class="input-wrap">
+        <label for="company-input">Company name(s) <span style="color:#9ca3af">(comma-separated for multiple)</span></label>
+        <input type="text" id="company-input" placeholder="e.g. CATL, BYD, Tesla" />
+      </div>
+      <button class="btn-primary" id="search-btn">Search</button>
+    </div>
+  </div>
+
+  <!-- ── CRM: saved contacts & companies ── -->
+  <div class="card">
+    <div class="card-title" id="crm-toggle">
+      CRM — Saved Contacts &amp; Companies
+      <span class="toggle-icon" id="crm-toggle-icon">▼</span>
+    </div>
+    <div id="crm-body">
+      <div class="search-row" style="margin-bottom:14px;">
+        <div class="input-wrap">
+          <label for="crm-search-input">Look up existing contacts or companies</label>
+          <input type="text" id="crm-search-input" placeholder="Search by name, company, email, or tag…" />
+        </div>
+        <button class="btn-ghost" id="crm-refresh-btn">Refresh</button>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
+        <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Event</label><input type="text" id="crm-filter-event" placeholder="e.g. Battery Show" style="font-size:12px;padding:6px 8px;" /></div>
+        <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Industry</label><input type="text" id="crm-filter-industry" placeholder="e.g. Battery" style="font-size:12px;padding:6px 8px;" /></div>
+        <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Follow-up status</label>
+          <select id="crm-filter-status" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;background:#fff;">
+            <option value="">Any</option>
+            <option value="not_contacted">Not contacted</option>
+            <option value="contacted">Contacted</option>
+            <option value="replied">Replied</option>
+            <option value="meeting_scheduled">Meeting scheduled</option>
+            <option value="closed">Closed</option>
+          </select>
+        </div>
+        <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Salesperson</label><input type="text" id="crm-filter-owner" placeholder="e.g. Sarah Chen" style="font-size:12px;padding:6px 8px;" /></div>
+      </div>
+      <button class="btn-sm btn-ghost" id="crm-apply-filters-btn" style="margin-bottom:14px;">Apply filters</button>
+      <button class="btn-sm btn-ghost" id="crm-clear-filters-btn" style="margin-bottom:14px;">Clear</button>
+
+      <div class="csv-header">
+        <div class="csv-count" id="crm-count"></div>
+        <div class="csv-actions">
+          <label style="font-size:0.8rem;color:#555;cursor:pointer">
+            <input type="checkbox" id="crm-select-all"> Select all
+          </label>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
+        <div>
+          <label style="display:block;font-size:0.8rem;color:#555;margin-bottom:4px;">Draft purpose/context</label>
+          <select id="crm-mode-select" style="width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff;"></select>
+        </div>
+        <div>
+          <label style="display:block;font-size:0.8rem;color:#555;margin-bottom:4px;">Additional instructions <span style="color:#9ca3af">(optional)</span></label>
+          <input type="text" id="crm-extra-instructions" placeholder="e.g. mention our new automation line" />
+        </div>
+      </div>
+      <button class="btn-orange btn-sm" id="crm-bulk-draft-btn" style="margin-bottom:14px;">Draft Emails for Selected</button>
+
+      <div class="table-wrap">
+        <table class="company-table">
+          <thead>
+            <tr>
+              <th class="col-check"></th>
+              <th>Name</th><th>Title</th><th>Company</th><th>Source</th>
+              <th>Tags</th><th>Status</th><th>Last Contacted</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="crm-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Contact detail editor modal (conference fields) ── -->
+  <div class="modal-overlay" id="contact-detail-modal">
+    <div class="modal">
+      <button class="modal-close" id="contact-detail-close" title="Close">×</button>
+      <h2>Edit Contact Details</h2>
+      <div class="contact-info" id="contact-detail-name"></div>
+
+      <div class="field-row">
+        <div class="field"><label>Event</label><input type="text" id="cd-event" /></div>
+        <div class="field"><label>Booth number</label><input type="text" id="cd-booth" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Meeting date</label><input type="date" id="cd-date" /></div>
+        <div class="field"><label>Interest level</label>
+          <select id="cd-interest" style="width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff;">
+            <option value="">Not set</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+        </div>
+      </div>
+      <div class="field"><label>Products discussed</label><input type="text" id="cd-products" /></div>
+      <div class="field"><label>Meeting notes</label><input type="text" id="cd-meeting-notes" /></div>
+      <div class="field"><label>Assigned salesperson</label><input type="text" id="cd-salesperson" /></div>
+
+      <button class="btn-primary" id="contact-detail-save-btn" style="width:100%;margin-top:10px;">Save details</button>
+    </div>
+  </div>
+
+  <!-- ── Batch progress ── -->
+  <div id="batch-progress">
+    <div class="progress-label" id="progress-label">Searching…</div>
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+    </div>
+  </div>
+
+  <!-- ── Status messages ── -->
+  <div id="messages"></div>
+
+  <!-- ── Export bar ── -->
+  <div id="export-bar" style="display:none">
+    <div class="export-label">Export</div>
+    <div class="export-buttons" id="export-buttons"></div>
+  </div>
+
+  <!-- ── Contact results ── -->
+  <div id="results"></div>
+  <div id="pagination"></div>
+
+</div>
+
+<!-- ── Fixed usage bar ── -->
+<div id="usage-bar">
+  <span><span class="u-label">Apollo</span>
+    <span id="u-apollo-people">0</span> people searches
+    <span class="u-sep">·</span>
+    <span id="u-apollo-org">0</span> org searches
+  </span>
+  <span class="u-sep">|</span>
+  <span><span class="u-label">Claude</span>
+    <span id="u-claude-calls">0</span> drafts
+    <span class="u-sep">·</span>
+    <span id="u-claude-in">0</span> in
+    <span class="u-sep">/</span>
+    <span id="u-claude-out">0</span> out tokens
+    <span class="u-sep">·</span>
+    Est. cost: <span class="u-cost" id="u-cost">$0.000000</span>
+  </span>
+  <button class="u-reset" id="usage-reset-btn">Reset counters</button>
+</div>
+
+<!-- ── Email draft modal ── -->
+<div class="modal-overlay" id="email-modal">
+  <div class="modal">
+    <button class="modal-close" id="email-modal-close" title="Close">×</button>
+    <h2 id="modal-title">Drafting email…</h2>
+    <div class="contact-info" id="modal-contact-info"></div>
+    <div id="modal-body">
+      <div style="text-align:center;padding:32px 0;">
+        <span class="spinner"></span> Generating email draft with Claude…
+      </div>
+    </div>
+    <div class="draft-section" style="border-top:1px solid #e0e4ea;padding-top:16px;margin-top:8px;">
+      <div class="draft-label">Redraft with a different purpose/context</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+        <select id="modal-mode-select" style="padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff;"></select>
+        <input type="text" id="modal-extra-instructions" placeholder="Additional instructions (optional)" />
+      </div>
+      <button class="btn-sm btn-ghost" id="modal-regenerate-btn">Regenerate</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Scan Business Card modal ── -->
+<div class="modal-overlay" id="scan-modal">
+  <div class="modal modal-wide">
+    <button class="modal-close" id="scan-modal-close" title="Close">×</button>
+    <h2>Scan Business Card</h2>
+    <div class="contact-info">Photograph or upload cards — OCR reads them, checks your saved contacts first, then Apollo if needed.</div>
+
+    <!-- ── Shared conference context (applies to every card scanned/uploaded below) ── -->
+    <div class="draft-section" style="background:#f8fafc;border:1px solid #e0e4ea;border-radius:8px;padding:12px 14px;margin-bottom:16px;">
+      <div class="draft-label" style="margin-bottom:8px;">Conference context <span style="font-weight:400;text-transform:none;color:#9ca3af;">(optional, applied to every card below)</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px;">
+        <div><label style="display:block;font-size:0.78rem;color:#555;margin-bottom:3px;">Event</label><input type="text" id="ctx-event" placeholder="e.g. The Battery Show 2026" /></div>
+        <div><label style="display:block;font-size:0.78rem;color:#555;margin-bottom:3px;">Booth number</label><input type="text" id="ctx-booth" placeholder="e.g. A12" /></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div><label style="display:block;font-size:0.78rem;color:#555;margin-bottom:3px;">Meeting date</label><input type="date" id="ctx-date" /></div>
+        <div><label style="display:block;font-size:0.78rem;color:#555;margin-bottom:3px;">Assigned salesperson</label><input type="text" id="ctx-salesperson" placeholder="e.g. Sarah Chen" /></div>
+      </div>
+    </div>
+
+    <!-- ── Mode toggle ── -->
+    <div class="tabs" style="display:flex;gap:6px;margin-bottom:16px;">
+      <button class="tab-btn active" id="mode-single-btn" style="flex:1;padding:9px;border-radius:6px;border:1px solid #d1d5db;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;">Single Card (Camera)</button>
+      <button class="tab-btn" id="mode-batch-btn" style="flex:1;padding:9px;border-radius:6px;border:1px solid #d1d5db;background:#fff;color:#555;font-weight:600;cursor:pointer;">Batch Upload</button>
+    </div>
+
+    <!-- ── SINGLE CARD MODE (unchanged camera-capture-then-review flow) ── -->
+    <div id="single-scan-panel">
+      <div class="viewfinder" id="viewfinder">
+        <div class="corner tl"></div>
+        <div class="corner tr"></div>
+        <div class="corner bl"></div>
+        <div class="corner br"></div>
+        <div class="scanline"></div>
+        <div class="placeholder" id="scan-placeholder">Tap "Scan a card" and photograph a business card</div>
+        <img id="scan-preview" style="display:none;" />
+      </div>
+
+      <div class="scan-status-line" id="scan-status-line"></div>
+
+      <div class="scan-actions">
+        <input type="file" id="scan-file-input" accept="image/*" capture="environment" style="display:none;" />
+        <button class="btn-orange" id="scan-btn">Scan a card</button>
+        <button class="btn-ghost" id="scan-retake-btn" style="display:none;">Retake</button>
+      </div>
+
+      <div class="review-form" id="scan-review-form">
+        <div class="matched-banner" id="matched-contact-banner">
+          already in your contacts — no Apollo lookup needed
+        </div>
+        <div style="margin-bottom:10px;">
+          <span class="badge badge-green" id="scan-enrich-badge" style="display:none;"></span>
+        </div>
+
+        <div class="field-row">
+          <div class="field"><label>Full name</label><input type="text" id="sf_name" /></div>
+          <div class="field"><label>Job title</label><input type="text" id="sf_title" /></div>
+        </div>
+        <div class="field"><label>Company</label><input type="text" id="sf_company" /></div>
+        <div class="field-row">
+          <div class="field"><label>Phone</label><input type="text" id="sf_phone" /></div>
+          <div class="field"><label>Email</label><input type="text" id="sf_email" /></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Website</label><input type="text" id="sf_website" /></div>
+          <div class="field"><label>LinkedIn</label><input type="text" id="sf_linkedin" /></div>
+        </div>
+        <div class="field"><label>Address</label><input type="text" id="sf_address" /></div>
+        <div class="field"><label>Notes</label><input type="text" id="sf_notes" /></div>
+
+        <span class="raw-toggle" id="scan-raw-toggle">show raw scanned text</span>
+        <div class="raw-text" id="scan-raw-text"></div>
+
+        <button class="btn-primary" id="scan-save-btn" style="width:100%;">Save to database</button>
+      </div>
+    </div>
+
+    <!-- ── BATCH UPLOAD MODE ── -->
+    <div id="batch-scan-panel" style="display:none;">
+      <div class="upload-zone" id="batch-upload-zone">
+        <input type="file" id="batch-file-input" accept="image/*,.heic,.heif,.pdf,application/pdf" multiple style="display:none;" />
+        <div class="upload-icon">📇</div>
+        <div><strong>Click to browse</strong> or drag-and-drop multiple cards here</div>
+        <div class="upload-hint">
+          JPEG, PNG, HEIC/HEIF (iPhone/iPad photos), or PDF (multi-page = multiple cards).
+          Select several files at once from your gallery, or drop a folder's worth in one go.
+        </div>
+      </div>
+
+      <div id="batch-file-list" style="margin-top:10px;font-size:0.8rem;color:#555;"></div>
+
+      <button class="btn-orange" id="batch-process-btn" style="width:100%;margin-top:12px;" disabled>Process All Cards</button>
+
+      <div id="batch-progress-wrap" style="display:none;margin-top:14px;">
+        <div class="progress-label" id="batch-progress-label">Processing…</div>
+        <div class="progress-bar-wrap">
+          <div class="progress-bar-fill" id="batch-progress-fill" style="width:0%"></div>
+        </div>
+      </div>
+
+      <div id="batch-results" style="margin-top:14px;"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

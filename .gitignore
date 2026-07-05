@@ -1,0 +1,5 @@
+node_modules/
+contacts.db
+contacts.db-*
+*.log
+.env

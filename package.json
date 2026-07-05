@@ -1,0 +1,24 @@
+{
+  "name": "lead-finder",
+  "version": "1.0.0",
+  "description": "Apollo lead search + email drafting, with a business-card scanner add-on",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.2",
+    "csv-parse": "^7.0.1",
+    "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "heic-convert": "^2.1.0",
+    "multer": "^2.2.0",
+    "pdfjs-dist": "^6.1.200",
+    "tesseract.js": "^7.0.0"
+  }
+}
