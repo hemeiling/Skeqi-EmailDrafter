@@ -1291,12 +1291,26 @@ function renderCrmTable(contacts) {
         : c.apollo_person_id && emailStatus === 'not_checked'
           ? `<button class="btn-sm btn-ghost crm-enrich-btn" data-idx="${i}" style="font-size:11px;padding:2px 6px;">Enrich Email</button>`
           : `<span style="color:#9ca3af;font-size:0.76rem;">N/A</span>`;
+    const commCount = Number(c.comm_count) || 0;
+    const commDraftCount = Number(c.comm_draft_count) || 0;
+    const lastActivity = c.last_comm_at
+      ? new Date(c.last_comm_at).toLocaleDateString()
+      : c.last_contacted_at || "—";
+    const lastType = c.last_comm_type
+      ? `<span style="font-size:0.65rem;color:#6b7280;margin-left:3px;">${c.last_comm_type.replace(/_/g," ")}</span>`
+      : "";
+    const interactionCell = commCount
+      ? `<span style="font-size:0.75rem;">${commCount} <span style="color:#9ca3af;">(${commDraftCount}d)</span></span>`
+      : `<span style="font-size:0.73rem;color:#9ca3af;">—</span>`;
     return `<tr>
       <td class="col-check"><input type="checkbox" class="crm-check" data-idx="${i}"></td>
       <td>${escapeHtml(c.full_name || "Unnamed")}</td>
       <td>${escapeHtml(c.job_title || "")}</td>
       <td>${escapeHtml(c.company || "")}</td>
       <td id="crm-email-cell-${i}">${emailCell}</td>
+      <td style="font-size:0.76rem;color:#374151;">${escapeHtml(c.phone || "")}</td>
+      <td style="font-size:0.76rem;color:#374151;">${lastActivity}${lastType}</td>
+      <td>${interactionCell}</td>
       <td><span class="badge badge-source">${escapeHtml(c.source || "manual")}</span></td>
       <td><input type="text" class="crm-tags-input" data-id="${c.id}" value="${escapeAttr(c.tags || "")}"
             style="width:100px;font-size:12px;padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;" placeholder="tags…"></td>
@@ -1305,7 +1319,6 @@ function renderCrmTable(contacts) {
           ${FOLLOW_UP_STATUSES.map(s => `<option value="${s}" ${c.follow_up_status === s ? "selected" : ""}>${s.replace(/_/g, " ")}</option>`).join("")}
         </select>
       </td>
-      <td style="font-size:0.76rem;color:#888;">${c.last_contacted_at ? escapeHtml(c.last_contacted_at) : "—"}</td>
       <td id="crm-draft-status-${i}">${draftStatus}</td>
       <td id="crm-action-${i}">
         ${hasDraft
@@ -1497,70 +1510,8 @@ async function openContactDetailModal(c) {
     emailEl.style.color = c.email ? "#374151" : "#9ca3af";
   }
 
-  const historyEl = document.getElementById("cd-draft-history");
-  if (historyEl) {
-    historyEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">Loading…</span>`;
-    try {
-      const r = await fetch(`/api/contacts/${c.id}/drafts`);
-      const data = await r.json();
-      const drafts = (data.drafts || []).slice(0, 10);
-      if (!drafts.length) {
-        historyEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">No drafts saved yet</span>`;
-      } else {
-        historyEl.innerHTML = drafts.map(d => `
-          <div style="border:1px solid #e5e7eb;border-radius:5px;padding:6px 10px;margin-bottom:5px;cursor:pointer;background:#fff;" class="cd-draft-row"
-               data-subject="${escapeAttr(d.subject || "")}" data-body="${escapeAttr(d.body || "")}">
-            <div style="font-size:0.75rem;font-weight:500;color:#374151;">v${d.version}: ${escapeHtml(d.subject || "(no subject)")}</div>
-            <div style="font-size:0.7rem;color:#9ca3af;">${new Date(d.created_at).toLocaleDateString()}</div>
-          </div>`).join("");
-        historyEl.querySelectorAll(".cd-draft-row").forEach(row => {
-          row.addEventListener("click", () => {
-            const contact = crmRowToDraftFormat(c);
-            _modalContact = contact;
-            _modalOnUpdate = null;
-            document.getElementById("modal-title").textContent = `Draft email to ${contact.name || "contact"}`;
-            document.getElementById("modal-contact-info").textContent = `${c.job_title || ""} · ${c.company || ""}`;
-            document.getElementById("modal-mode-select").value = "cold_outreach";
-            document.getElementById("modal-extra-instructions").value = "";
-            document.getElementById("email-modal").classList.add("open");
-            contactDetailModal.classList.remove("open");
-            renderDraft({ subject: row.dataset.subject, body: row.dataset.body, followup: "", rationale: "", claude_configured: true }, contact);
-          });
-        });
-      }
-    } catch (e) {
-      historyEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">Could not load draft history</span>`;
-    }
-  }
-
-  // Load email history
-  const emailHistEl = document.getElementById("cd-email-history");
-  if (emailHistEl) {
-    emailHistEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">Loading…</span>`;
-    try {
-      const r = await fetch(`/api/contacts/${c.id}/emails`);
-      const data = await r.json();
-      const emails = data.emails || [];
-      if (!emails.length) {
-        emailHistEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">No imported emails yet</span>`;
-      } else {
-        emailHistEl.innerHTML = emails.map(e => `
-          <div class="email-hist-item">
-            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-              <span style="font-weight:500;">${escapeHtml(e.subject || "(no subject)")}</span>
-              <span class="badge-category cat-${e.category || 'other'}">${(e.category || 'other').replace(/_/g,' ')}</span>
-            </div>
-            <div class="email-hist-meta">
-              ${e.sent_at ? new Date(e.sent_at).toLocaleDateString() : 'Unknown date'}
-              &nbsp;·&nbsp; From: ${escapeHtml(e.from_name || e.from_email || '')}
-            </div>
-            ${e.body ? `<div style="font-size:0.75rem;color:#6b7280;margin-top:3px;white-space:pre-wrap;max-height:60px;overflow:hidden;">${escapeHtml(e.body.slice(0,200))}${e.body.length>200?'…':''}</div>` : ''}
-          </div>`).join("");
-      }
-    } catch (e) {
-      emailHistEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">Could not load email history</span>`;
-    }
-  }
+  // Load unified timeline
+  await loadContactTimeline(c);
 
   document.getElementById("cd-event").value = "";
   document.getElementById("cd-booth").value = c.booth_number || "";
@@ -1570,6 +1521,95 @@ async function openContactDetailModal(c) {
   document.getElementById("cd-meeting-notes").value = c.meeting_notes || "";
   document.getElementById("cd-salesperson").value = c.assigned_salesperson || "";
   contactDetailModal.classList.add("open");
+}
+
+async function loadContactTimeline(c) {
+  const el = document.getElementById("cd-timeline");
+  if (!el) return;
+  el.innerHTML = `<div style="font-size:0.73rem;color:#9ca3af;">Loading…</div>`;
+  try {
+    const r = await fetch(`/api/contacts/${c.id}/timeline`);
+    const data = await r.json();
+    const items = data.items || [];
+    if (!items.length) {
+      el.innerHTML = `<div style="font-size:0.73rem;color:#9ca3af;">No interactions yet</div>`;
+      return;
+    }
+    el.innerHTML = items.map(item => renderTimelineItem(item, c)).join("");
+    el.querySelectorAll(".tl-view-draft-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const subject = btn.dataset.subject || "";
+        const body = btn.dataset.body || "";
+        const contact = crmRowToDraftFormat(c);
+        _modalContact = contact;
+        _modalOnUpdate = null;
+        document.getElementById("modal-title").textContent = `Draft email to ${contact.name || "contact"}`;
+        document.getElementById("modal-contact-info").textContent = `${c.job_title || ""} · ${c.company || ""}`;
+        document.getElementById("modal-mode-select").value = "cold_outreach";
+        document.getElementById("modal-extra-instructions").value = "";
+        document.getElementById("email-modal").classList.add("open");
+        document.getElementById("contact-detail-modal").classList.remove("open");
+        renderDraft({ subject, body, followup: "", rationale: "", claude_configured: true }, contact);
+      });
+    });
+    el.querySelectorAll(".tl-copy-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const body = btn.dataset.body || "";
+        navigator.clipboard.writeText(body).catch(() => {});
+        showMessage("Copied to clipboard", "info");
+      });
+    });
+    el.querySelectorAll(".tl-duplicate-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.id;
+        try {
+          await fetch(`/api/communications/${id}/duplicate`, { method: "POST" });
+          await loadContactTimeline(c);
+        } catch (_) {}
+      });
+    });
+    el.querySelectorAll(".tl-delete-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.id;
+        if (!confirm("Delete this entry?")) return;
+        try {
+          await fetch(`/api/communications/${id}`, { method: "DELETE" });
+          await loadContactTimeline(c);
+        } catch (_) {}
+      });
+    });
+  } catch (_) {
+    el.innerHTML = `<div style="font-size:0.73rem;color:#9ca3af;">Could not load timeline</div>`;
+  }
+}
+
+function renderTimelineItem(item, c) {
+  const isDraft = item.comm_type === "draft";
+  const isEmail = item.comm_type === "imported_email" || item.comm_type === "sent_email";
+  const icon = isDraft ? "📄" : isEmail ? "📧" : "💬";
+  const dotClass = isDraft ? "draft" : isEmail ? "imported_email" : "";
+  const dateStr = item.sent_at || item.created_at
+    ? new Date(item.sent_at || item.created_at).toLocaleDateString()
+    : "";
+  const catBadge = item.category
+    ? `<span class="badge-category cat-${item.category}">${item.category.replace(/_/g, " ")}</span>`
+    : "";
+  const vLabel = isDraft && item.version ? `v${item.version} ` : "";
+  const fromStr = isEmail && item.from_name ? ` · From: ${escapeHtml(item.from_name)}` : "";
+  const actions = isDraft
+    ? `<button class="btn-sm btn-ghost tl-view-draft-btn" data-subject="${escapeAttr(item.subject || "")}" data-body="${escapeAttr(item.body || "")}">View</button>
+       <button class="btn-sm btn-ghost tl-copy-btn" data-body="${escapeAttr(item.body || "")}">Copy</button>
+       <button class="btn-sm btn-ghost tl-duplicate-btn" data-id="${item.id}">Duplicate</button>
+       <button class="btn-sm btn-ghost tl-delete-btn" data-id="${item.id}" style="color:#ef4444;">Delete</button>`
+    : `<button class="btn-sm btn-ghost tl-delete-btn" data-id="${item.id}" style="color:#ef4444;">Delete</button>`;
+  return `<div class="tl-item">
+    <div class="tl-dot ${dotClass}">${icon}</div>
+    <div style="flex:1;min-width:0;">
+      <div class="tl-item-subject">${vLabel}${escapeHtml(item.subject || "(no subject)")}</div>
+      <div class="tl-item-meta">${dateStr}${fromStr} ${catBadge}</div>
+      <div class="tl-actions">${actions}</div>
+    </div>
+  </div>`;
 }
 
 async function enrichCrmEmail(idx) {
@@ -1871,3 +1911,64 @@ async function refreshNeedsReviewBadge() {
 }
 
 refreshNeedsReviewBadge();
+
+// ── Manual contact creation ──────────────────────────────────────────────────
+const addContactModal = document.getElementById("add-contact-modal");
+
+document.getElementById("crm-add-contact-btn").addEventListener("click", () => {
+  ["ac-name","ac-email","ac-phone","ac-title","ac-company","ac-linkedin","ac-tags","ac-notes"]
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ""; });
+  const err = document.getElementById("ac-error");
+  if (err) { err.style.display = "none"; err.textContent = ""; }
+  addContactModal.classList.add("open");
+});
+
+document.getElementById("add-contact-close").addEventListener("click", () => {
+  addContactModal.classList.remove("open");
+});
+addContactModal.addEventListener("click", (e) => {
+  if (e.target === addContactModal) addContactModal.classList.remove("open");
+});
+
+document.getElementById("add-contact-submit-btn").addEventListener("click", async () => {
+  const btn = document.getElementById("add-contact-submit-btn");
+  const fullName = document.getElementById("ac-name").value.trim();
+  const errEl = document.getElementById("ac-error");
+  if (!fullName) {
+    if (errEl) { errEl.textContent = "Full name is required."; errEl.style.display = ""; }
+    return;
+  }
+  if (errEl) { errEl.style.display = "none"; errEl.textContent = ""; }
+
+  const payload = {
+    full_name: fullName,
+    email: document.getElementById("ac-email").value.trim(),
+    phone: document.getElementById("ac-phone").value.trim(),
+    job_title: document.getElementById("ac-title").value.trim(),
+    company: document.getElementById("ac-company").value.trim(),
+    linkedin_url: document.getElementById("ac-linkedin").value.trim(),
+    tags: document.getElementById("ac-tags").value.trim(),
+    meeting_notes: document.getElementById("ac-notes").value.trim(),
+    source: "manual",
+  };
+
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const r = await fetch("/api/contacts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "Failed to create contact");
+    addContactModal.classList.remove("open");
+    showMessage(`Contact "${fullName}" added.`, "info");
+    loadCrmContacts(document.getElementById("crm-search-input").value);
+  } catch (err) {
+    showMessage(err.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Save Contact";
+  }
+});

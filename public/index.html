@@ -102,6 +102,17 @@
     .email-hist-meta { color:#9ca3af;font-size:0.72rem;margin-top:2px; }
     /* Needs-review badge */
     .needs-review-badge { display:inline-block;background:#ef4444;color:#fff;border-radius:10px;font-size:0.68rem;font-weight:700;padding:1px 7px;margin-left:6px; }
+    /* Unified timeline */
+    .tl-item { padding:7px 0 7px 10px;border-left:2px solid #e5e7eb;margin-left:4px;position:relative;font-size:0.8rem; }
+    .tl-item:last-child { border-left-color:transparent; }
+    .tl-dot { position:absolute;left:-5px;top:10px;width:8px;height:8px;border-radius:50%;background:#9ca3af; }
+    .tl-dot.draft { background:#6366f1; }
+    .tl-dot.imported_email { background:#0ea5e9; }
+    .tl-item-subject { font-weight:500;color:#111827; }
+    .tl-item-meta { font-size:0.7rem;color:#9ca3af;margin-top:1px; }
+    .tl-actions { display:flex;gap:4px;margin-top:4px;flex-wrap:wrap; }
+    .tl-actions button { font-size:0.7rem;padding:1px 6px;border-radius:4px;border:1px solid #d1d5db;background:#fff;cursor:pointer;color:#374151; }
+    .tl-actions button:hover { background:#f3f4f6; }
     /* CRM pagination */
     #crm-pagination { display: flex; align-items: center; gap: 10px; justify-content: center; margin-top: 12px; min-height: 32px; }
 
@@ -479,6 +490,7 @@
               <input type="text" id="crm-search-input" placeholder="Search by name, company, email, or tag…" />
             </div>
             <button class="btn-ghost" id="crm-refresh-btn">Refresh</button>
+            <button class="btn-ghost" id="crm-add-contact-btn" style="white-space:nowrap;">+ Add Contact</button>
             <button class="btn-ghost" id="crm-import-email-btn" style="white-space:nowrap;">+ Import Email</button>
           </div>
 
@@ -526,8 +538,9 @@
               <thead>
                 <tr>
                   <th class="col-check"></th>
-                  <th>Name</th><th>Title</th><th>Company</th><th>Email</th><th>Source</th>
-                  <th>Tags</th><th>Status</th><th>Last Contacted</th><th>Draft</th><th></th>
+                  <th>Name</th><th>Title</th><th>Company</th><th>Email</th><th>Phone</th>
+                  <th>Last Activity</th><th>Interactions</th>
+                  <th>Source</th><th>Tags</th><th>Status</th><th>Draft</th><th></th>
                 </tr>
               </thead>
               <tbody id="crm-tbody"></tbody>
@@ -554,6 +567,30 @@
   </div>
 
   <!-- ── Contact detail editor modal (conference fields) ── -->
+  <!-- ── Manual contact creation modal ── -->
+  <div class="modal-overlay" id="add-contact-modal">
+    <div class="modal" style="max-width:520px;">
+      <button class="modal-close" id="add-contact-close" title="Close">×</button>
+      <h2>Add Contact Manually</h2>
+      <div class="field-row">
+        <div class="field"><label>Full Name *</label><input type="text" id="ac-name" /></div>
+        <div class="field"><label>Email</label><input type="email" id="ac-email" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Phone</label><input type="text" id="ac-phone" /></div>
+        <div class="field"><label>Job Title</label><input type="text" id="ac-title" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Company</label><input type="text" id="ac-company" /></div>
+        <div class="field"><label>LinkedIn URL</label><input type="text" id="ac-linkedin" /></div>
+      </div>
+      <div class="field"><label>Tags <span style="color:#9ca3af;">(comma-separated)</span></label><input type="text" id="ac-tags" /></div>
+      <div class="field"><label>Notes</label><input type="text" id="ac-notes" /></div>
+      <div id="ac-error" style="color:#ef4444;font-size:0.8rem;margin-bottom:6px;display:none;"></div>
+      <button class="btn-primary" id="add-contact-submit-btn" style="width:100%;margin-top:8px;">Save Contact</button>
+    </div>
+  </div>
+
   <!-- ── Import Email modal ── -->
   <div class="modal-overlay" id="import-email-modal">
     <div class="modal" style="max-width:580px;">
@@ -613,10 +650,11 @@
           <span style="font-size:0.75rem;font-weight:600;color:#6b7280;min-width:48px;">Email</span>
           <span id="cd-email-display" style="font-size:0.85rem;color:#374151;"></span>
         </div>
-        <div style="font-size:0.75rem;font-weight:600;color:#6b7280;margin-bottom:4px;">Draft history</div>
-        <div id="cd-draft-history" style="max-height:130px;overflow-y:auto;"></div>
-        <div style="font-size:0.75rem;font-weight:600;color:#6b7280;margin:10px 0 4px;">Sent / imported emails</div>
-        <div id="cd-email-history" style="max-height:160px;overflow-y:auto;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+          <span style="font-size:0.75rem;font-weight:600;color:#6b7280;">Communication timeline</span>
+          <span id="cd-timeline-count" style="font-size:0.7rem;color:#9ca3af;"></span>
+        </div>
+        <div id="cd-timeline" style="max-height:260px;overflow-y:auto;">
           <div style="font-size:0.75rem;color:#9ca3af;">Loading…</div>
         </div>
       </div>

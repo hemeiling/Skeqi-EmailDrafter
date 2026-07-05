@@ -15,6 +15,8 @@ const {
   getCompanySearchCache, setCompanySearchCache, updateCachedLeadDraft,
   logApolloResult, listApolloResults,
   insertEmailDraftVersion, listEmailDraftsForContact,
+  insertCommunication, listTimelineForContact, getCommunication,
+  updateCommunication, deleteCommunication, duplicateCommunication, findDuplicateEmail,
   insertEmailHistory, listEmailHistoryForContact, listNeedsReviewEmails,
   listRecentEmailHistory, updateEmailHistory,
   findContactByEmail, findContactByEmailDomain, findCompanyByDomain, countNeedsReviewEmails,
@@ -860,6 +862,12 @@ app.post('/api/emails/ingest', async (req, res) => {
       }
     }
 
+    // ── Duplicate check ───────────────────────────────────────────────────
+    const dup = await findDuplicateEmail(fromEmail, subject);
+    if (dup) {
+      return res.json({ ok: true, id: dup.id, duplicate: true, message: 'Email already imported (duplicate detected)' });
+    }
+
     // ── Categorize ────────────────────────────────────────────────────────
     const { category, rationale } = await categorizeEmail(subject, body, fromName, fromEmail);
 
@@ -948,6 +956,69 @@ app.patch('/api/emails/:id', async (req, res) => {
 
 // Email drafting (Claude)
 // =========================================================================
+
+// GET /api/contacts/:id/timeline — unified chronological interaction history
+app.get('/api/contacts/:id/timeline', async (req, res) => {
+  try {
+    const items = await listTimelineForContact(Number(req.params.id));
+    res.json({ ok: true, timeline: items });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/communications/:id
+app.patch('/api/communications/:id', async (req, res) => {
+  try {
+    await updateCommunication(Number(req.params.id), req.body);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/communications/:id
+app.delete('/api/communications/:id', async (req, res) => {
+  try {
+    await deleteCommunication(Number(req.params.id));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/communications/:id/duplicate
+app.post('/api/communications/:id/duplicate', async (req, res) => {
+  try {
+    const copy = await duplicateCommunication(Number(req.params.id));
+    if (!copy) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, communication: copy });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/contacts — manual contact creation
+app.post('/api/contacts', async (req, res) => {
+  try {
+    const c = req.body;
+    if (!c.full_name && !c.email) {
+      return res.status(400).json({ error: 'full_name or email is required' });
+    }
+    const { id, updated } = await upsertContact({
+      full_name: c.full_name || '', email: c.email || '',
+      phone: c.phone || '', job_title: c.job_title || '',
+      company: c.company || '', linkedin_url: c.linkedin_url || '',
+      tags: c.tags || '', notes: c.notes || '',
+      source: c.source || 'manual',
+      email_lookup_status: c.email ? 'found' : 'not_checked'
+    });
+    await logContactActivity(id, 'manual_create', `Contact created manually: ${c.full_name || c.email}`);
+    res.json({ ok: true, id, updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.get('/api/draft-modes', (req, res) => {
   res.json({ ok: true, modes: listDraftModes() });

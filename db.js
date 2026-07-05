@@ -164,6 +164,61 @@ async function initDb() {
     )
   `);
 
+  // ── Unified communications table ─────────────────────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS communications (
+      id SERIAL PRIMARY KEY,
+      contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+      company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+      comm_type TEXT NOT NULL DEFAULT 'note',
+      subject TEXT,
+      body TEXT,
+      category TEXT DEFAULT 'other',
+      status TEXT DEFAULT 'saved',
+      version INTEGER DEFAULT 1,
+      source TEXT DEFAULT 'manual',
+      from_email TEXT, from_name TEXT, to_email TEXT,
+      draft_mode TEXT,
+      followup_text TEXT,
+      rationale TEXT,
+      sent_at TIMESTAMPTZ,
+      review_needed BOOLEAN DEFAULT FALSE,
+      raw_payload TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  // Migrate email_drafts → communications (idempotent via conflict guard)
+  await pool.query(`
+    INSERT INTO communications
+      (contact_id, comm_type, subject, body, version, source, followup_text, rationale, created_at, updated_at)
+    SELECT ed.contact_id, 'draft', ed.subject, ed.body, ed.version, 'migrated_draft',
+           ed.followup, ed.rationale, ed.created_at, ed.created_at
+    FROM email_drafts ed
+    WHERE ed.contact_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM communications c
+        WHERE c.contact_id = ed.contact_id AND c.comm_type = 'draft'
+          AND c.version = ed.version AND COALESCE(c.subject,'') = COALESCE(ed.subject,'')
+      )
+  `);
+  // Migrate email_history → communications (idempotent)
+  await pool.query(`
+    INSERT INTO communications
+      (contact_id, company_id, comm_type, subject, body, category, source,
+       from_email, from_name, to_email, sent_at, review_needed, raw_payload, created_at, updated_at)
+    SELECT eh.contact_id, eh.company_id, 'imported_email', eh.subject, eh.body, eh.category,
+           eh.source, eh.from_email, eh.from_name, eh.to_email, eh.sent_at,
+           eh.review_needed, eh.raw_payload, eh.created_at, eh.created_at
+    FROM email_history eh
+    WHERE NOT EXISTS (
+      SELECT 1 FROM communications c
+      WHERE c.comm_type = 'imported_email'
+        AND LOWER(COALESCE(c.from_email,'')) = LOWER(COALESCE(eh.from_email,''))
+        AND LOWER(COALESCE(c.subject,'')) = LOWER(COALESCE(eh.subject,''))
+    )
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS email_history (
       id SERIAL PRIMARY KEY,
@@ -353,10 +408,23 @@ const DRAFT_COUNT_JOIN = `
     FROM email_drafts GROUP BY contact_id
   ) ed ON ed.contact_id = c.id`;
 
+const COMM_STATS_JOIN = `
+  LEFT JOIN (
+    SELECT contact_id,
+      COUNT(*)::int AS comm_count,
+      SUM(CASE WHEN comm_type = 'draft' THEN 1 ELSE 0 END)::int AS comm_draft_count,
+      MAX(COALESCE(sent_at, created_at)) AS last_comm_at,
+      (array_agg(comm_type ORDER BY COALESCE(sent_at, created_at) DESC NULLS LAST))[1] AS last_comm_type
+    FROM communications GROUP BY contact_id
+  ) cs ON cs.contact_id = c.id`;
+
 async function listContacts(limit = 200) {
   return q(`
-    SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id
-    FROM contacts c ${DRAFT_COUNT_JOIN}
+    SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id,
+      COALESCE(cs.comm_count,0)::int AS comm_count,
+      COALESCE(cs.comm_draft_count,0)::int AS comm_draft_count,
+      cs.last_comm_at, cs.last_comm_type
+    FROM contacts c ${DRAFT_COUNT_JOIN} ${COMM_STATS_JOIN}
     ORDER BY c.id DESC LIMIT $1
   `, [limit]);
 }
@@ -514,8 +582,11 @@ async function searchContacts(term, limit = 500) {
   if (term && term.trim()) {
     const like = `%${term.trim().toLowerCase()}%`;
     return q(`
-      SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id
-      FROM contacts c ${DRAFT_COUNT_JOIN}
+      SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id,
+        COALESCE(cs.comm_count,0)::int AS comm_count,
+        COALESCE(cs.comm_draft_count,0)::int AS comm_draft_count,
+        cs.last_comm_at, cs.last_comm_type
+      FROM contacts c ${DRAFT_COUNT_JOIN} ${COMM_STATS_JOIN}
       WHERE LOWER(c.full_name) LIKE $1 OR LOWER(c.company) LIKE $2 OR LOWER(c.email) LIKE $3
          OR LOWER(c.job_title) LIKE $4 OR LOWER(c.tags) LIKE $5
       ORDER BY c.id DESC LIMIT $6
@@ -558,10 +629,13 @@ async function filterContacts(filters = {}, limit = 1000) {
   const orderBy = filters.sortBy === 'last_contacted' ? 'ORDER BY c.last_contacted_at DESC' : 'ORDER BY c.id DESC';
 
   return q(`
-    SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id
+    SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id,
+      COALESCE(cs.comm_count,0)::int AS comm_count,
+      COALESCE(cs.comm_draft_count,0)::int AS comm_draft_count,
+      cs.last_comm_at, cs.last_comm_type
     FROM contacts c
     LEFT JOIN companies comp ON comp.id = c.company_id
-    ${DRAFT_COUNT_JOIN}
+    ${DRAFT_COUNT_JOIN} ${COMM_STATS_JOIN}
     ${where}
     ${orderBy}
     LIMIT $${params.length}
@@ -674,11 +748,103 @@ async function insertEmailDraftVersion(contactId, draft) {
     INSERT INTO email_drafts (contact_id, version, subject, body, followup, rationale)
     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
   `, [contactId, nextVersion, draft.subject || '', draft.body || '', draft.followup || '', draft.rationale || '']);
+  // Dual-write to unified communications table
+  await insertCommunication({
+    contact_id: contactId, comm_type: 'draft',
+    subject: draft.subject || '', body: draft.body || '',
+    category: draft.mode || 'cold_outreach',
+    version: nextVersion, source: 'email_draft',
+    draft_mode: draft.mode || 'cold_outreach',
+    followup_text: draft.followup || '', rationale: draft.rationale || ''
+  });
   return { id, version: nextVersion };
 }
 
 async function listEmailDraftsForContact(contactId) {
   return q(`SELECT * FROM email_drafts WHERE contact_id = $1 ORDER BY version DESC`, [contactId]);
+}
+
+// ===========================================================================
+// Communications (unified interaction history)
+// ===========================================================================
+
+async function insertCommunication(e) {
+  const [row] = await q(`
+    INSERT INTO communications
+      (contact_id, company_id, comm_type, subject, body, category, status, version,
+       source, from_email, from_name, to_email, draft_mode, followup_text, rationale,
+       sent_at, review_needed, raw_payload)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+    RETURNING *
+  `, [
+    e.contact_id || null, e.company_id || null,
+    e.comm_type || 'note', e.subject || '', e.body || '',
+    e.category || 'other', e.status || 'saved', e.version || 1,
+    e.source || 'manual', e.from_email || '', e.from_name || '',
+    e.to_email || '', e.draft_mode || '', e.followup_text || '', e.rationale || '',
+    e.sent_at || null, Boolean(e.review_needed), e.raw_payload || ''
+  ]);
+  return row;
+}
+
+async function listTimelineForContact(contactId, limit = 100) {
+  return q(`
+    SELECT * FROM communications
+    WHERE contact_id = $1
+    ORDER BY COALESCE(sent_at, created_at) DESC NULLS LAST
+    LIMIT $2
+  `, [contactId, limit]);
+}
+
+async function getCommunication(id) {
+  return q1(`SELECT * FROM communications WHERE id = $1`, [id]);
+}
+
+async function updateCommunication(id, fields) {
+  const allowed = ['subject','body','category','status','draft_mode','followup_text','rationale','review_needed','contact_id','company_id'];
+  const sets = [];
+  const vals = [];
+  let i = 1;
+  for (const key of allowed) {
+    if (fields[key] !== undefined) { sets.push(`${key}=$${i++}`); vals.push(fields[key]); }
+  }
+  if (!sets.length) return;
+  sets.push(`updated_at=NOW()`);
+  vals.push(id);
+  await q(`UPDATE communications SET ${sets.join(', ')} WHERE id=$${i}`, vals);
+}
+
+async function deleteCommunication(id) {
+  await q(`DELETE FROM communications WHERE id = $1`, [id]);
+}
+
+async function duplicateCommunication(id) {
+  const original = await q1(`SELECT * FROM communications WHERE id = $1`, [id]);
+  if (!original) return null;
+  const maxRow = await q1(
+    `SELECT COALESCE(MAX(version),0) AS maxv FROM communications WHERE contact_id=$1 AND comm_type='draft'`,
+    [original.contact_id]
+  );
+  const newVersion = (maxRow ? maxRow.maxv : 0) + 1;
+  const [row] = await q(`
+    INSERT INTO communications (contact_id, company_id, comm_type, subject, body, category,
+      status, version, source, draft_mode, followup_text, rationale)
+    SELECT contact_id, company_id, comm_type, subject, body, category,
+      'saved', $1, source, draft_mode, followup_text, rationale
+    FROM communications WHERE id = $2
+    RETURNING *
+  `, [newVersion, id]);
+  return row;
+}
+
+async function findDuplicateEmail(fromEmail, subject) {
+  return q1(`
+    SELECT id FROM communications
+    WHERE comm_type = 'imported_email'
+      AND LOWER(COALESCE(from_email,'')) = LOWER(COALESCE($1,''))
+      AND LOWER(COALESCE(subject,''))    = LOWER(COALESCE($2,''))
+    LIMIT 1
+  `, [fromEmail || '', subject || '']);
 }
 
 // ===========================================================================
@@ -724,6 +890,18 @@ async function insertEmailHistory(e) {
     e.category || 'other', e.source || 'manual_paste',
     Boolean(e.review_needed), e.raw_payload || ''
   ]);
+  // Dual-write to unified communications table (skip if duplicate already there)
+  const dup = await findDuplicateEmail(e.from_email, e.subject);
+  if (!dup) {
+    await insertCommunication({
+      contact_id: e.contact_id, company_id: e.company_id,
+      comm_type: 'imported_email',
+      subject: e.subject, body: e.body,
+      category: e.category || 'other', source: e.source || 'manual_paste',
+      from_email: e.from_email, from_name: e.from_name, to_email: e.to_email,
+      sent_at: e.sent_at, review_needed: e.review_needed, raw_payload: e.raw_payload
+    });
+  }
   return row;
 }
 
@@ -807,6 +985,9 @@ module.exports = {
   updateCachedLeadDraft, logApolloResult, listApolloResults,
   // email drafts
   insertEmailDraftVersion, listEmailDraftsForContact,
+  // communications (unified timeline)
+  insertCommunication, listTimelineForContact, getCommunication,
+  updateCommunication, deleteCommunication, duplicateCommunication, findDuplicateEmail,
   // email history (forwarded / imported)
   insertEmailHistory, listEmailHistoryForContact, listNeedsReviewEmails,
   listRecentEmailHistory, updateEmailHistory,
