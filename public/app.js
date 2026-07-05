@@ -1230,8 +1230,11 @@ function renderCrmTable(contacts) {
         </select>
       </td>
       <td style="font-size:0.76rem;color:#888;">${c.last_contacted_at ? escapeHtml(c.last_contacted_at) : "—"}</td>
-      <td>
-        <button class="btn-sm btn-primary crm-draft-btn" data-idx="${i}">Draft Email</button>
+      <td id="crm-action-${i}">
+        ${c.draft_subject
+          ? `<button class="btn-sm btn-saved crm-view-draft-btn" data-idx="${i}">View Draft</button>
+             <button class="btn-sm btn-orange crm-redraft-btn" data-idx="${i}">Redraft</button>`
+          : `<button class="btn-sm btn-primary crm-draft-btn" data-idx="${i}">Draft Email</button>`}
         <button class="btn-sm btn-ghost crm-details-btn" data-idx="${i}">Details</button>
       </td>
     </tr>
@@ -1245,8 +1248,29 @@ function renderCrmTable(contacts) {
   });
   document.querySelectorAll(".crm-draft-btn").forEach(btn => {
     btn.addEventListener("click", () => {
-      const c = _crmContacts[Number(btn.dataset.idx)];
-      openEmailDraftForContact(crmRowToDraftFormat(c), null);
+      const idx = Number(btn.dataset.idx);
+      openEmailDraftForContact(crmRowToDraftFormat(_crmContacts[idx]), (d) => {
+        _crmContacts[idx].draft_subject   = d.subject   || "";
+        _crmContacts[idx].draft_body      = d.body       || "";
+        _crmContacts[idx].draft_followup  = d.followup   || "";
+        _crmContacts[idx].draft_rationale = d.rationale  || "";
+        setCrmDraftButtons(idx);
+      });
+    });
+  });
+  document.querySelectorAll(".crm-view-draft-btn").forEach(btn => {
+    btn.addEventListener("click", () => openSavedCrmDraft(Number(btn.dataset.idx)));
+  });
+  document.querySelectorAll(".crm-redraft-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.idx);
+      openEmailDraftForContact(crmRowToDraftFormat(_crmContacts[idx]), (d) => {
+        _crmContacts[idx].draft_subject   = d.subject   || "";
+        _crmContacts[idx].draft_body      = d.body       || "";
+        _crmContacts[idx].draft_followup  = d.followup   || "";
+        _crmContacts[idx].draft_rationale = d.rationale  || "";
+        setCrmDraftButtons(idx);
+      });
     });
   });
   document.querySelectorAll(".crm-details-btn").forEach(btn => {
@@ -1259,6 +1283,52 @@ function crmRowToDraftFormat(c) {
     name: c.full_name, title: c.job_title, company: c.company, department: c.department,
     email: c.email, linkedin: c.linkedin_url, contact_id: c.id, apollo_id: c.apollo_person_id,
   };
+}
+
+function openSavedCrmDraft(idx) {
+  const c = _crmContacts[idx];
+  if (!c) return;
+  const contact = crmRowToDraftFormat(c);
+  _modalContact = contact;
+  _modalOnUpdate = (d) => {
+    _crmContacts[idx].draft_subject   = d.subject   || "";
+    _crmContacts[idx].draft_body      = d.body       || "";
+    _crmContacts[idx].draft_followup  = d.followup   || "";
+    _crmContacts[idx].draft_rationale = d.rationale  || "";
+  };
+  document.getElementById("modal-title").textContent = `Draft email to ${contact.name || "contact"}`;
+  document.getElementById("modal-contact-info").textContent =
+    `${c.job_title || ""} · ${c.company || ""} · ${c.department || ""}`;
+  document.getElementById("modal-mode-select").value = "cold_outreach";
+  document.getElementById("modal-extra-instructions").value = "";
+  document.getElementById("email-modal").classList.add("open");
+  renderDraft({
+    subject: c.draft_subject || "",
+    body: c.draft_body || "",
+    followup: c.draft_followup || "",
+    rationale: c.draft_rationale || "",
+    claude_configured: true,
+  }, contact);
+}
+
+function setCrmDraftButtons(idx) {
+  const cell = document.getElementById(`crm-action-${idx}`);
+  if (!cell) return;
+  cell.innerHTML = `
+    <button class="btn-sm btn-saved crm-view-draft-btn" data-idx="${idx}">View Draft</button>
+    <button class="btn-sm btn-orange crm-redraft-btn" data-idx="${idx}">Redraft</button>
+    <button class="btn-sm btn-ghost crm-details-btn" data-idx="${idx}">Details</button>`;
+  cell.querySelector(".crm-view-draft-btn").addEventListener("click", () => openSavedCrmDraft(idx));
+  cell.querySelector(".crm-redraft-btn").addEventListener("click", () => {
+    openEmailDraftForContact(crmRowToDraftFormat(_crmContacts[idx]), (d) => {
+      _crmContacts[idx].draft_subject   = d.subject   || "";
+      _crmContacts[idx].draft_body      = d.body       || "";
+      _crmContacts[idx].draft_followup  = d.followup   || "";
+      _crmContacts[idx].draft_rationale = d.rationale  || "";
+      setCrmDraftButtons(idx);
+    });
+  });
+  cell.querySelector(".crm-details-btn").addEventListener("click", () => openContactDetailModal(_crmContacts[idx]));
 }
 
 /* ── Contact detail editor (conference fields) ── */
