@@ -6,6 +6,7 @@ const path = require('path');
 const multer = require('multer');
 const Tesseract = require('tesseract.js');
 const {
+  initDb,
   insertContact, listContacts, getContact, listContactsByCompany, deleteContact,
   updateContactDraft, findExistingContact, upsertContact,
   upsertCompany, findCompanyByName, getCompany, listCompanies, getCompanyContacts,
@@ -39,8 +40,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 40 
 // -----------------------------------------------------------------------
 // Optional login gate -- HTTP Basic Auth, credentials via env vars only
 // (APP_USERNAME / APP_PASSWORD). If either is unset, auth is skipped
-// entirely. Ported from the original EmailDrafter app's Flask
-// @app.before_request hook, same semantics.
+// entirely.
 // -----------------------------------------------------------------------
 function timingSafeStringEqual(a, b) {
   const bufA = Buffer.from(String(a ?? ''), 'utf8');
@@ -99,7 +99,6 @@ async function initOcrWorker() {
     console.error('Failed to initialize OCR worker:', err.message);
   }
 }
-initOcrWorker();
 
 process.on('unhandledRejection', (err) => {
   console.error('Unhandled rejection (server stays up):', err);
@@ -112,11 +111,6 @@ process.on('uncaughtException', (err) => {
 // Scan Business Card (shared core: OCR + enrichment, no saving)
 // =========================================================================
 
-// Runs OCR on one image and applies the same enrichment-priority logic used
-// throughout the app: (1) an already-saved contact -- zero Apollo cost;
-// (2) the Apollo enrichment cache -- zero cost; (3) a fresh Apollo call --
-// last resort. Used by both the interactive single-scan endpoint (review
-// before save) and the batch endpoint (auto-save every result).
 async function processCardImage(imageDataUrl) {
   if (!ocrWorker) {
     const detail = ocrWorkerError
@@ -137,7 +131,7 @@ async function processCardImage(imageDataUrl) {
   let apolloPersonId = '';
   let matchedContactId = null;
 
-  const existingContact = findExistingContact(fields.email, fields.full_name, fields.company, fields.linkedin_url);
+  const existingContact = await findExistingContact(fields.email, fields.full_name, fields.company, fields.linkedin_url);
   if (existingContact) {
     matchedContactId = existingContact.id;
     apolloFromSavedContact = true;
@@ -157,14 +151,14 @@ async function processCardImage(imageDataUrl) {
 
   if (!apolloFromSavedContact && apolloConfigured()) {
     const cacheKey = buildCacheKey(fields);
-    const cached = getApolloCache(cacheKey);
+    const cached = await getApolloCache(cacheKey);
 
     if (cached) {
       apolloRaw = JSON.parse(cached.raw_json);
       apolloFromCache = true;
     } else {
       apolloRaw = await fetchApolloPerson(fields);
-      if (apolloRaw && cacheKey) setApolloCache(cacheKey, JSON.stringify(apolloRaw));
+      if (apolloRaw && cacheKey) await setApolloCache(cacheKey, JSON.stringify(apolloRaw));
     }
 
     const summary = summarizeApolloPerson(apolloRaw);
@@ -218,8 +212,6 @@ app.post('/api/scan', async (req, res) => {
       matchedContactId: result.matchedContactId,
       apolloPersonId: result.apolloPersonId,
       apolloRaw: result.apolloRaw,
-      // The raw image + OCR text are round-tripped back on save so the
-      // business_cards table can store the original scan (see POST /api/contacts).
       _imageForCard: image,
       _ocrTextForCard: result.rawText
     });
@@ -230,16 +222,6 @@ app.post('/api/scan', async (req, res) => {
 });
 
 // POST /api/scan-batch-file  (multipart/form-data, field name "file")
-// Accepts ONE uploaded file per call -- a plain image, a HEIC/HEIF photo, or
-// a multi-page PDF (which expands into one result per page). Every card
-// found is processed automatically (OCR -> local-contact-check -> Apollo
-// only if needed) and saved immediately (dedup-safe), unlike the single
-// interactive /api/scan flow which waits for manual review before saving.
-// The frontend calls this once per selected file in a loop, so it can show
-// real per-file progress across a batch of many uploads.
-//
-// Optional form fields (applied to every contact found in this file):
-//   event, booth_number, meeting_date, assigned_salesperson
 app.post('/api/scan-batch-file', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file field in request' });
@@ -271,9 +253,9 @@ app.post('/api/scan-batch-file', upload.single('file'), async (req, res) => {
           assigned_salesperson: assigned_salesperson || ''
         };
 
-        const { id, updated } = upsertContact(payload);
-        insertBusinessCard(id, img.imageDataUrl, processed.rawText, JSON.stringify(fields));
-        logContactActivity(id, 'business_card_scan', updated
+        const { id, updated } = await upsertContact(payload);
+        await insertBusinessCard(id, img.imageDataUrl, processed.rawText, JSON.stringify(fields));
+        await logContactActivity(id, 'business_card_scan', updated
           ? `Updated via batch scan (${img.pageLabel})`
           : `Created via batch scan (${img.pageLabel})`);
 
@@ -301,7 +283,7 @@ app.post('/api/scan-batch-file', upload.single('file'), async (req, res) => {
 });
 
 // POST /api/contacts  -> save/update a confirmed scanned contact (dedup-safe)
-app.post('/api/contacts', (req, res) => {
+app.post('/api/contacts', async (req, res) => {
   try {
     const payload = { ...req.body };
     if (payload.apollo_raw_json && !payload.apollo_enriched_at) {
@@ -312,15 +294,13 @@ app.post('/api/contacts', (req, res) => {
     delete payload._cardImage;
     delete payload._cardOcrText;
 
-    const { id, updated } = upsertContact(payload);
+    const { id, updated } = await upsertContact(payload);
 
-    // Preserve the original scan (image + OCR text + parsed fields) in the
-    // business_cards table, linked to whichever contact row it resolved to.
     if (cardImage || cardOcrText) {
-      insertBusinessCard(id, cardImage || '', cardOcrText || '', JSON.stringify(payload));
-      logContactActivity(id, 'business_card_scan', updated ? 'Updated via a new business card scan' : 'Created from a business card scan');
+      await insertBusinessCard(id, cardImage || '', cardOcrText || '', JSON.stringify(payload));
+      await logContactActivity(id, 'business_card_scan', updated ? 'Updated via a new business card scan' : 'Created from a business card scan');
     } else {
-      logContactActivity(id, updated ? 'updated' : 'created', `Source: ${payload.source || 'manual'}`);
+      await logContactActivity(id, updated ? 'updated' : 'created', `Source: ${payload.source || 'manual'}`);
     }
 
     res.json({ ok: true, id, updated });
@@ -330,22 +310,19 @@ app.post('/api/contacts', (req, res) => {
   }
 });
 
-// GET /api/contacts -> list all contacts (scanned + Apollo + manual)
-// GET /api/contacts?q=search -> the CRM free-text "look up existing contacts" search
-// GET /api/contacts?event=&company=&industry=&follow_up_status=&tags=&assigned_salesperson=&sortBy=last_contacted
-//   -> structured CRM filtering (any combination)
-app.get('/api/contacts', (req, res) => {
+// GET /api/contacts
+app.get('/api/contacts', async (req, res) => {
   try {
     const { q, event, company, industry, follow_up_status, tags, assigned_salesperson, sortBy } = req.query;
     const hasStructuredFilter = event || company || industry || follow_up_status || tags || assigned_salesperson;
 
     let contacts;
     if (hasStructuredFilter) {
-      contacts = filterContacts({ event, company, industry, follow_up_status, tags, assigned_salesperson, sortBy });
+      contacts = await filterContacts({ event, company, industry, follow_up_status, tags, assigned_salesperson, sortBy });
     } else if (q) {
-      contacts = searchContacts(q);
+      contacts = await searchContacts(q);
     } else {
-      contacts = listContacts(200);
+      contacts = await listContacts(200);
     }
     res.json({ ok: true, contacts });
   } catch (err) {
@@ -354,26 +331,26 @@ app.get('/api/contacts', (req, res) => {
 });
 
 // DELETE /api/contacts/:id
-app.delete('/api/contacts/:id', (req, res) => {
+app.delete('/api/contacts/:id', async (req, res) => {
   try {
-    deleteContact(Number(req.params.id));
+    await deleteContact(Number(req.params.id));
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete contact' });
   }
 });
 
-// PATCH /api/contacts/:id  { tags?, follow_up_status?, notes? } -> CRM field edits
-app.patch('/api/contacts/:id', (req, res) => {
+// PATCH /api/contacts/:id
+app.patch('/api/contacts/:id', async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const updated = patchContactCrmFields(id, req.body || {});
+    const updated = await patchContactCrmFields(id, req.body || {});
     if (!updated) return res.status(404).json({ error: 'Contact not found' });
     if (req.body && req.body.follow_up_status) {
-      logContactActivity(id, 'status_change', `Status set to ${req.body.follow_up_status}`);
+      await logContactActivity(id, 'status_change', `Status set to ${req.body.follow_up_status}`);
     }
     if (req.body && req.body.notes) {
-      logContactActivity(id, 'note', req.body.notes);
+      await logContactActivity(id, 'note', req.body.notes);
     }
     res.json({ ok: true, contact: updated });
   } catch (err) {
@@ -381,20 +358,20 @@ app.patch('/api/contacts/:id', (req, res) => {
   }
 });
 
-// GET /api/contacts/:id/activity -> relationship history log for a contact
-app.get('/api/contacts/:id/activity', (req, res) => {
+// GET /api/contacts/:id/activity
+app.get('/api/contacts/:id/activity', async (req, res) => {
   try {
-    res.json({ ok: true, activity: listContactActivity(Number(req.params.id)) });
+    res.json({ ok: true, activity: await listContactActivity(Number(req.params.id)) });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load activity' });
   }
 });
 
-// POST /api/contacts/:id/activity  { activity_type, description } -> manual log entry
-app.post('/api/contacts/:id/activity', (req, res) => {
+// POST /api/contacts/:id/activity
+app.post('/api/contacts/:id/activity', async (req, res) => {
   try {
     const { activity_type = 'note', description = '' } = req.body || {};
-    logContactActivity(Number(req.params.id), activity_type, description);
+    await logContactActivity(Number(req.params.id), activity_type, description);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to log activity' });
@@ -405,7 +382,6 @@ app.post('/api/contacts/:id/activity', (req, res) => {
 // Company list upload (CSV / XLSX)
 // =========================================================================
 
-// POST /api/companies/upload  (multipart/form-data, field name "file")
 app.post('/api/companies/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file field in request' });
@@ -432,11 +408,8 @@ app.post('/api/companies/upload', upload.single('file'), async (req, res) => {
 
     const eventName = (req.body && req.body.event) || '';
 
-    // Persist every row into the companies table immediately -- the
-    // uploaded list itself becomes part of the permanent local database,
-    // not just an in-memory table.
     for (const c of companies) {
-      upsertCompany({
+      await upsertCompany({
         name: c.english_name,
         chinese_name: c.chinese_name,
         industry: c.industry,
@@ -458,44 +431,35 @@ app.post('/api/companies/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// GET /api/companies?q=search -> searchable company table
-app.get('/api/companies', (req, res) => {
+// GET /api/companies
+app.get('/api/companies', async (req, res) => {
   try {
-    res.json({ ok: true, companies: listCompanies(req.query.q) });
+    res.json({ ok: true, companies: await listCompanies(req.query.q) });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load companies' });
   }
 });
 
 // GET /api/companies/:id/contacts
-app.get('/api/companies/:id/contacts', (req, res) => {
+app.get('/api/companies/:id/contacts', async (req, res) => {
   try {
-    res.json({ ok: true, contacts: getCompanyContacts(Number(req.params.id)) });
+    res.json({ ok: true, contacts: await getCompanyContacts(Number(req.params.id)) });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load company contacts' });
   }
 });
 
 // GET /api/events
-app.get('/api/events', (req, res) => {
+app.get('/api/events', async (req, res) => {
   try {
-    res.json({ ok: true, events: listEvents() });
+    res.json({ ok: true, events: await listEvents() });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load events' });
   }
 });
 
 // =========================================================================
-// Lead search -- Apollo Token Optimization is enforced HERE.
-//
-// Priority order per company:
-//   1. Local `companies` + `contacts` tables (permanent cache) -- if this
-//      company exists AND has contacts already, use them. Zero Apollo cost.
-//   2. Apollo -- only if there's no usable local data, or the user
-//      explicitly checked "ignore cache" (force refresh).
-// Every contact Apollo returns is immediately persisted into the contacts
-// table (source='apollo'), so the NEXT search for the same company always
-// takes path 1 and never re-spends a credit.
+// Lead search
 // =========================================================================
 
 function companyCacheKey(company) {
@@ -527,10 +491,10 @@ app.post('/api/leads/search', async (req, res) => {
     const messages = [];
 
     for (const companyName of companyNames) {
-      const companyRow = findCompanyByName(companyName);
+      const companyRow = await findCompanyByName(companyName);
 
       if (!forceRefresh && companyRow) {
-        const existingContacts = getCompanyContacts(companyRow.id);
+        const existingContacts = await getCompanyContacts(companyRow.id);
         if (existingContacts.length > 0) {
           allContacts = allContacts.concat(existingContacts.map(contactRowToLeadFormat));
           messages.push(`CACHE:${companyName}:${existingContacts.length}:${companyRow.updated_at}`);
@@ -552,12 +516,12 @@ app.post('/api/leads/search', async (req, res) => {
       const contacts = result.contacts || [];
       const orgs = result.orgs || [];
 
-      const companyResult = upsertCompany({ name: companyName });
+      const companyResult = await upsertCompany({ name: companyName });
       const companyId = companyResult ? companyResult.id : null;
 
       for (const c of contacts) {
         const cleanEmail = c.email && !String(c.email).includes('N/A') && !String(c.email).includes('not returned') ? c.email : '';
-        const { id, updated } = upsertContact({
+        const { id, updated } = await upsertContact({
           full_name: c.name, job_title: c.title, department: c.department, seniority: c.seniority,
           company: c.company, website: c.company_website,
           email: cleanEmail, linkedin_url: c.linkedin, address: c.location,
@@ -565,11 +529,11 @@ app.post('/api/leads/search', async (req, res) => {
           apollo_person_id: c.apollo_id, source: 'apollo'
         });
         c.contact_id = id;
-        logContactActivity(id, 'apollo_search', updated ? `Refreshed via Apollo search for ${companyName}` : `Found via Apollo search for ${companyName}`);
+        await logContactActivity(id, 'apollo_search', updated ? `Refreshed via Apollo search for ${companyName}` : `Found via Apollo search for ${companyName}`);
       }
 
-      logApolloResult('people_search', companyId, null, companyName, JSON.stringify({ contacts, orgs }));
-      setCompanySearchCache(companyCacheKey(companyName), JSON.stringify({ company: companyName, contacts, orgs }));
+      await logApolloResult('people_search', companyId, null, companyName, JSON.stringify({ contacts, orgs }));
+      await setCompanySearchCache(companyCacheKey(companyName), JSON.stringify({ company: companyName, contacts, orgs }));
 
       allContacts = allContacts.concat(contacts);
       allOrgs = allOrgs.concat(orgs);
@@ -583,13 +547,11 @@ app.post('/api/leads/search', async (req, res) => {
   }
 });
 
-// POST /api/leads/save -> idempotent save (results are already auto-persisted
-// by /api/leads/search; this stays available so nothing in the UI that
-// expects an explicit "Save" action breaks, and it's still dedup-safe).
-app.post('/api/leads/save', (req, res) => {
+// POST /api/leads/save
+app.post('/api/leads/save', async (req, res) => {
   try {
     const c = req.body;
-    const { id, updated } = upsertContact({
+    const { id, updated } = await upsertContact({
       full_name: c.name,
       job_title: c.title,
       company: c.company,
@@ -608,7 +570,7 @@ app.post('/api/leads/save', (req, res) => {
       draft_followup: c.draft_followup,
       draft_rationale: c.draft_rationale
     });
-    logContactActivity(id, 'apollo_search', updated ? 'Updated via Apollo lead search' : 'Created from Apollo lead search');
+    await logContactActivity(id, 'apollo_search', updated ? 'Updated via Apollo lead search' : 'Created from Apollo lead search');
     res.json({ ok: true, id, updated });
   } catch (err) {
     console.error('Lead save error:', err);
@@ -616,9 +578,7 @@ app.post('/api/leads/save', (req, res) => {
   }
 });
 
-// POST /api/reveal-email  { apollo_id } -> Apollo people/match with
-// reveal_personal_emails, for contacts where has_email is true but the
-// address itself wasn't included in the initial search results.
+// POST /api/reveal-email
 app.post('/api/reveal-email', async (req, res) => {
   try {
     const apolloId = (req.body.apollo_id || '').trim();
@@ -634,35 +594,27 @@ app.post('/api/reveal-email', async (req, res) => {
 });
 
 // =========================================================================
-// Email drafting (Claude) -- versioned history in email_drafts
+// Email drafting (Claude)
 // =========================================================================
 
-// GET /api/draft-modes -> available drafting modes for the UI dropdown
 app.get('/api/draft-modes', (req, res) => {
   res.json({ ok: true, modes: listDraftModes() });
 });
 
-// POST /api/draft-email
-// { contact, sender, contactId?, companyKey?, mode?, extraInstructions? }
-// mode omitted (or 'cold_outreach') -> byte-identical to the original
-// drafting behavior. Any other mode pulls in company notes + event context
-// automatically from the CRM, plus whatever free-text instructions were given.
 app.post('/api/draft-email', async (req, res) => {
   try {
     const { contact, sender, contactId, companyKey, mode, extraInstructions } = req.body;
     if (!contact) return res.status(400).json({ error: 'No contact provided' });
 
-    // Pull company context (notes/opportunity/background + event name) from
-    // the CRM automatically, so drafting modes can reference it without the
-    // caller having to look it up first.
     let context = {};
     if (mode && mode !== 'cold_outreach') {
-      const companyRow = findCompanyByName(contact.company || '');
+      const companyRow = await findCompanyByName(contact.company || '');
       if (companyRow) {
         const notesParts = [companyRow.notes, companyRow.background, companyRow.opportunity].filter(Boolean);
         context.companyNotes = notesParts.join(' | ');
         if (companyRow.event_id) {
-          const event = listEvents().find((e) => e.id === companyRow.event_id);
+          const events = await listEvents();
+          const event = events.find((e) => e.id === companyRow.event_id);
           if (event) context.eventName = event.name;
         }
       }
@@ -673,11 +625,11 @@ app.post('/api/draft-email', async (req, res) => {
     const resolvedContactId = contactId || contact.contact_id;
 
     if (resolvedContactId) {
-      updateContactDraft(Number(resolvedContactId), draft);
-      insertEmailDraftVersion(Number(resolvedContactId), draft);
-      logContactActivity(Number(resolvedContactId), 'draft_generated', `Mode: ${mode || 'cold_outreach'}`);
+      await updateContactDraft(Number(resolvedContactId), draft);
+      await insertEmailDraftVersion(Number(resolvedContactId), draft);
+      await logContactActivity(Number(resolvedContactId), 'draft_generated', `Mode: ${mode || 'cold_outreach'}`);
     } else if (companyKey) {
-      updateCachedLeadDraft(companyCacheKey(companyKey), contact.apollo_id, contact.name, draft);
+      await updateCachedLeadDraft(companyCacheKey(companyKey), contact.apollo_id, contact.name, draft);
     }
 
     res.json(draft);
@@ -687,10 +639,10 @@ app.post('/api/draft-email', async (req, res) => {
   }
 });
 
-// GET /api/contacts/:id/drafts -> full versioned draft history for a contact
-app.get('/api/contacts/:id/drafts', (req, res) => {
+// GET /api/contacts/:id/drafts
+app.get('/api/contacts/:id/drafts', async (req, res) => {
   try {
-    res.json({ ok: true, drafts: listEmailDraftsForContact(Number(req.params.id)) });
+    res.json({ ok: true, drafts: await listEmailDraftsForContact(Number(req.params.id)) });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load draft history' });
   }
@@ -700,19 +652,19 @@ app.get('/api/contacts/:id/drafts', (req, res) => {
 // Sender profile
 // =========================================================================
 
-app.get('/api/settings/sender', (req, res) => {
+app.get('/api/settings/sender', async (req, res) => {
   try {
-    const raw = getSetting('sender_profile');
+    const raw = await getSetting('sender_profile');
     res.json({ ok: true, sender: raw ? JSON.parse(raw) : { name: '', title: '', company: '' } });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load sender profile' });
   }
 });
 
-app.post('/api/settings/sender', (req, res) => {
+app.post('/api/settings/sender', async (req, res) => {
   try {
     const { name = '', title = '', company = '' } = req.body || {};
-    setSetting('sender_profile', JSON.stringify({ name, title, company }));
+    await setSetting('sender_profile', JSON.stringify({ name, title, company }));
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to save sender profile' });
@@ -736,8 +688,8 @@ app.post('/api/usage/reset', (req, res) => {
 // Export (CSV / XML / XLSX / JSON)
 // =========================================================================
 
-function getContactsForCompany(company) {
-  const saved = listContactsByCompany(company);
+async function getContactsForCompany(company) {
+  const saved = await listContactsByCompany(company);
   return saved.map((c) => ({
     name: c.full_name, title: c.job_title, company: c.company, department: c.department,
     email: c.email, linkedin: c.linkedin_url, confidence: c.confidence, relevance: c.relevance,
@@ -755,7 +707,7 @@ app.get('/api/export', async (req, res) => {
       return res.status(400).send('Unsupported format. Use json, xml, csv, or xlsx.');
     }
 
-    const contacts = getContactsForCompany(company);
+    const contacts = await getContactsForCompany(company);
     const safe = safeFilename(company);
 
     if (format === 'json') {
@@ -782,11 +734,11 @@ app.get('/api/export', async (req, res) => {
   }
 });
 
-app.get('/api/export-csv', (req, res) => {
+app.get('/api/export-csv', async (req, res) => {
   try {
     const company = (req.query.company || '').trim();
     if (!company) return res.status(400).send("Missing 'company' parameter.");
-    const contacts = getContactsForCompany(company);
+    const contacts = await getContactsForCompany(company);
     const safe = safeFilename(company);
     res.set('Content-Type', 'text/csv');
     res.set('Content-Disposition', `attachment; filename="${safe}_crm.csv"`);
@@ -810,6 +762,18 @@ app.post('/api/export-xlsx', async (req, res) => {
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Lead Finder (+ card scanner) running at http://0.0.0.0:${PORT}`);
-});
+// =========================================================================
+// Startup: init DB schema, then start OCR worker and HTTP server
+// =========================================================================
+
+initDb()
+  .then(() => {
+    initOcrWorker();
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Lead Finder (+ card scanner) running at http://0.0.0.0:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to initialize database:', err.message);
+    process.exit(1);
+  });
