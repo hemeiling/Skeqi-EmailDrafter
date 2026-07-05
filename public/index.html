@@ -71,6 +71,23 @@
     .btn-orange:hover:not(:disabled) { background: #c2410c; }
     .btn-saved { background: #16a34a; color: #fff; }
     .btn-saved:hover:not(:disabled) { background: #15803d; }
+    /* CRM layout */
+    .crm-flex-wrap { display: flex; gap: 16px; align-items: flex-start; }
+    .crm-main-col  { flex: 1; min-width: 0; }
+    #crm-sidebar {
+      width: 210px; flex-shrink: 0;
+      background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;
+      max-height: 640px; display: flex; flex-direction: column; overflow: hidden;
+      position: sticky; top: 16px;
+    }
+    .crm-sb-inner  { overflow-y: auto; padding: 10px 10px 14px; flex: 1; }
+    .crm-sb-title  { font-weight: 600; font-size: 0.8rem; color: #374151; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #e5e7eb; }
+    .crm-sb-section { font-size: 0.68rem; font-weight: 700; color: #9ca3af; text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 4px; }
+    .crm-sb-list   { display: flex; flex-direction: column; gap: 1px; }
+    .crm-sb-item   { font-size: 0.75rem; padding: 5px 6px; border-radius: 4px; cursor: pointer; color: #374151; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .crm-sb-item:hover { background: #e5e7eb; }
+    /* CRM pagination */
+    #crm-pagination { display: flex; align-items: center; gap: 10px; justify-content: center; margin-top: 12px; min-height: 32px; }
 
     .search-row { display: flex; gap: 10px; align-items: flex-end; }
     .search-row .input-wrap { flex: 1; }
@@ -435,65 +452,86 @@
       <span class="toggle-icon" id="crm-toggle-icon">▼</span>
     </div>
     <div id="crm-body">
-      <div class="search-row" style="margin-bottom:14px;">
-        <div class="input-wrap">
-          <label for="crm-search-input">Look up existing contacts or companies</label>
-          <input type="text" id="crm-search-input" placeholder="Search by name, company, email, or tag…" />
-        </div>
-        <button class="btn-ghost" id="crm-refresh-btn">Refresh</button>
-      </div>
+      <div class="crm-flex-wrap">
 
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
-        <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Event</label><input type="text" id="crm-filter-event" placeholder="e.g. Battery Show" style="font-size:12px;padding:6px 8px;" /></div>
-        <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Industry</label><input type="text" id="crm-filter-industry" placeholder="e.g. Battery" style="font-size:12px;padding:6px 8px;" /></div>
-        <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Follow-up status</label>
-          <select id="crm-filter-status" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;background:#fff;">
-            <option value="">Any</option>
-            <option value="not_contacted">Not contacted</option>
-            <option value="contacted">Contacted</option>
-            <option value="replied">Replied</option>
-            <option value="meeting_scheduled">Meeting scheduled</option>
-            <option value="closed">Closed</option>
-          </select>
-        </div>
-        <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Salesperson</label><input type="text" id="crm-filter-owner" placeholder="e.g. Sarah Chen" style="font-size:12px;padding:6px 8px;" /></div>
-      </div>
-      <button class="btn-sm btn-ghost" id="crm-apply-filters-btn" style="margin-bottom:14px;">Apply filters</button>
-      <button class="btn-sm btn-ghost" id="crm-clear-filters-btn" style="margin-bottom:14px;">Clear</button>
+        <!-- ── Main CRM column ── -->
+        <div class="crm-main-col">
+          <div class="search-row" style="margin-bottom:14px;">
+            <div class="input-wrap">
+              <label for="crm-search-input">Look up existing contacts or companies</label>
+              <input type="text" id="crm-search-input" placeholder="Search by name, company, email, or tag…" />
+            </div>
+            <button class="btn-ghost" id="crm-refresh-btn">Refresh</button>
+          </div>
 
-      <div class="csv-header">
-        <div class="csv-count" id="crm-count"></div>
-        <div class="csv-actions">
-          <label style="font-size:0.8rem;color:#555;cursor:pointer">
-            <input type="checkbox" id="crm-select-all"> Select all
-          </label>
-        </div>
-      </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
+            <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Event</label><input type="text" id="crm-filter-event" placeholder="e.g. Battery Show" style="font-size:12px;padding:6px 8px;" /></div>
+            <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Industry</label><input type="text" id="crm-filter-industry" placeholder="e.g. Battery" style="font-size:12px;padding:6px 8px;" /></div>
+            <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Follow-up status</label>
+              <select id="crm-filter-status" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;background:#fff;">
+                <option value="">Any</option>
+                <option value="not_contacted">Not contacted</option>
+                <option value="contacted">Contacted</option>
+                <option value="replied">Replied</option>
+                <option value="meeting_scheduled">Meeting scheduled</option>
+                <option value="closed">Closed</option>
+              </select>
+            </div>
+            <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Salesperson</label><input type="text" id="crm-filter-owner" placeholder="e.g. Sarah Chen" style="font-size:12px;padding:6px 8px;" /></div>
+          </div>
+          <button class="btn-sm btn-ghost" id="crm-apply-filters-btn" style="margin-bottom:14px;">Apply filters</button>
+          <button class="btn-sm btn-ghost" id="crm-clear-filters-btn" style="margin-bottom:14px;">Clear</button>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
-        <div>
-          <label style="display:block;font-size:0.8rem;color:#555;margin-bottom:4px;">Draft purpose/context</label>
-          <select id="crm-mode-select" style="width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff;"></select>
-        </div>
-        <div>
-          <label style="display:block;font-size:0.8rem;color:#555;margin-bottom:4px;">Additional instructions <span style="color:#9ca3af">(optional)</span></label>
-          <input type="text" id="crm-extra-instructions" placeholder="e.g. mention our new automation line" />
-        </div>
-      </div>
-      <button class="btn-orange btn-sm" id="crm-bulk-draft-btn" style="margin-bottom:14px;">Draft Emails for Selected</button>
+          <div class="csv-header">
+            <div class="csv-count" id="crm-count"></div>
+            <div class="csv-actions">
+              <label style="font-size:0.8rem;color:#555;cursor:pointer">
+                <input type="checkbox" id="crm-select-all"> Select all on page
+              </label>
+            </div>
+          </div>
 
-      <div class="table-wrap">
-        <table class="company-table">
-          <thead>
-            <tr>
-              <th class="col-check"></th>
-              <th>Name</th><th>Title</th><th>Company</th><th>Email</th><th>Source</th>
-              <th>Tags</th><th>Status</th><th>Last Contacted</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="crm-tbody"></tbody>
-        </table>
-      </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
+            <div>
+              <label style="display:block;font-size:0.8rem;color:#555;margin-bottom:4px;">Draft purpose/context</label>
+              <select id="crm-mode-select" style="width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff;"></select>
+            </div>
+            <div>
+              <label style="display:block;font-size:0.8rem;color:#555;margin-bottom:4px;">Additional instructions <span style="color:#9ca3af">(optional)</span></label>
+              <input type="text" id="crm-extra-instructions" placeholder="e.g. mention our new automation line" />
+            </div>
+          </div>
+          <button class="btn-orange btn-sm" id="crm-bulk-draft-btn" style="margin-bottom:14px;">Draft Emails for Selected</button>
+
+          <div class="table-wrap">
+            <table class="company-table">
+              <thead>
+                <tr>
+                  <th class="col-check"></th>
+                  <th>Name</th><th>Title</th><th>Company</th><th>Email</th><th>Source</th>
+                  <th>Tags</th><th>Status</th><th>Last Contacted</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="crm-tbody"></tbody>
+            </table>
+          </div>
+          <div id="crm-pagination"></div>
+        </div><!-- /crm-main-col -->
+
+        <!-- ── Quick Browse sidebar ── -->
+        <aside id="crm-sidebar">
+          <div class="crm-sb-inner">
+            <div class="crm-sb-title">Quick Browse</div>
+            <input type="text" id="crm-sidebar-search" placeholder="Filter list…"
+              style="width:100%;box-sizing:border-box;font-size:12px;padding:5px 8px;border:1px solid #d1d5db;border-radius:5px;margin-bottom:6px;" />
+            <div class="crm-sb-section">Companies</div>
+            <div id="crm-sidebar-companies" class="crm-sb-list"></div>
+            <div class="crm-sb-section">Recent Contacts</div>
+            <div id="crm-sidebar-contacts" class="crm-sb-list"></div>
+          </div>
+        </aside>
+
+      </div><!-- /crm-flex-wrap -->
     </div>
   </div>
 

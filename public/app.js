@@ -1163,6 +1163,8 @@ function renderBatchResults(results) {
    ======================================================================= */
 
 let _crmContacts = [];
+let _crmPage = 1;
+const CRM_PAGE_SIZE = 10;
 
 document.getElementById("crm-toggle").addEventListener("click", () => {
   const body = document.getElementById("crm-body");
@@ -1188,7 +1190,9 @@ async function loadCrmContacts(query, filters) {
     const r = await fetch(url);
     const d = await r.json();
     _crmContacts = d.contacts || [];
+    _crmPage = 1;
     renderCrmTable(_crmContacts);
+    renderCrmSidebar(_crmContacts);
   } catch (e) { /* silent */ }
 }
 
@@ -1211,15 +1215,24 @@ document.getElementById("crm-clear-filters-btn").addEventListener("click", () =>
 const FOLLOW_UP_STATUSES = ["not_contacted", "contacted", "replied", "meeting_scheduled", "closed"];
 
 function renderCrmTable(contacts) {
-  document.getElementById("crm-count").textContent =
-    `${contacts.length} contact${contacts.length !== 1 ? "s" : ""} in your CRM`;
+  const total = contacts.length;
+  const totalPages = Math.max(1, Math.ceil(total / CRM_PAGE_SIZE));
+  if (_crmPage > totalPages) _crmPage = totalPages;
 
-  document.getElementById("crm-tbody").innerHTML = contacts.map((c, i) => `
-    <tr>
+  const pageStart = (_crmPage - 1) * CRM_PAGE_SIZE;
+  const pageEnd   = Math.min(pageStart + CRM_PAGE_SIZE, total);
+  const pageSlice = contacts.slice(pageStart, pageEnd);
+
+  document.getElementById("crm-count").textContent =
+    `${total} contact${total !== 1 ? "s" : ""} in your CRM`;
+
+  document.getElementById("crm-tbody").innerHTML = pageSlice.map((c, pi) => {
+    const i = pageStart + pi;  // index into _crmContacts
+    return `<tr>
       <td class="col-check"><input type="checkbox" class="crm-check" data-idx="${i}"></td>
       <td>${escapeHtml(c.full_name || "Unnamed")}</td>
-      <td>${escapeHtml(c.job_title)}</td>
-      <td>${escapeHtml(c.company)}</td>
+      <td>${escapeHtml(c.job_title || "")}</td>
+      <td>${escapeHtml(c.company || "")}</td>
       <td style="font-size:0.76rem;">${c.email ? escapeHtml(c.email) : '<span style="color:#9ca3af">N/A</span>'}</td>
       <td><span class="badge badge-source">${escapeHtml(c.source || "manual")}</span></td>
       <td><input type="text" class="crm-tags-input" data-id="${c.id}" value="${escapeAttr(c.tags || "")}"
@@ -1237,8 +1250,8 @@ function renderCrmTable(contacts) {
           : `<button class="btn-sm btn-primary crm-draft-btn" data-idx="${i}">Draft Email</button>`}
         <button class="btn-sm btn-ghost crm-details-btn" data-idx="${i}">Details</button>
       </td>
-    </tr>
-  `).join("");
+    </tr>`;
+  }).join("");
 
   document.querySelectorAll(".crm-tags-input").forEach(inp => {
     inp.addEventListener("change", () => patchCrmContact(inp.dataset.id, { tags: inp.value.trim() }));
@@ -1276,6 +1289,68 @@ function renderCrmTable(contacts) {
   document.querySelectorAll(".crm-details-btn").forEach(btn => {
     btn.addEventListener("click", () => openContactDetailModal(_crmContacts[Number(btn.dataset.idx)]));
   });
+
+  renderCrmPagination(total, totalPages);
+}
+
+function renderCrmPagination(total, totalPages) {
+  const el = document.getElementById("crm-pagination");
+  if (!el) return;
+  if (totalPages <= 1) { el.innerHTML = ""; return; }
+  el.innerHTML = `
+    <button class="btn-sm btn-ghost" id="crm-prev-btn" ${_crmPage <= 1 ? "disabled" : ""}>← Prev</button>
+    <span style="font-size:0.85rem;color:#555;">Page ${_crmPage} of ${totalPages}</span>
+    <button class="btn-sm btn-ghost" id="crm-next-btn" ${_crmPage >= totalPages ? "disabled" : ""}>Next →</button>`;
+  document.getElementById("crm-prev-btn").addEventListener("click", () => {
+    if (_crmPage > 1) { _crmPage--; renderCrmTable(_crmContacts); }
+  });
+  document.getElementById("crm-next-btn").addEventListener("click", () => {
+    if (_crmPage < totalPages) { _crmPage++; renderCrmTable(_crmContacts); }
+  });
+}
+
+function renderCrmSidebar(contacts) {
+  const companies = [...new Set(contacts.map(c => c.company).filter(Boolean))].sort().slice(0, 40);
+  const recentContacts = contacts.slice(0, 35);
+
+  const companiesEl = document.getElementById("crm-sidebar-companies");
+  if (companiesEl) {
+    companiesEl.innerHTML = companies.length
+      ? companies.map(name => `<div class="crm-sb-item" data-val="${escapeAttr(name)}">${escapeHtml(name)}</div>`).join("")
+      : `<div style="font-size:0.73rem;color:#9ca3af;padding:4px 6px;">No companies yet</div>`;
+    companiesEl.querySelectorAll(".crm-sb-item").forEach(el => {
+      el.addEventListener("click", () => {
+        document.getElementById("crm-search-input").value = el.dataset.val;
+        loadCrmContacts(el.dataset.val);
+      });
+    });
+  }
+
+  const contactsEl = document.getElementById("crm-sidebar-contacts");
+  if (contactsEl) {
+    contactsEl.innerHTML = recentContacts.length
+      ? recentContacts.map(c => `<div class="crm-sb-item crm-sb-contact-item" data-val="${escapeAttr(c.full_name || "")}">
+          <div style="font-size:0.75rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(c.full_name || "Unnamed")}</div>
+          <div style="font-size:0.7rem;color:#9ca3af;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(c.company || "")}</div>
+        </div>`).join("")
+      : `<div style="font-size:0.73rem;color:#9ca3af;padding:4px 6px;">No contacts yet</div>`;
+    contactsEl.querySelectorAll(".crm-sb-contact-item").forEach(el => {
+      el.addEventListener("click", () => {
+        document.getElementById("crm-search-input").value = el.dataset.val;
+        loadCrmContacts(el.dataset.val);
+      });
+    });
+  }
+
+  const searchEl = document.getElementById("crm-sidebar-search");
+  if (searchEl) {
+    searchEl.oninput = function () {
+      const term = this.value.toLowerCase();
+      document.querySelectorAll("#crm-sidebar-companies .crm-sb-item, #crm-sidebar-contacts .crm-sb-item").forEach(el => {
+        el.style.display = el.textContent.toLowerCase().includes(term) ? "" : "none";
+      });
+    };
+  }
 }
 
 function crmRowToDraftFormat(c) {
