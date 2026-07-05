@@ -998,23 +998,76 @@ app.post('/api/communications/:id/duplicate', async (req, res) => {
   }
 });
 
-// POST /api/contacts — manual contact creation
-app.post('/api/contacts', async (req, res) => {
+// GET /api/contacts/check-duplicate — pre-save duplicate detection
+app.get('/api/contacts/check-duplicate', async (req, res) => {
+  try {
+    const { email, first_name, last_name, company } = req.query;
+    const fullName = [first_name, last_name].filter(Boolean).join(' ');
+    const match = await findExistingContact(email || '', fullName, company || '', '');
+    if (match) {
+      res.json({
+        duplicate: true,
+        contact: {
+          id: match.id, full_name: match.full_name, email: match.email || '',
+          company: match.company || '', job_title: match.job_title || '',
+          source: match.source || ''
+        }
+      });
+    } else {
+      res.json({ duplicate: false });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/contacts/manual — manual contact creation from CRM form
+app.post('/api/contacts/manual', async (req, res) => {
   try {
     const c = req.body;
-    if (!c.full_name && !c.email) {
-      return res.status(400).json({ error: 'full_name or email is required' });
+    const firstName = (c.first_name || '').trim();
+    const lastName = (c.last_name || '').trim();
+    const fullName = (c.full_name || [firstName, lastName].filter(Boolean).join(' ')).trim();
+
+    if (!firstName && !lastName && !fullName && !c.email) {
+      return res.status(400).json({ error: 'Name or email is required' });
     }
+
+    // Upsert company with full details so industry/website/notes are stored
+    let companyId = null;
+    if (c.company) {
+      const compResult = await upsertCompany({
+        name: c.company,
+        industry: c.industry || '',
+        website: c.website || '',
+        notes: c.company_notes || '',
+        event_name: c.event_name || '',
+        booth: c.booth_number || '',
+      });
+      if (compResult) companyId = compResult.id;
+    }
+
     const { id, updated } = await upsertContact({
-      full_name: c.full_name || '', email: c.email || '',
-      phone: c.phone || '', job_title: c.job_title || '',
-      company: c.company || '', linkedin_url: c.linkedin_url || '',
-      tags: c.tags || '', notes: c.notes || '',
-      source: c.source || 'manual',
-      email_lookup_status: c.email ? 'found' : 'not_checked'
+      first_name: firstName, last_name: lastName, full_name: fullName,
+      email: c.email || '', phone: c.phone || '',
+      job_title: c.job_title || '', department: c.department || '',
+      company: c.company || '', company_id: companyId,
+      linkedin_url: c.linkedin_url || '', tags: c.tags || '',
+      notes: c.contact_notes || c.notes || '',
+      meeting_notes: c.meeting_notes || '',
+      website: c.website || '',
+      source: 'manual',
+      contact_status: c.contact_status || 'prospect',
+      follow_up_status: c.follow_up_status || 'not_contacted',
+      priority: c.priority || 'medium',
+      country: c.country || '',
+      event_name: c.event_name || '',
+      booth_number: c.booth_number || '',
+      email_lookup_status: c.email ? 'found' : 'not_checked',
     });
-    await logContactActivity(id, 'manual_create', `Contact created manually: ${c.full_name || c.email}`);
-    res.json({ ok: true, id, updated });
+
+    await logContactActivity(id, 'manual_create', `Contact created manually: ${fullName || c.email}`);
+    res.json({ ok: true, id, updated, full_name: fullName });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

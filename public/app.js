@@ -1914,61 +1914,172 @@ refreshNeedsReviewBadge();
 
 // ── Manual contact creation ──────────────────────────────────────────────────
 const addContactModal = document.getElementById("add-contact-modal");
+let _acSkipDupeCheck = false; // set true when user explicitly chooses "save anyway"
 
-document.getElementById("crm-add-contact-btn").addEventListener("click", () => {
-  ["ac-name","ac-email","ac-phone","ac-title","ac-company","ac-linkedin","ac-tags","ac-notes"]
-    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ""; });
+function acResetForm() {
+  const ids = ["ac-first-name","ac-last-name","ac-title","ac-department","ac-email","ac-phone",
+                "ac-linkedin","ac-tags","ac-contact-notes","ac-company","ac-industry",
+                "ac-website","ac-country","ac-event","ac-booth","ac-company-notes"];
+  ids.forEach(id => { const el = document.getElementById(id); if (el) el.value = ""; });
+  const selects = ["ac-status","ac-followup","ac-priority"];
+  selects.forEach(id => { const el = document.getElementById(id); if (el) el.selectedIndex = 0; });
   const err = document.getElementById("ac-error");
   if (err) { err.style.display = "none"; err.textContent = ""; }
+  const dupe = document.getElementById("ac-duplicate-warning");
+  if (dupe) dupe.style.display = "none";
+  _acSkipDupeCheck = false;
+}
+
+function acGetPayload() {
+  return {
+    first_name: document.getElementById("ac-first-name").value.trim(),
+    last_name: document.getElementById("ac-last-name").value.trim(),
+    email: document.getElementById("ac-email").value.trim(),
+    phone: document.getElementById("ac-phone").value.trim(),
+    job_title: document.getElementById("ac-title").value.trim(),
+    department: document.getElementById("ac-department").value.trim(),
+    linkedin_url: document.getElementById("ac-linkedin").value.trim(),
+    tags: document.getElementById("ac-tags").value.trim(),
+    contact_notes: document.getElementById("ac-contact-notes").value.trim(),
+    company: document.getElementById("ac-company").value.trim(),
+    industry: document.getElementById("ac-industry").value.trim(),
+    website: document.getElementById("ac-website").value.trim(),
+    country: document.getElementById("ac-country").value.trim(),
+    event_name: document.getElementById("ac-event").value.trim(),
+    booth_number: document.getElementById("ac-booth").value.trim(),
+    company_notes: document.getElementById("ac-company-notes").value.trim(),
+    contact_status: document.getElementById("ac-status").value,
+    follow_up_status: document.getElementById("ac-followup").value,
+    priority: document.getElementById("ac-priority").value,
+    source: "manual",
+  };
+}
+
+async function acCheckDuplicate(payload) {
+  if (_acSkipDupeCheck) return false;
+  const params = new URLSearchParams();
+  if (payload.email) params.set("email", payload.email);
+  if (payload.first_name) params.set("first_name", payload.first_name);
+  if (payload.last_name) params.set("last_name", payload.last_name);
+  if (payload.company) params.set("company", payload.company);
+  try {
+    const r = await fetch(`/api/contacts/check-duplicate?${params}`);
+    const d = await r.json();
+    if (d.duplicate && d.contact) {
+      const c = d.contact;
+      document.getElementById("ac-duplicate-info").innerHTML =
+        `<strong>${escapeHtml(c.full_name)}</strong>` +
+        (c.job_title ? ` · ${escapeHtml(c.job_title)}` : "") +
+        (c.company ? ` at ${escapeHtml(c.company)}` : "") +
+        (c.email ? `<br>${escapeHtml(c.email)}` : "") +
+        `<br><span style="color:#92400e;">Source: ${escapeHtml(c.source || "")}</span>`;
+      document.getElementById("ac-duplicate-warning").style.display = "";
+      document.getElementById("ac-view-existing-btn").dataset.contactId = c.id;
+      return true;
+    }
+  } catch (_) {}
+  document.getElementById("ac-duplicate-warning").style.display = "none";
+  return false;
+}
+
+async function acSaveContact(closeAfter) {
+  const errEl = document.getElementById("ac-error");
+  const payload = acGetPayload();
+  const firstName = payload.first_name;
+  const lastName = payload.last_name;
+
+  if (!firstName && !lastName && !payload.email) {
+    errEl.textContent = "First name, last name, or email is required.";
+    errEl.style.display = "";
+    return false;
+  }
+  errEl.style.display = "none"; errEl.textContent = "";
+
+  // Duplicate check (skipped if user already clicked "save anyway")
+  const isDupe = await acCheckDuplicate(payload);
+  if (isDupe) return false; // banner shown, user must decide
+
+  const [btnSave, btnAnother] = [
+    document.getElementById("add-contact-submit-btn"),
+    document.getElementById("add-contact-save-another-btn"),
+  ];
+  btnSave.disabled = btnAnother.disabled = true;
+  btnSave.textContent = "Saving…";
+
+  try {
+    const r = await fetch("/api/contacts/manual", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "Failed to create contact");
+
+    const name = d.full_name || [firstName, lastName].filter(Boolean).join(" ") || payload.email;
+    showMessage(`Contact "${name}" added.`, "info");
+    loadCrmContacts(document.getElementById("crm-search-input").value);
+
+    if (closeAfter) {
+      addContactModal.classList.remove("open");
+    } else {
+      acResetForm();
+      document.getElementById("ac-first-name").focus();
+    }
+    return true;
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.style.display = "";
+    return false;
+  } finally {
+    btnSave.disabled = btnAnother.disabled = false;
+    btnSave.textContent = "Save Contact";
+    btnAnother.textContent = "Save & Add Another";
+  }
+}
+
+document.getElementById("crm-add-contact-btn").addEventListener("click", () => {
+  acResetForm();
   addContactModal.classList.add("open");
+  document.getElementById("ac-first-name").focus();
 });
 
 document.getElementById("add-contact-close").addEventListener("click", () => {
+  addContactModal.classList.remove("open");
+});
+document.getElementById("add-contact-cancel-btn").addEventListener("click", () => {
   addContactModal.classList.remove("open");
 });
 addContactModal.addEventListener("click", (e) => {
   if (e.target === addContactModal) addContactModal.classList.remove("open");
 });
 
-document.getElementById("add-contact-submit-btn").addEventListener("click", async () => {
-  const btn = document.getElementById("add-contact-submit-btn");
-  const fullName = document.getElementById("ac-name").value.trim();
-  const errEl = document.getElementById("ac-error");
-  if (!fullName) {
-    if (errEl) { errEl.textContent = "Full name is required."; errEl.style.display = ""; }
-    return;
-  }
-  if (errEl) { errEl.style.display = "none"; errEl.textContent = ""; }
+document.getElementById("add-contact-submit-btn").addEventListener("click", () => acSaveContact(true));
+document.getElementById("add-contact-save-another-btn").addEventListener("click", () => acSaveContact(false));
 
-  const payload = {
-    full_name: fullName,
-    email: document.getElementById("ac-email").value.trim(),
-    phone: document.getElementById("ac-phone").value.trim(),
-    job_title: document.getElementById("ac-title").value.trim(),
-    company: document.getElementById("ac-company").value.trim(),
-    linkedin_url: document.getElementById("ac-linkedin").value.trim(),
-    tags: document.getElementById("ac-tags").value.trim(),
-    meeting_notes: document.getElementById("ac-notes").value.trim(),
-    source: "manual",
-  };
-
-  btn.disabled = true;
-  btn.textContent = "Saving…";
-  try {
-    const r = await fetch("/api/contacts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || "Failed to create contact");
+// Duplicate warning actions
+document.getElementById("ac-save-anyway-btn").addEventListener("click", () => {
+  _acSkipDupeCheck = true;
+  document.getElementById("ac-duplicate-warning").style.display = "none";
+  acSaveContact(true);
+});
+document.getElementById("ac-view-existing-btn").addEventListener("click", () => {
+  const id = document.getElementById("ac-view-existing-btn").dataset.contactId;
+  if (!id) return;
+  const contact = _crmContacts.find(c => String(c.id) === String(id));
+  if (contact) {
     addContactModal.classList.remove("open");
-    showMessage(`Contact "${fullName}" added.`, "info");
-    loadCrmContacts(document.getElementById("crm-search-input").value);
-  } catch (err) {
-    showMessage(err.message, "error");
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Save Contact";
+    openContactDetailModal(contact);
+  } else {
+    // Contact might not be on the current page — navigate to CRM and search
+    addContactModal.classList.remove("open");
+    showMessage("Opening CRM to find existing contact…", "info");
+    loadCrmContacts(""); // reload without filter so the contact appears
+  }
+});
+
+// Trigger duplicate check on email blur (fast feedback while typing)
+document.getElementById("ac-email").addEventListener("blur", async () => {
+  const email = document.getElementById("ac-email").value.trim();
+  if (email && !_acSkipDupeCheck) {
+    await acCheckDuplicate(acGetPayload());
   }
 });

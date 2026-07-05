@@ -91,6 +91,9 @@ async function initDb() {
   // Migrations: add columns to existing databases that predate them
   await pool.query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS has_email BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS email_lookup_status TEXT DEFAULT 'not_checked'`);
+  await pool.query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS contact_status TEXT DEFAULT 'prospect'`);
+  await pool.query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'medium'`);
+  await pool.query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS country TEXT DEFAULT ''`);
   // Backfill: contacts that already have an email were implicitly found
   await pool.query(`UPDATE contacts SET email_lookup_status = 'found' WHERE email IS NOT NULL AND email != '' AND email_lookup_status != 'found'`);
 
@@ -377,12 +380,13 @@ async function insertContact(c) {
       draft_subject, draft_body, draft_followup, draft_rationale,
       tags, follow_up_status, last_contacted_at,
       event_id, booth_number, meeting_date, meeting_notes, interest_level,
-      products_discussed, assigned_salesperson, has_email, email_lookup_status
+      products_discussed, assigned_salesperson, has_email, email_lookup_status,
+      contact_status, priority, country
     ) VALUES (
       $1,  $2,  $3,  $4,  $5,  $6,  $7,  $8,  $9,  $10,
       $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
       $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
-      $31, $32, $33, $34, $35, $36, $37
+      $31, $32, $33, $34, $35, $36, $37, $38, $39, $40
     ) RETURNING id
   `, [
     first_name, last_name, c.full_name || '', c.job_title || '', c.department || '', c.seniority || '',
@@ -397,7 +401,8 @@ async function insertContact(c) {
     eventId, c.booth_number || '', c.meeting_date || '', c.meeting_notes || '', c.interest_level || '',
     c.products_discussed || '', c.assigned_salesperson || '',
     c.has_email !== undefined ? Boolean(c.has_email) : false,
-    c.email ? 'found' : (c.email_lookup_status || 'not_checked')
+    c.email ? 'found' : (c.email_lookup_status || 'not_checked'),
+    c.contact_status || 'prospect', c.priority || 'medium', c.country || ''
   ]);
   return id;
 }
@@ -534,13 +539,13 @@ async function updateContact(id, c) {
     assigned_salesperson: pick(c.assigned_salesperson, existing.assigned_salesperson),
     has_email: c.has_email !== undefined ? Boolean(c.has_email) : Boolean(existing.has_email),
     email_lookup_status: (() => {
-      // Explicit value wins
       if (c.email_lookup_status) return c.email_lookup_status;
-      // If we're writing an email that wasn't there before, mark as found
       if (merged.email && !existing.email) return 'found';
-      // Otherwise preserve existing status
       return existing.email_lookup_status || 'not_checked';
-    })()
+    })(),
+    contact_status: pick(c.contact_status, existing.contact_status) || 'prospect',
+    priority: pick(c.priority, existing.priority) || 'medium',
+    country: pick(c.country, existing.country) || '',
   };
 
   await q(`
@@ -553,8 +558,8 @@ async function updateContact(id, c) {
       tags=$26,       follow_up_status=$27, last_contacted_at=$28,
       event_id=$29,   booth_number=$30, meeting_date=$31,    meeting_notes=$32,   interest_level=$33,
       products_discussed=$34, assigned_salesperson=$35, has_email=$36,
-      email_lookup_status=$37, updated_at=NOW()
-    WHERE id=$38
+      email_lookup_status=$37, contact_status=$38, priority=$39, country=$40, updated_at=NOW()
+    WHERE id=$41
   `, [
     merged.first_name, merged.last_name, merged.full_name, merged.job_title, merged.department, merged.seniority,
     merged.email, merged.phone, merged.website, merged.linkedin_url, merged.company, merged.company_id,
@@ -564,7 +569,7 @@ async function updateContact(id, c) {
     merged.tags, merged.follow_up_status, merged.last_contacted_at,
     merged.event_id, merged.booth_number, merged.meeting_date, merged.meeting_notes, merged.interest_level,
     merged.products_discussed, merged.assigned_salesperson, merged.has_email,
-    merged.email_lookup_status,
+    merged.email_lookup_status, merged.contact_status, merged.priority, merged.country,
     id
   ]);
 }

@@ -115,6 +115,18 @@
     .tl-actions button:hover { background:#f3f4f6; }
     /* CRM pagination */
     #crm-pagination { display: flex; align-items: center; gap: 10px; justify-content: center; margin-top: 12px; min-height: 32px; }
+    /* Add Contact modal form */
+    .ac-section-header { font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin:14px 0 8px;border-bottom:1px solid #e5e7eb;padding-bottom:4px; }
+    .ac-section-header:first-of-type { margin-top:0; }
+    .ac-field-row { display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px; }
+    .ac-field { display:flex;flex-direction:column;gap:3px; }
+    .ac-field > label { font-size:0.78rem;color:#374151;font-weight:500; }
+    .ac-field input,.ac-field select,.ac-field textarea { font-size:0.82rem;border:1px solid #d1d5db;border-radius:5px;padding:6px 8px;width:100%;box-sizing:border-box;background:#fff; }
+    .ac-field input:focus,.ac-field select:focus,.ac-field textarea:focus { outline:none;border-color:#6366f1;box-shadow:0 0 0 2px #e0e7ff; }
+    .ac-field input[disabled] { background:#f9fafb;color:#9ca3af; }
+    .ac-required { color:#ef4444; }
+    .ac-optional { color:#9ca3af;font-weight:400; }
+    @media (max-width:560px) { .ac-field-row { grid-template-columns:1fr; } }
 
     .search-row { display: flex; gap: 10px; align-items: flex-end; }
     .search-row .input-wrap { flex: 1; }
@@ -569,25 +581,101 @@
   <!-- ── Contact detail editor modal (conference fields) ── -->
   <!-- ── Manual contact creation modal ── -->
   <div class="modal-overlay" id="add-contact-modal">
-    <div class="modal" style="max-width:520px;">
+    <div class="modal" style="max-width:620px;max-height:90vh;overflow-y:auto;padding-bottom:20px;">
       <button class="modal-close" id="add-contact-close" title="Close">×</button>
-      <h2>Add Contact Manually</h2>
-      <div class="field-row">
-        <div class="field"><label>Full Name *</label><input type="text" id="ac-name" /></div>
-        <div class="field"><label>Email</label><input type="email" id="ac-email" /></div>
+      <h2 style="margin-bottom:14px;">Add Contact</h2>
+
+      <!-- Duplicate warning banner -->
+      <div id="ac-duplicate-warning" style="display:none;background:#fffbeb;border:1px solid #fbbf24;border-radius:6px;padding:10px 14px;margin-bottom:14px;">
+        <strong style="color:#92400e;font-size:0.85rem;">Similar contact already exists:</strong>
+        <div id="ac-duplicate-info" style="font-size:0.8rem;color:#78350f;margin-top:4px;line-height:1.5;"></div>
+        <div style="margin-top:8px;display:flex;gap:8px;">
+          <button class="btn-sm btn-ghost" id="ac-view-existing-btn" type="button">View existing contact</button>
+          <button class="btn-sm btn-primary" id="ac-save-anyway-btn" type="button">Save as new contact anyway</button>
+        </div>
       </div>
-      <div class="field-row">
-        <div class="field"><label>Phone</label><input type="text" id="ac-phone" /></div>
-        <div class="field"><label>Job Title</label><input type="text" id="ac-title" /></div>
+
+      <!-- Company Information -->
+      <div class="ac-section-header">Company Information</div>
+      <div class="ac-field-row">
+        <div class="ac-field"><label>Company Name</label><input type="text" id="ac-company" placeholder="e.g. Acme Corp" /></div>
+        <div class="ac-field"><label>Industry</label><input type="text" id="ac-industry" placeholder="e.g. Technology" /></div>
       </div>
-      <div class="field-row">
-        <div class="field"><label>Company</label><input type="text" id="ac-company" /></div>
-        <div class="field"><label>LinkedIn URL</label><input type="text" id="ac-linkedin" /></div>
+      <div class="ac-field-row">
+        <div class="ac-field"><label>Website</label><input type="text" id="ac-website" placeholder="https://..." /></div>
+        <div class="ac-field"><label>Country</label><input type="text" id="ac-country" placeholder="e.g. USA" /></div>
       </div>
-      <div class="field"><label>Tags <span style="color:#9ca3af;">(comma-separated)</span></label><input type="text" id="ac-tags" /></div>
-      <div class="field"><label>Notes</label><input type="text" id="ac-notes" /></div>
-      <div id="ac-error" style="color:#ef4444;font-size:0.8rem;margin-bottom:6px;display:none;"></div>
-      <button class="btn-primary" id="add-contact-submit-btn" style="width:100%;margin-top:8px;">Save Contact</button>
+      <div class="ac-field-row">
+        <div class="ac-field"><label>Event <span class="ac-optional">(optional)</span></label><input type="text" id="ac-event" placeholder="e.g. CES 2026" /></div>
+        <div class="ac-field"><label>Booth Number <span class="ac-optional">(optional)</span></label><input type="text" id="ac-booth" placeholder="e.g. B-42" /></div>
+      </div>
+      <div class="ac-field" style="margin-bottom:8px;"><label>Company Notes</label><textarea id="ac-company-notes" rows="2" placeholder="Background, opportunity, etc."></textarea></div>
+
+      <!-- Contact Information -->
+      <div class="ac-section-header">Contact Information</div>
+      <div class="ac-field-row">
+        <div class="ac-field"><label>First Name <span class="ac-required">*</span></label><input type="text" id="ac-first-name" /></div>
+        <div class="ac-field"><label>Last Name <span class="ac-required">*</span></label><input type="text" id="ac-last-name" /></div>
+      </div>
+      <div class="ac-field-row">
+        <div class="ac-field"><label>Job Title</label><input type="text" id="ac-title" /></div>
+        <div class="ac-field"><label>Department</label><input type="text" id="ac-department" /></div>
+      </div>
+      <div class="ac-field-row">
+        <div class="ac-field"><label>Email</label><input type="email" id="ac-email" /></div>
+        <div class="ac-field"><label>Phone</label><input type="text" id="ac-phone" /></div>
+      </div>
+      <div class="ac-field-row">
+        <div class="ac-field"><label>LinkedIn URL</label><input type="text" id="ac-linkedin" /></div>
+        <div class="ac-field"><label>Tags <span class="ac-optional">(comma-separated)</span></label><input type="text" id="ac-tags" /></div>
+      </div>
+      <div class="ac-field" style="margin-bottom:8px;"><label>Contact Notes</label><textarea id="ac-contact-notes" rows="2" placeholder="Meeting notes, interests, etc."></textarea></div>
+
+      <!-- CRM Information -->
+      <div class="ac-section-header">CRM Information</div>
+      <div class="ac-field-row">
+        <div class="ac-field">
+          <label>Status</label>
+          <select id="ac-status">
+            <option value="prospect">Prospect</option>
+            <option value="customer">Customer</option>
+            <option value="partner">Partner</option>
+            <option value="supplier">Supplier</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+        <div class="ac-field">
+          <label>Follow-up Status</label>
+          <select id="ac-followup">
+            <option value="not_contacted">Not Contacted</option>
+            <option value="contacted">Contacted</option>
+            <option value="meeting_scheduled">Meeting Scheduled</option>
+            <option value="follow_up_needed">Follow-up Needed</option>
+            <option value="closed">Closed</option>
+          </select>
+        </div>
+      </div>
+      <div class="ac-field-row">
+        <div class="ac-field">
+          <label>Priority</label>
+          <select id="ac-priority">
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
+        <div class="ac-field">
+          <label>Source</label>
+          <input type="text" value="Manual Entry" disabled />
+        </div>
+      </div>
+
+      <div id="ac-error" style="color:#ef4444;font-size:0.8rem;margin-top:10px;display:none;"></div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button class="btn-primary" id="add-contact-submit-btn" style="flex:1;">Save Contact</button>
+        <button class="btn-ghost" id="add-contact-save-another-btn" style="flex:1;">Save &amp; Add Another</button>
+        <button class="btn-ghost" id="add-contact-cancel-btn">Cancel</button>
+      </div>
     </div>
   </div>
 
