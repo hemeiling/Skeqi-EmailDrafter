@@ -82,6 +82,10 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '20mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+app.get('/healthz', (_req, res) => {
+  res.status(200).json({ ok: true, status: 'healthy' });
+});
+
 // --- OCR worker: created once at startup and reused for every scan ---
 let ocrWorker = null;
 let ocrWorkerError = null;
@@ -806,6 +810,6 @@ app.post('/api/export-xlsx', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Lead Finder (+ card scanner) running at http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Lead Finder (+ card scanner) running at http://0.0.0.0:${PORT}`);
 });
