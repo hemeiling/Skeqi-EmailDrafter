@@ -680,30 +680,27 @@ async function autoProcessContacts() {
   const label = document.getElementById("progress-label");
   prog.style.display = "block";
 
+  // Enrich contacts that have an Apollo ID, no email, and haven't been checked yet
   const revealable = _currentContacts
     .map((c, i) => ({ c, i }))
-    .filter(({ c }) => c.has_email && (!c.email || c.email.startsWith("(")));
+    .filter(({ c }) => c.contact_id && c.apollo_id && !c.email
+      && c.email_lookup_status !== 'not_available');
 
   for (let r = 0; r < revealable.length; r++) {
     const { c, i } = revealable[r];
-    label.textContent = `Revealing emails… ${r + 1} / ${revealable.length}`;
+    label.textContent = `Enriching emails… ${r + 1} / ${revealable.length}`;
     fill.style.width = Math.round((r / (revealable.length + total)) * 100) + "%";
-    if (!c.apollo_id && !c.contact_id) continue;
     try {
-      let d;
-      if (c.contact_id) {
-        const resp = await fetch(`/api/contacts/${c.contact_id}/enrich-email`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-        });
-        d = await resp.json();
+      const resp = await fetch(`/api/contacts/${c.contact_id}/enrich-email`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+      });
+      const d = await resp.json();
+      if (d.email && !d.email.startsWith("(")) {
+        _currentContacts[i].email = d.email;
+        _currentContacts[i].email_lookup_status = 'found';
       } else {
-        const resp = await fetch("/api/reveal-email", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ apollo_id: c.apollo_id }),
-        });
-        d = await resp.json();
+        _currentContacts[i].email_lookup_status = d.email_lookup_status || 'not_available';
       }
-      if (d.email && !d.email.startsWith("(")) _currentContacts[i].email = d.email;
     } catch (e) { /* skip */ }
   }
 
@@ -1209,7 +1206,42 @@ async function loadCrmContacts(query, filters) {
     _crmPage = 1;
     renderCrmTable(_crmContacts);
     renderCrmSidebar(_crmContacts);
+    autoEnrichCrmPage();
   } catch (e) { /* silent */ }
+}
+
+// Background enrichment for contacts on the current CRM page that have
+// an Apollo ID but no email and haven't been checked yet.
+async function autoEnrichCrmPage() {
+  const pageStart = (_crmPage - 1) * CRM_PAGE_SIZE;
+  const pageEnd = Math.min(pageStart + CRM_PAGE_SIZE, _crmContacts.length);
+  for (let i = pageStart; i < pageEnd; i++) {
+    const c = _crmContacts[i];
+    if (!c || c.email || !c.apollo_person_id) continue;
+    const status = c.email_lookup_status || 'not_checked';
+    if (status === 'not_available' || status === 'found') continue;
+    // Fire and update cell in-place — don't block the loop on errors
+    (async () => {
+      const cell = document.getElementById(`crm-email-cell-${i}`);
+      if (cell) cell.innerHTML = `<span style="font-size:0.73rem;color:#6b7280;">Checking…</span>`;
+      try {
+        const r = await fetch(`/api/contacts/${c.id}/enrich-email`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+        });
+        const d = await r.json();
+        if (d.email && !d.email.startsWith("(")) {
+          _crmContacts[i].email = d.email;
+          _crmContacts[i].email_lookup_status = 'found';
+          if (cell) cell.innerHTML = `<span style="font-size:0.76rem;">${escapeHtml(d.email)}</span>`;
+        } else {
+          _crmContacts[i].email_lookup_status = d.email_lookup_status || 'not_available';
+          if (cell) cell.innerHTML = `<span style="color:#9ca3af;font-size:0.76rem;" title="Apollo confirmed no email">N/A</span>`;
+        }
+      } catch (_) {
+        if (cell) cell.innerHTML = `<span style="color:#9ca3af;font-size:0.76rem;">N/A</span>`;
+      }
+    })();
+  }
 }
 
 document.getElementById("crm-apply-filters-btn").addEventListener("click", () => {
@@ -1251,11 +1283,14 @@ function renderCrmTable(contacts) {
       : draftCount > 1
         ? `<span style="font-size:0.72rem;color:#16a34a;font-weight:500;">${draftCount} drafts</span>`
         : `<span style="font-size:0.72rem;color:#16a34a;font-weight:500;">Saved</span>`;
+    const emailStatus = c.email_lookup_status || (c.email ? 'found' : 'not_checked');
     const emailCell = c.email
       ? `<span style="font-size:0.76rem;">${escapeHtml(c.email)}</span>`
-      : c.apollo_person_id
-        ? `<button class="btn-sm btn-ghost crm-enrich-btn" data-idx="${i}" style="font-size:11px;padding:2px 6px;">Enrich Email</button>`
-        : `<span style="color:#9ca3af;font-size:0.76rem;">N/A</span>`;
+      : emailStatus === 'not_available'
+        ? `<span style="color:#9ca3af;font-size:0.76rem;" title="Apollo confirmed no email">N/A</span>`
+        : c.apollo_person_id && emailStatus === 'not_checked'
+          ? `<button class="btn-sm btn-ghost crm-enrich-btn" data-idx="${i}" style="font-size:11px;padding:2px 6px;">Enrich Email</button>`
+          : `<span style="color:#9ca3af;font-size:0.76rem;">N/A</span>`;
     return `<tr>
       <td class="col-check"><input type="checkbox" class="crm-check" data-idx="${i}"></td>
       <td>${escapeHtml(c.full_name || "Unnamed")}</td>
@@ -1334,10 +1369,10 @@ function renderCrmPagination(total, totalPages) {
     <span style="font-size:0.85rem;color:#555;">Page ${_crmPage} of ${totalPages}</span>
     <button class="btn-sm btn-ghost" id="crm-next-btn" ${_crmPage >= totalPages ? "disabled" : ""}>Next →</button>`;
   document.getElementById("crm-prev-btn").addEventListener("click", () => {
-    if (_crmPage > 1) { _crmPage--; renderCrmTable(_crmContacts); }
+    if (_crmPage > 1) { _crmPage--; renderCrmTable(_crmContacts); autoEnrichCrmPage(); }
   });
   document.getElementById("crm-next-btn").addEventListener("click", () => {
-    if (_crmPage < totalPages) { _crmPage++; renderCrmTable(_crmContacts); }
+    if (_crmPage < totalPages) { _crmPage++; renderCrmTable(_crmContacts); autoEnrichCrmPage(); }
   });
 }
 
@@ -1521,10 +1556,12 @@ async function enrichCrmEmail(idx) {
     const d = await r.json();
     if (d.email && !d.email.startsWith("(")) {
       _crmContacts[idx].email = d.email;
+      _crmContacts[idx].email_lookup_status = 'found';
       if (cell) cell.innerHTML = `<span style="font-size:0.76rem;">${escapeHtml(d.email)}</span>`;
     } else {
       _crmContacts[idx].email = "";
-      if (cell) cell.innerHTML = `<span style="color:#9ca3af;font-size:0.76rem;">N/A</span>`;
+      _crmContacts[idx].email_lookup_status = d.email_lookup_status || 'not_available';
+      if (cell) cell.innerHTML = `<span style="color:#9ca3af;font-size:0.76rem;" title="Apollo confirmed no email">N/A</span>`;
     }
     refreshUsage();
   } catch (e) {

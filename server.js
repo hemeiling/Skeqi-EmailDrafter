@@ -481,7 +481,9 @@ function contactRowToLeadFormat(c) {
   return {
     name: c.full_name, title: c.job_title, company: c.company, department: c.department,
     email: c.email, linkedin: c.linkedin_url, confidence: c.confidence, relevance: c.relevance,
-    location: c.address, apollo_id: c.apollo_person_id, has_email: Boolean(c.email) || Boolean(c.has_email),
+    location: c.address, apollo_id: c.apollo_person_id,
+    has_email: Boolean(c.email) || Boolean(c.has_email),
+    email_lookup_status: c.email_lookup_status || (c.email ? 'found' : 'not_checked'),
     draft_subject: c.draft_subject, draft_body: c.draft_body,
     draft_followup: c.draft_followup, draft_rationale: c.draft_rationale,
     contact_id: c.id
@@ -541,9 +543,11 @@ app.post('/api/leads/search', async (req, res) => {
           confidence: c.confidence, relevance: c.relevance,
           apollo_person_id: c.apollo_id, source: 'apollo',
           has_email: Boolean(c.has_email) || Boolean(cleanEmail),
-          apollo_raw_json: rawJson
+          apollo_raw_json: rawJson,
+          email_lookup_status: cleanEmail ? 'found' : 'not_checked'
         });
         c.contact_id = id;
+        c.email_lookup_status = cleanEmail ? 'found' : 'not_checked';
         console.log(`[leads/search] -> contact_id=${id} updated=${updated} email_saved=${JSON.stringify(cleanEmail)}`);
         await logContactActivity(id, 'apollo_search', updated ? `Refreshed via Apollo search for ${companyName}` : `Found via Apollo search for ${companyName}`);
       }
@@ -648,7 +652,7 @@ app.post('/api/contacts/:id/enrich-email', async (req, res) => {
     // Step 2: if still missing and we have an Apollo ID, call the reveal API
     if (!email && contact.apollo_person_id) {
       if (!apolloConfigured()) {
-        return res.json({ ok: true, email: '', message: 'Apollo not configured' });
+        return res.json({ ok: true, email: '', email_lookup_status: 'not_checked', message: 'Apollo not configured' });
       }
       console.log(`[enrich-email] contact_id=${contactId} calling reveal for apollo_id=${contact.apollo_person_id}`);
       const result = await revealPersonEmail(contact.apollo_person_id, config.APOLLO_API_KEY);
@@ -658,19 +662,23 @@ app.post('/api/contacts/:id/enrich-email', async (req, res) => {
       if (result.email && !result.email.startsWith('(')) {
         email = result.email;
         source = 'apollo_reveal';
-        // Also save the raw reveal response for future free lookups
-        if (result.raw) {
-          await updateContact(contactId, { email, apollo_raw_json: JSON.stringify(result.raw) });
-        } else {
-          await updateContact(contactId, { email });
-        }
+        await updateContact(contactId, {
+          email,
+          email_lookup_status: 'found',
+          apollo_raw_json: result.raw ? JSON.stringify(result.raw) : undefined
+        });
+      } else {
+        // Apollo was called but returned no email — record this so we don't retry
+        source = 'apollo_reveal';
+        await updateContact(contactId, { email_lookup_status: 'not_available' });
       }
     } else if (email) {
-      await updateContact(contactId, { email });
+      await updateContact(contactId, { email, email_lookup_status: 'found' });
     }
 
-    console.log(`[enrich-email] contact_id=${contactId} result: email=${JSON.stringify(email)} source=${source}`);
-    res.json({ ok: true, email, source });
+    const finalStatus = email ? 'found' : (contact.apollo_person_id ? 'not_available' : 'not_checked');
+    console.log(`[enrich-email] contact_id=${contactId} result: email=${JSON.stringify(email)} source=${source} status=${finalStatus}`);
+    res.json({ ok: true, email, email_lookup_status: finalStatus, source });
   } catch (err) {
     console.error('Enrich email error:', err);
     res.status(500).json({ error: err.message });
