@@ -1228,12 +1228,24 @@ function renderCrmTable(contacts) {
 
   document.getElementById("crm-tbody").innerHTML = pageSlice.map((c, pi) => {
     const i = pageStart + pi;  // index into _crmContacts
+    const hasDraft = c.has_draft || Boolean(c.draft_subject);
+    const draftCount = Number(c.draft_count) || 0;
+    const draftStatus = !hasDraft
+      ? `<span style="font-size:0.72rem;color:#9ca3af;">No draft</span>`
+      : draftCount > 1
+        ? `<span style="font-size:0.72rem;color:#16a34a;font-weight:500;">${draftCount} drafts</span>`
+        : `<span style="font-size:0.72rem;color:#16a34a;font-weight:500;">Saved</span>`;
+    const emailCell = c.email
+      ? `<span style="font-size:0.76rem;">${escapeHtml(c.email)}</span>`
+      : c.apollo_person_id
+        ? `<button class="btn-sm btn-ghost crm-enrich-btn" data-idx="${i}" style="font-size:11px;padding:2px 6px;">Enrich Email</button>`
+        : `<span style="color:#9ca3af;font-size:0.76rem;">N/A</span>`;
     return `<tr>
       <td class="col-check"><input type="checkbox" class="crm-check" data-idx="${i}"></td>
       <td>${escapeHtml(c.full_name || "Unnamed")}</td>
       <td>${escapeHtml(c.job_title || "")}</td>
       <td>${escapeHtml(c.company || "")}</td>
-      <td style="font-size:0.76rem;">${c.email ? escapeHtml(c.email) : '<span style="color:#9ca3af">N/A</span>'}</td>
+      <td id="crm-email-cell-${i}">${emailCell}</td>
       <td><span class="badge badge-source">${escapeHtml(c.source || "manual")}</span></td>
       <td><input type="text" class="crm-tags-input" data-id="${c.id}" value="${escapeAttr(c.tags || "")}"
             style="width:100px;font-size:12px;padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;" placeholder="tags…"></td>
@@ -1243,8 +1255,9 @@ function renderCrmTable(contacts) {
         </select>
       </td>
       <td style="font-size:0.76rem;color:#888;">${c.last_contacted_at ? escapeHtml(c.last_contacted_at) : "—"}</td>
+      <td id="crm-draft-status-${i}">${draftStatus}</td>
       <td id="crm-action-${i}">
-        ${c.draft_subject
+        ${hasDraft
           ? `<button class="btn-sm btn-saved crm-view-draft-btn" data-idx="${i}">View Draft</button>
              <button class="btn-sm btn-orange crm-redraft-btn" data-idx="${i}">Redraft</button>`
           : `<button class="btn-sm btn-primary crm-draft-btn" data-idx="${i}">Draft Email</button>`}
@@ -1253,6 +1266,9 @@ function renderCrmTable(contacts) {
     </tr>`;
   }).join("");
 
+  document.querySelectorAll(".crm-enrich-btn").forEach(btn => {
+    btn.addEventListener("click", () => enrichCrmEmail(Number(btn.dataset.idx)));
+  });
   document.querySelectorAll(".crm-tags-input").forEach(inp => {
     inp.addEventListener("change", () => patchCrmContact(inp.dataset.id, { tags: inp.value.trim() }));
   });
@@ -1400,10 +1416,19 @@ function setCrmDraftButtons(idx) {
       _crmContacts[idx].draft_body      = d.body       || "";
       _crmContacts[idx].draft_followup  = d.followup   || "";
       _crmContacts[idx].draft_rationale = d.rationale  || "";
+      _crmContacts[idx].draft_count     = (_crmContacts[idx].draft_count || 0) + 1;
       setCrmDraftButtons(idx);
     });
   });
   cell.querySelector(".crm-details-btn").addEventListener("click", () => openContactDetailModal(_crmContacts[idx]));
+
+  const statusCell = document.getElementById(`crm-draft-status-${idx}`);
+  if (statusCell) {
+    const cnt = Number(_crmContacts[idx].draft_count) || 1;
+    statusCell.innerHTML = cnt > 1
+      ? `<span style="font-size:0.72rem;color:#16a34a;font-weight:500;">${cnt} drafts</span>`
+      : `<span style="font-size:0.72rem;color:#16a34a;font-weight:500;">Saved</span>`;
+  }
 }
 
 /* ── Contact detail editor (conference fields) ── */
@@ -1411,9 +1436,52 @@ function setCrmDraftButtons(idx) {
 const contactDetailModal = document.getElementById("contact-detail-modal");
 let _detailContactId = null;
 
-function openContactDetailModal(c) {
+async function openContactDetailModal(c) {
   _detailContactId = c.id;
   document.getElementById("contact-detail-name").textContent = `${c.full_name || "Unnamed"} · ${c.company || ""}`;
+
+  const emailEl = document.getElementById("cd-email-display");
+  if (emailEl) {
+    emailEl.textContent = c.email || "No email saved";
+    emailEl.style.color = c.email ? "#374151" : "#9ca3af";
+  }
+
+  const historyEl = document.getElementById("cd-draft-history");
+  if (historyEl) {
+    historyEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">Loading…</span>`;
+    try {
+      const r = await fetch(`/api/contacts/${c.id}/drafts`);
+      const data = await r.json();
+      const drafts = (data.drafts || []).slice(0, 10);
+      if (!drafts.length) {
+        historyEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">No drafts saved yet</span>`;
+      } else {
+        historyEl.innerHTML = drafts.map(d => `
+          <div style="border:1px solid #e5e7eb;border-radius:5px;padding:6px 10px;margin-bottom:5px;cursor:pointer;background:#fff;" class="cd-draft-row"
+               data-subject="${escapeAttr(d.subject || "")}" data-body="${escapeAttr(d.body || "")}">
+            <div style="font-size:0.75rem;font-weight:500;color:#374151;">v${d.version}: ${escapeHtml(d.subject || "(no subject)")}</div>
+            <div style="font-size:0.7rem;color:#9ca3af;">${new Date(d.created_at).toLocaleDateString()}</div>
+          </div>`).join("");
+        historyEl.querySelectorAll(".cd-draft-row").forEach(row => {
+          row.addEventListener("click", () => {
+            const contact = crmRowToDraftFormat(c);
+            _modalContact = contact;
+            _modalOnUpdate = null;
+            document.getElementById("modal-title").textContent = `Draft email to ${contact.name || "contact"}`;
+            document.getElementById("modal-contact-info").textContent = `${c.job_title || ""} · ${c.company || ""}`;
+            document.getElementById("modal-mode-select").value = "cold_outreach";
+            document.getElementById("modal-extra-instructions").value = "";
+            document.getElementById("email-modal").classList.add("open");
+            contactDetailModal.classList.remove("open");
+            renderDraft({ subject: row.dataset.subject, body: row.dataset.body, followup: "", rationale: "", claude_configured: true }, contact);
+          });
+        });
+      }
+    } catch (e) {
+      historyEl.innerHTML = `<span style="font-size:0.73rem;color:#9ca3af;">Could not load draft history</span>`;
+    }
+  }
+
   document.getElementById("cd-event").value = "";
   document.getElementById("cd-booth").value = c.booth_number || "";
   document.getElementById("cd-date").value = c.meeting_date || "";
@@ -1422,6 +1490,30 @@ function openContactDetailModal(c) {
   document.getElementById("cd-meeting-notes").value = c.meeting_notes || "";
   document.getElementById("cd-salesperson").value = c.assigned_salesperson || "";
   contactDetailModal.classList.add("open");
+}
+
+async function enrichCrmEmail(idx) {
+  const c = _crmContacts[idx];
+  if (!c || !c.apollo_person_id) return;
+  const cell = document.getElementById(`crm-email-cell-${idx}`);
+  if (cell) cell.innerHTML = `<span style="font-size:0.73rem;color:#6b7280;">Enriching…</span>`;
+  try {
+    const r = await fetch("/api/reveal-email", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apollo_id: c.apollo_person_id, contact_id: c.id }),
+    });
+    const d = await r.json();
+    if (d.email && !d.email.startsWith("(")) {
+      _crmContacts[idx].email = d.email;
+      if (cell) cell.innerHTML = `<span style="font-size:0.76rem;">${escapeHtml(d.email)}</span>`;
+    } else {
+      _crmContacts[idx].email = "";
+      if (cell) cell.innerHTML = `<span style="color:#9ca3af;font-size:0.76rem;">N/A</span>`;
+    }
+    refreshUsage();
+  } catch (e) {
+    if (cell) cell.innerHTML = `<span style="color:#9ca3af;font-size:0.76rem;">N/A</span>`;
+  }
 }
 
 document.getElementById("contact-detail-close").addEventListener("click", () => {

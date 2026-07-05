@@ -324,7 +324,17 @@ app.get('/api/contacts', async (req, res) => {
     } else {
       contacts = await listContacts(200);
     }
-    res.json({ ok: true, contacts });
+
+    const enriched = contacts.map(c => {
+      const draftCount = Number(c.draft_count) || 0;
+      return {
+        ...c,
+        draft_count: draftCount,
+        latest_draft_id: c.latest_draft_id || null,
+        has_draft: Boolean(c.draft_subject) || draftCount > 0,
+      };
+    });
+    res.json({ ok: true, contacts: enriched });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load contacts' });
   }

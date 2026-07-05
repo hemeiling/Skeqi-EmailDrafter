@@ -324,8 +324,18 @@ async function insertContact(c) {
   return id;
 }
 
+const DRAFT_COUNT_JOIN = `
+  LEFT JOIN (
+    SELECT contact_id, COUNT(*)::int AS draft_count, MAX(id) AS latest_draft_id
+    FROM email_drafts GROUP BY contact_id
+  ) ed ON ed.contact_id = c.id`;
+
 async function listContacts(limit = 200) {
-  return q(`SELECT * FROM contacts ORDER BY id DESC LIMIT $1`, [limit]);
+  return q(`
+    SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id
+    FROM contacts c ${DRAFT_COUNT_JOIN}
+    ORDER BY c.id DESC LIMIT $1
+  `, [limit]);
 }
 
 async function getContact(id) {
@@ -472,10 +482,11 @@ async function searchContacts(term, limit = 500) {
   if (term && term.trim()) {
     const like = `%${term.trim().toLowerCase()}%`;
     return q(`
-      SELECT * FROM contacts
-      WHERE LOWER(full_name) LIKE $1 OR LOWER(company) LIKE $2 OR LOWER(email) LIKE $3
-         OR LOWER(job_title) LIKE $4 OR LOWER(tags) LIKE $5
-      ORDER BY id DESC LIMIT $6
+      SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id
+      FROM contacts c ${DRAFT_COUNT_JOIN}
+      WHERE LOWER(c.full_name) LIKE $1 OR LOWER(c.company) LIKE $2 OR LOWER(c.email) LIKE $3
+         OR LOWER(c.job_title) LIKE $4 OR LOWER(c.tags) LIKE $5
+      ORDER BY c.id DESC LIMIT $6
     `, [like, like, like, like, like, limit]);
   }
   return listContacts(limit);
@@ -515,8 +526,10 @@ async function filterContacts(filters = {}, limit = 1000) {
   const orderBy = filters.sortBy === 'last_contacted' ? 'ORDER BY c.last_contacted_at DESC' : 'ORDER BY c.id DESC';
 
   return q(`
-    SELECT c.* FROM contacts c
+    SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id
+    FROM contacts c
     LEFT JOIN companies comp ON comp.id = c.company_id
+    ${DRAFT_COUNT_JOIN}
     ${where}
     ${orderBy}
     LIMIT $${params.length}
