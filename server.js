@@ -7,9 +7,11 @@ const multer = require('multer');
 const Tesseract = require('tesseract.js');
 const {
   initDb,
-  insertContact, listContacts, getContact, listContactsByCompany, deleteContact,
+  insertContact, listContacts, getContact, listContactsByCompany, deleteContact, deleteContacts,
   updateContactDraft, findExistingContact, upsertContact, updateContact,
   upsertCompany, findCompanyByName, getCompany, listCompanies, getCompanyContacts,
+  getOrCreateAccount, getAccount, listAccounts, listAccountGroups, getAccountContacts,
+  listCompaniesForAccount, mergeAccounts,
   insertBusinessCard, listBusinessCardsForContact,
   getApolloCache, setApolloCache,
   getCompanySearchCache, setCompanySearchCache, updateCachedLeadDraft,
@@ -17,10 +19,20 @@ const {
   insertEmailDraftVersion, listEmailDraftsForContact,
   insertCommunication, listTimelineForContact, getCommunication,
   updateCommunication, deleteCommunication, duplicateCommunication, findDuplicateEmail,
+  getCurrentDraftForContact, listDraftVersionsForContact, saveDraftEdit,
+  setCommunicationStatus, trashCommunication, restoreCommunication,
+  archiveCommunication, unarchiveCommunication, createFollowUp, checkEquivalentDraft,
+  listDraftCategoriesForContact,
+  insertManualEmail, listImportedEmailsForContact,
+  uploadOneOffAttachment, linkAttachmentToCommunication, listAttachmentsForCommunication,
+  unlinkAttachment, getAttachment,
+  createLibraryAttachment, replaceLibraryAttachment, listAttachmentLibrary,
+  listLibraryVersions, toggleLibraryFavorite, deleteLibraryItem,
   insertEmailHistory, listEmailHistoryForContact, listNeedsReviewEmails,
   listRecentEmailHistory, updateEmailHistory,
   findContactByEmail, findContactByEmailDomain, findCompanyByDomain, countNeedsReviewEmails,
   searchContacts, filterContacts, patchContactCrmFields, logContactActivity, listContactActivity,
+  listContactNamesForBrowse,
   getSetting, setSetting, listEvents
 } = require('./db');
 const { parseCardText } = require('./parse');
@@ -33,6 +45,7 @@ const {
   revealPersonEmail
 } = require('./apollo');
 const { doCompanySearch, CRM_FIELDS } = require('./leads');
+const { DEPARTMENT_TAXONOMY, SENIORITY_TAXONOMY } = require('./contactClassify');
 const { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES } = require('./claude');
 const { contactsToCsv, contactsToXml, contactsToXlsx, safeFilename } = require('./export');
 const { parseCompanyFile } = require('./companyImport');
@@ -319,12 +332,22 @@ app.post('/api/contacts', async (req, res) => {
 // GET /api/contacts
 app.get('/api/contacts', async (req, res) => {
   try {
-    const { q, event, company, industry, follow_up_status, tags, assigned_salesperson, sortBy } = req.query;
-    const hasStructuredFilter = event || company || industry || follow_up_status || tags || assigned_salesperson;
+    const { q, event, company, industry, follow_up_status, tags, assigned_salesperson, accounts, contact_ids, department_categories, seniority_levels, sortBy } = req.query;
+    // Multi-select filters travel as comma-separated strings (?accounts=Ford,Tesla,CATL).
+    const accountList = accounts ? String(accounts).split(',').map((s) => s.trim()).filter(Boolean) : [];
+    const contactIdList = contact_ids ? String(contact_ids).split(',').map(Number).filter((n) => Number.isInteger(n)) : [];
+    const departmentList = department_categories ? String(department_categories).split(',').map((s) => s.trim()).filter(Boolean) : [];
+    const seniorityList = seniority_levels ? String(seniority_levels).split(',').map((s) => s.trim()).filter(Boolean) : [];
+    const hasStructuredFilter = event || company || industry || follow_up_status || tags || assigned_salesperson
+      || accountList.length || contactIdList.length || departmentList.length || seniorityList.length;
 
     let contacts;
     if (hasStructuredFilter) {
-      contacts = await filterContacts({ event, company, industry, follow_up_status, tags, assigned_salesperson, sortBy });
+      contacts = await filterContacts({
+        event, company, industry, follow_up_status, tags, assigned_salesperson,
+        accounts: accountList, contact_ids: contactIdList,
+        department_categories: departmentList, seniority_levels: seniorityList, sortBy
+      });
     } else if (q) {
       contacts = await searchContacts(q);
     } else {
@@ -343,6 +366,61 @@ app.get('/api/contacts', async (req, res) => {
     res.json({ ok: true, contacts: enriched });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load contacts' });
+  }
+});
+
+// GET /api/accounts/grouped -- Browse-by-Account selector (name + contact count)
+app.get('/api/accounts/grouped', async (req, res) => {
+  try {
+    res.json({ ok: true, accounts: await listAccountGroups({ onlyWithContacts: true }) });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load accounts' });
+  }
+});
+
+// GET /api/accounts/:id/companies -- child companies + contact counts, for the Merge Accounts preview
+app.get('/api/accounts/:id/companies', async (req, res) => {
+  try {
+    res.json({ ok: true, companies: await listCompaniesForAccount(Number(req.params.id)) });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load account companies' });
+  }
+});
+
+// POST /api/accounts/merge -- merge one or more accounts into a target account
+app.post('/api/accounts/merge', async (req, res) => {
+  try {
+    const { sourceAccountIds, targetAccountId } = req.body || {};
+    if (!Array.isArray(sourceAccountIds) || !sourceAccountIds.length || !targetAccountId) {
+      return res.status(400).json({ error: 'sourceAccountIds (array) and targetAccountId are required' });
+    }
+    const result = await mergeAccounts(sourceAccountIds, targetAccountId);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('Merge accounts error:', err);
+    res.status(500).json({ error: 'Failed to merge accounts', details: err.message });
+  }
+});
+
+// GET /api/contacts/names -- lightweight full list for Browse-by-Contact-Name selector
+app.get('/api/contacts/names', async (req, res) => {
+  try {
+    res.json({ ok: true, contacts: await listContactNamesForBrowse() });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load contact names' });
+  }
+});
+
+// POST /api/contacts/bulk-delete
+app.post('/api/contacts/bulk-delete', async (req, res) => {
+  try {
+    const ids = (req.body && req.body.ids) || [];
+    const numericIds = ids.map(Number).filter((n) => Number.isInteger(n));
+    if (!numericIds.length) return res.status(400).json({ error: 'No valid contact ids provided' });
+    const deleted = await deleteContacts(numericIds);
+    res.json({ ok: true, deleted });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete contacts' });
   }
 });
 
@@ -504,18 +582,37 @@ app.post('/api/leads/search', async (req, res) => {
     const forceRefresh = Boolean(req.body.force);
     const apiKey = config.APOLLO_API_KEY;
 
+    // User-controlled search budget -- never fetch an unbounded number of
+    // Apollo contacts. perCompanyLimit caps each company; maxTotal caps the
+    // sum across every company in this request (shared, decrementing budget).
+    const perCompanyLimit = Math.max(1, Math.min(Number(req.body.perCompanyLimit) || 25, 500));
+    let remainingBudget = Math.max(1, Math.min(Number(req.body.maxTotal) || 100, 2000));
+    const departments = Array.isArray(req.body.departments) ? req.body.departments : [];
+
+    const departmentLabels = departments.map((key) => {
+      const found = DEPARTMENT_TAXONOMY.find((d) => d.key === key);
+      return found ? found.label : key;
+    });
+
     let allContacts = [];
     let allOrgs = [];
     const messages = [];
+    const summaries = [];
 
     for (const companyName of companyNames) {
-      const companyRow = await findCompanyByName(companyName);
+      if (remainingBudget <= 0) {
+        messages.push(`${companyName}: skipped -- reached your maximum total contacts limit (${req.body.maxTotal || 100}). Increase "Maximum total contacts" to fetch more.`);
+        continue;
+      }
+      // The searched term is always the Account -- create/reuse it up front so
+      // it persists even if Apollo returns zero contacts for this search.
+      const account = await getOrCreateAccount(companyName);
 
-      if (!forceRefresh && companyRow) {
-        const existingContacts = await getCompanyContacts(companyRow.id);
+      if (!forceRefresh && account) {
+        const existingContacts = await getAccountContacts(account.id);
         if (existingContacts.length > 0) {
           allContacts = allContacts.concat(existingContacts.map(contactRowToLeadFormat));
-          messages.push(`CACHE:${companyName}:${existingContacts.length}:${companyRow.updated_at}`);
+          messages.push(`CACHE:${companyName}:${existingContacts.length}:${account.updated_at}`);
           continue;
         }
       }
@@ -525,25 +622,47 @@ app.post('/api/leads/search', async (req, res) => {
         continue;
       }
 
-      const result = await doCompanySearch(companyName, apiKey);
+      const result = await doCompanySearch(companyName, apiKey, {
+        perCompanyLimit: Math.min(perCompanyLimit, remainingBudget),
+        departments
+      });
       if (result.error) {
         messages.push(`${companyName}: ${result.error}`);
         continue;
       }
 
       const contacts = result.contacts || [];
+      remainingBudget -= contacts.length;
       const orgs = result.orgs || [];
 
-      const companyResult = await upsertCompany({ name: companyName });
-      const companyId = companyResult ? companyResult.id : null;
+      // Pre-upsert one company (legal-entity) row per distinct name Apollo
+      // actually returned, parented to this Account -- so the per-contact
+      // upsertContact() below (which resolves company_id from c.company text)
+      // attaches to a row that's already correctly grouped under the Account.
+      let lastCompanyId = null;
+      const seenCompanyNames = new Set();
+      for (const companyName2 of contacts.map((c) => c.company || companyName)) {
+        if (seenCompanyNames.has(companyName2.toLowerCase())) continue;
+        seenCompanyNames.add(companyName2.toLowerCase());
+        const compResult = await upsertCompany({ name: companyName2, account_name: companyName });
+        if (compResult) lastCompanyId = compResult.id;
+      }
+      if (!seenCompanyNames.size) {
+        // No contacts came back at all -- still ensure a company row exists
+        // under this Account so the search isn't a total no-op.
+        const compResult = await upsertCompany({ name: companyName, account_name: companyName });
+        if (compResult) lastCompanyId = compResult.id;
+      }
 
+      let importedCount = 0;
+      let duplicatesSkipped = 0;
       for (const c of contacts) {
         const cleanEmail = c.email && !String(c.email).startsWith('(') && !String(c.email).includes('N/A') ? c.email : '';
         const rawJson = c._apollo_raw ? JSON.stringify(c._apollo_raw) : undefined;
         console.log(`[leads/search] ${c.name} @ ${c.company}: apollo_email_fields={email:${JSON.stringify(c._apollo_raw && c._apollo_raw.email)}, personal_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.personal_emails)}, business_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.business_emails)}, has_email:${c._apollo_raw && c._apollo_raw.has_email}} cleanEmail=${JSON.stringify(cleanEmail)}`);
         const { id, updated } = await upsertContact({
           full_name: c.name, job_title: c.title, department: c.department, seniority: c.seniority,
-          company: c.company, website: c.company_website,
+          company: c.company || companyName, website: c.company_website,
           email: cleanEmail, linkedin_url: c.linkedin, address: c.location,
           confidence: c.confidence, relevance: c.relevance,
           apollo_person_id: c.apollo_id, source: 'apollo',
@@ -553,19 +672,25 @@ app.post('/api/leads/search', async (req, res) => {
         });
         c.contact_id = id;
         c.email_lookup_status = cleanEmail ? 'found' : 'not_checked';
+        if (updated) duplicatesSkipped++; else importedCount++;
         console.log(`[leads/search] -> contact_id=${id} updated=${updated} email_saved=${JSON.stringify(cleanEmail)}`);
         await logContactActivity(id, 'apollo_search', updated ? `Refreshed via Apollo search for ${companyName}` : `Found via Apollo search for ${companyName}`);
       }
 
-      await logApolloResult('people_search', companyId, null, companyName, JSON.stringify({ contacts, orgs }));
+      await logApolloResult('people_search', lastCompanyId, null, companyName, JSON.stringify({ contacts, orgs }));
       await setCompanySearchCache(companyCacheKey(companyName), JSON.stringify({ company: companyName, contacts, orgs }));
+
+      summaries.push({
+        company: companyName, departments: departmentLabels,
+        foundCount: contacts.length, importedCount, duplicatesSkipped
+      });
 
       allContacts = allContacts.concat(contacts);
       allOrgs = allOrgs.concat(orgs);
       if (result.fallback_message) messages.push(result.fallback_message);
     }
 
-    res.json({ ok: true, contacts: allContacts, orgs: allOrgs, messages, companies: companyNames });
+    res.json({ ok: true, contacts: allContacts, orgs: allOrgs, messages, companies: companyNames, summaries });
   } catch (err) {
     console.error('Lead search error:', err);
     res.status(500).json({ error: 'Lead search failed', details: err.message });
@@ -998,6 +1123,312 @@ app.post('/api/communications/:id/duplicate', async (req, res) => {
   }
 });
 
+// GET /api/contacts/:id/check-draft?mode=&extraInstructions= -- is there
+// already an equivalent draft, before the modal offers to redraft?
+app.get('/api/contacts/:id/check-draft', async (req, res) => {
+  try {
+    const { mode, extraInstructions } = req.query;
+    const draft = await checkEquivalentDraft(Number(req.params.id), mode, extraInstructions);
+    res.json({ ok: true, exists: Boolean(draft), draft: draft || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/contacts/:id/current-draft?mode= -- the latest non-deleted draft
+// for this category, if any (each category has its own independent current draft)
+app.get('/api/contacts/:id/current-draft', async (req, res) => {
+  try {
+    const draft = await getCurrentDraftForContact(Number(req.params.id), req.query.mode);
+    res.json({ ok: true, draft: draft || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/contacts/:id/draft-versions?mode= -- version history for one category
+app.get('/api/contacts/:id/draft-versions', async (req, res) => {
+  try {
+    res.json({ ok: true, versions: await listDraftVersionsForContact(Number(req.params.id), req.query.mode) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/contacts/:id/draft-categories -- Draft Library: every outreach
+// category with its status, including categories with no draft yet
+app.get('/api/contacts/:id/draft-categories', async (req, res) => {
+  try {
+    const modes = listDraftModes();
+    const generated = await listDraftCategoriesForContact(Number(req.params.id));
+    const byMode = new Map(generated.map((row) => [row.draft_mode, row]));
+    const categories = modes.map((m) => {
+      const row = byMode.get(m.value);
+      return {
+        mode: m.value, label: m.label, exists: Boolean(row),
+        status: row ? row.status : null, communicationId: row ? row.id : null,
+        version: row ? row.version : null, updated_at: row ? row.updated_at : null,
+      };
+    });
+    res.json({ ok: true, categories });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================================================
+// Manually-imported emails (sent outside this system, logged after the fact)
+// =========================================================================
+
+// POST /api/contacts/:id/imported-emails -- multipart: fields (mode, subject,
+// body, toEmail, sentAt, notes) + optional attachment files + optional
+// libraryAttachmentIds (JSON array string, to attach existing library files
+// without re-uploading).
+app.post('/api/contacts/:id/imported-emails', upload.array('attachments', 10), async (req, res) => {
+  try {
+    const contactId = Number(req.params.id);
+    const contact = await getContact(contactId);
+    if (!contact) return res.status(404).json({ error: 'Contact not found' });
+
+    const { mode, subject, body, toEmail, sentAt, notes } = req.body;
+    const row = await insertManualEmail({
+      contactId, companyId: contact.company_id, mode, subject, body,
+      toEmail: toEmail || contact.email || '', sentAt, notes,
+    });
+
+    for (const file of req.files || []) {
+      const att = await uploadOneOffAttachment({ buffer: file.buffer, mimetype: file.mimetype, originalname: file.originalname });
+      await linkAttachmentToCommunication(row.id, att.id);
+    }
+    let libraryIds = [];
+    try { libraryIds = JSON.parse(req.body.libraryAttachmentIds || '[]'); } catch { /* ignore malformed */ }
+    for (const attId of libraryIds) {
+      await linkAttachmentToCommunication(row.id, Number(attId));
+    }
+
+    await logContactActivity(contactId, 'email_logged', `Logged a manually-sent email: "${subject || '(no subject)'}"`);
+    const attachments = await listAttachmentsForCommunication(row.id);
+    res.json({ ok: true, communication: row, attachments });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/contacts/:id/imported-emails?mode= -- manually-logged emails for one category
+app.get('/api/contacts/:id/imported-emails', async (req, res) => {
+  try {
+    const emails = await listImportedEmailsForContact(Number(req.params.id), req.query.mode);
+    res.json({ ok: true, emails });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/communications/:id/imported-email -- edit a manually-imported email's fields
+app.post('/api/communications/:id/imported-email', async (req, res) => {
+  try {
+    const { subject, body, to_email, notes, sentAt } = req.body || {};
+    const fields = { subject, body, to_email, notes };
+    if (sentAt !== undefined) fields.sent_at = sentAt;
+    await updateCommunication(Number(req.params.id), fields);
+    res.json({ ok: true, communication: await getCommunication(Number(req.params.id)) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================================================
+// Attachments (one-off files on a specific email/draft) + Attachment Library
+// =========================================================================
+
+// GET /api/communications/:id/attachments -- list files linked to any draft/imported email
+app.get('/api/communications/:id/attachments', async (req, res) => {
+  try {
+    res.json({ ok: true, attachments: await listAttachmentsForCommunication(Number(req.params.id)) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/communications/:id/attachments -- attach more files to any
+// communications row (draft or imported email), by upload and/or by
+// referencing existing library items.
+app.post('/api/communications/:id/attachments', upload.array('files', 10), async (req, res) => {
+  try {
+    const commId = Number(req.params.id);
+    for (const file of req.files || []) {
+      const att = await uploadOneOffAttachment({ buffer: file.buffer, mimetype: file.mimetype, originalname: file.originalname });
+      await linkAttachmentToCommunication(commId, att.id);
+    }
+    let libraryIds = [];
+    try { libraryIds = JSON.parse(req.body.libraryAttachmentIds || '[]'); } catch { /* ignore malformed */ }
+    for (const attId of libraryIds) {
+      await linkAttachmentToCommunication(commId, Number(attId));
+    }
+    res.json({ ok: true, attachments: await listAttachmentsForCommunication(commId) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/communications/:id/attachments/:attachmentId', async (req, res) => {
+  try {
+    await unlinkAttachment(Number(req.params.id), Number(req.params.attachmentId));
+    res.json({ ok: true, attachments: await listAttachmentsForCommunication(Number(req.params.id)) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/attachments/:id/download', async (req, res) => {
+  try {
+    const att = await getAttachment(Number(req.params.id));
+    if (!att) return res.status(404).send('Not found');
+    res.set('Content-Type', att.mime_type || 'application/octet-stream');
+    res.set('Content-Disposition', `attachment; filename="${safeFilename(att.original_filename || 'attachment')}"`);
+    res.send(att.file_data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/attachment-library', async (req, res) => {
+  try {
+    const items = await listAttachmentLibrary({
+      search: req.query.search, category: req.query.category,
+      favoritesOnly: req.query.favorite === 'true',
+    });
+    res.json({ ok: true, items });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/attachment-library', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    const row = await createLibraryAttachment({
+      name: req.body.name, category: req.body.category,
+      buffer: req.file.buffer, mimetype: req.file.mimetype, originalname: req.file.originalname,
+    });
+    res.json({ ok: true, item: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/attachment-library/:key/versions', async (req, res) => {
+  try {
+    res.json({ ok: true, versions: await listLibraryVersions(req.params.key) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/attachment-library/:key/replace', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    const row = await replaceLibraryAttachment(req.params.key, {
+      buffer: req.file.buffer, mimetype: req.file.mimetype, originalname: req.file.originalname,
+    });
+    if (!row) return res.status(404).json({ error: 'Library item not found' });
+    res.json({ ok: true, item: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/attachment-library/:id/favorite', async (req, res) => {
+  try {
+    const result = await toggleLibraryFavorite(Number(req.params.id));
+    if (!result) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/attachment-library/:key', async (req, res) => {
+  try {
+    await deleteLibraryItem(req.params.key);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/communications/:id/save -- edit fields, optionally as a new version
+app.post('/api/communications/:id/save', async (req, res) => {
+  try {
+    const { asNewVersion, ...fields } = req.body || {};
+    const row = await saveDraftEdit(Number(req.params.id), fields, Boolean(asNewVersion));
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, communication: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/communications/:id/status -- body: { status }
+app.post('/api/communications/:id/status', async (req, res) => {
+  try {
+    const row = await setCommunicationStatus(Number(req.params.id), req.body && req.body.status);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, communication: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/communications/:id/trash | /restore | /archive | /unarchive
+app.post('/api/communications/:id/trash', async (req, res) => {
+  try {
+    const row = await trashCommunication(Number(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, communication: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.post('/api/communications/:id/restore', async (req, res) => {
+  try {
+    const row = await restoreCommunication(Number(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, communication: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.post('/api/communications/:id/archive', async (req, res) => {
+  try {
+    const row = await archiveCommunication(Number(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, communication: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.post('/api/communications/:id/unarchive', async (req, res) => {
+  try {
+    const row = await unarchiveCommunication(Number(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, communication: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/communications/:id/follow-up
+app.post('/api/communications/:id/follow-up', async (req, res) => {
+  try {
+    const row = await createFollowUp(Number(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, communication: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/contacts/check-duplicate — pre-save duplicate detection
 app.get('/api/contacts/check-duplicate', async (req, res) => {
   try {
@@ -1077,10 +1508,41 @@ app.get('/api/draft-modes', (req, res) => {
   res.json({ ok: true, modes: listDraftModes() });
 });
 
+// GET /api/search-taxonomy -- department/seniority options for search settings + CRM filters
+app.get('/api/search-taxonomy', (req, res) => {
+  res.json({
+    ok: true,
+    departments: DEPARTMENT_TAXONOMY.map((d) => ({ key: d.key, label: d.label })),
+    seniorities: SENIORITY_TAXONOMY.map((s) => ({ key: s.key, label: s.label })),
+  });
+});
+
 app.post('/api/draft-email', async (req, res) => {
   try {
-    const { contact, sender, contactId, companyKey, mode, extraInstructions } = req.body;
+    const { contact, sender, contactId, companyKey, mode, extraInstructions, regenerate } = req.body;
     if (!contact) return res.status(400).json({ error: 'No contact provided' });
+
+    const resolvedContactId = contactId || contact.contact_id;
+    const resolvedMode = mode || 'cold_outreach';
+    const resolvedInstructions = extraInstructions || '';
+
+    // Reuse an existing draft for the same (contact, mode, instructions)
+    // instead of calling Claude again -- unless the user explicitly asked to
+    // regenerate (the "Redraft" button always sets this). Trashed drafts
+    // don't count -- the user already discarded that one.
+    if (resolvedContactId && !regenerate) {
+      const existing = await checkEquivalentDraft(Number(resolvedContactId), resolvedMode, resolvedInstructions);
+      if (existing) {
+        return res.json({
+          id: existing.id, subject: existing.subject || '', body: existing.body || '',
+          followup: existing.followup_text || '', rationale: existing.rationale || '',
+          to_email: existing.to_email || '', cc: existing.cc || '', bcc: existing.bcc || '',
+          notes: existing.notes || '', status: existing.status, source: existing.source,
+          created_at: existing.created_at, updated_at: existing.updated_at,
+          claude_configured: true, reused: true
+        });
+      }
+    }
 
     let context = {};
     if (mode && mode !== 'cold_outreach') {
@@ -1098,17 +1560,26 @@ app.post('/api/draft-email', async (req, res) => {
     }
 
     const draft = await draftEmail(contact, sender, mode, context);
-    const resolvedContactId = contactId || contact.contact_id;
 
+    let commRow = null;
     if (resolvedContactId) {
       await updateContactDraft(Number(resolvedContactId), draft);
-      await insertEmailDraftVersion(Number(resolvedContactId), draft);
-      await logContactActivity(Number(resolvedContactId), 'draft_generated', `Mode: ${mode || 'cold_outreach'}`);
+      const versionResult = await insertEmailDraftVersion(Number(resolvedContactId), draft, resolvedMode, resolvedInstructions, {
+        to_email: contact.email || '',
+      });
+      commRow = await getCommunication(versionResult.communicationId);
+      await logContactActivity(Number(resolvedContactId), 'draft_generated', `Mode: ${resolvedMode}`);
     } else if (companyKey) {
       await updateCachedLeadDraft(companyCacheKey(companyKey), contact.apollo_id, contact.name, draft);
     }
 
-    res.json(draft);
+    res.json({
+      ...draft, reused: false,
+      id: commRow ? commRow.id : null,
+      to_email: commRow ? commRow.to_email : '', cc: commRow ? commRow.cc : '', bcc: commRow ? commRow.bcc : '',
+      notes: commRow ? commRow.notes : '', status: commRow ? commRow.status : 'draft', source: commRow ? commRow.source : '',
+      created_at: commRow ? commRow.created_at : null, updated_at: commRow ? commRow.updated_at : null,
+    });
   } catch (err) {
     console.error('Draft email error:', err);
     res.status(500).json({ error: 'Failed to draft email', details: err.message });

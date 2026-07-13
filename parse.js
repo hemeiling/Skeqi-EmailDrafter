@@ -89,26 +89,34 @@ function parseCardText(rawText) {
   let full_name = '';
   let job_title = '';
   let company = '';
+  const usedLines = new Set();
 
   for (const line of remaining) {
     if (!job_title && looksLikeTitle(line)) {
       job_title = line;
+      usedLines.add(line);
       continue;
     }
     if (!company && looksLikeCompany(line)) {
       company = line;
+      usedLines.add(line);
       continue;
     }
     if (!full_name && looksLikeName(line)) {
       full_name = line;
+      usedLines.add(line);
       continue;
     }
   }
 
-  // Fallbacks: if nothing matched heuristics, assume the first remaining line
-  // is the name and the second is the company (a common card layout).
-  if (!full_name && remaining[0]) full_name = remaining[0];
-  if (!company && remaining[1] && remaining[1] !== full_name) company = remaining[1];
+  // Fallbacks: if nothing matched heuristics, assume the first unused line is
+  // the name and the next unused line is the company (a common card layout).
+  // Must skip lines already consumed above (e.g. as job_title) and must never
+  // fall back to a line that looks like a title -- otherwise a card laid out
+  // as Name/Title/Company ends up with the title line written into both
+  // job_title and company (e.g. "CEO" becoming the "company").
+  if (!full_name) full_name = remaining.find(l => !usedLines.has(l)) || '';
+  if (!company) company = remaining.find(l => !usedLines.has(l) && l !== full_name && !looksLikeTitle(l)) || '';
 
   return {
     full_name,

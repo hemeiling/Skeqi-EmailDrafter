@@ -87,6 +87,8 @@ function buildPrompt(contact, sender) {
 
 const DRAFT_MODES = {
   cold_outreach: { label: 'Standard cold outreach (original)' },
+  procurement_outreach: { label: 'Procurement outreach' },
+  engineering_outreach: { label: 'Engineering outreach' },
   conference_outreach: { label: 'Conference outreach (e.g. The Battery Show)' },
   general_follow_up: { label: 'General follow-up' },
   company_innovations: { label: "Sharing company innovations" },
@@ -100,6 +102,20 @@ function listDraftModes() {
 }
 
 const MODE_REQUIREMENTS = {
+  procurement_outreach: () => [
+    "First person, from the sender's voice",
+    "Open with a specific, relevant observation about the recipient's role or company",
+    "Speak directly to procurement/sourcing priorities: total cost of ownership, supply reliability, quality consistency, or scalability -- using any company notes provided",
+    "4-6 sentences total -- confident and direct, but not pushy",
+    "Close with a low-pressure CTA: propose a short call to discuss sourcing fit"
+  ],
+  engineering_outreach: () => [
+    "First person, from the sender's voice",
+    "Open with a specific, relevant observation about the recipient's role or company",
+    "Speak to engineering/technical priorities: performance, integration, technical specifications, or process improvement -- using any company notes provided",
+    "4-6 sentences total -- technical and credible, not salesy",
+    "Close with a low-pressure CTA: offer a technical deep-dive or spec sheet"
+  ],
   conference_outreach: (ctx) => [
     "First person, from the sender's voice",
     `Open by referencing the event${ctx.eventName ? ` ("${ctx.eventName}")` : ''} -- either that you'll both be there, or that you connected there`,

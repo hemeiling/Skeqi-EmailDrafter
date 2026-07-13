@@ -4,34 +4,184 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Apollo Leadership Contact Search</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%23101c33'/%3E%3Ctext x='50' y='68' font-size='58' text-anchor='middle' fill='%23ea580c' font-family='Arial, sans-serif' font-weight='bold'%3EA%3C/text%3E%3C/svg%3E" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* ══════════════════════════════════════════════════════════════════
+       Design tokens — single source of truth for color/spacing/type/
+       elevation. A future dark-mode pass only needs to override these,
+       not touch component rules below.
+       ══════════════════════════════════════════════════════════════════ */
+    :root {
+      --color-primary: #2563eb;
+      --color-primary-hover: #1d4ed8;
+      --color-primary-soft: #eff6ff;
+      --color-primary-border: #bfdbfe;
+      --color-accent: #ea580c;
+      --color-accent-hover: #c2410c;
+      --color-success: #16a34a;
+      --color-success-hover: #15803d;
+      --color-success-soft: #f0fdf4;
+      --color-success-border: #86efac;
+      --color-success-text: #166534;
+      --color-danger: #dc2626;
+      --color-danger-hover: #b91c1c;
+      --color-danger-soft: #fef2f2;
+      --color-danger-border: #fecaca;
+      --color-danger-text: #991b1b;
+      --color-warn-soft: #fffbeb;
+      --color-warn-border: #fde68a;
+      --color-warn-text: #92400e;
+
+      --color-bg: #f6f7f9;
+      --color-surface: #ffffff;
+      --color-surface-alt: #f9fafb;
+      --color-border: #e2e5eb;
+      --color-border-soft: #eef0f4;
+
+      --color-text: #101828;
+      --color-text-secondary: #475467;
+      --color-text-tertiary: #98a2b3;
+
+      --color-navy: #101c33;
+      --color-navy-soft: #8ba3c0;
+
+      --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+      --space-5: 20px; --space-6: 24px; --space-8: 32px;
+
+      --radius-sm: 6px; --radius-md: 8px; --radius-lg: 12px; --radius-full: 999px;
+
+      --shadow-xs: 0 1px 2px rgba(16,24,40,0.05);
+      --shadow-sm: 0 1px 3px rgba(16,24,40,0.08), 0 1px 2px rgba(16,24,40,0.04);
+      --shadow-md: 0 4px 10px rgba(16,24,40,0.08), 0 2px 4px rgba(16,24,40,0.04);
+      --shadow-lg: 0 12px 32px rgba(16,24,40,0.14);
+
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Arial, sans-serif;
+
+      --sidebar-width: 224px;
+      --sidebar-width-collapsed: 64px;
+      --topbar-height: 56px;
+    }
+
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-      font-size: 14px; color: #1a1a1a; background: #f8f9fa; min-height: 100vh;
+      font-family: var(--font-sans);
+      font-size: 14px; color: var(--color-text); background: var(--color-bg); min-height: 100vh;
       padding-bottom: 42px;
     }
 
-    header {
-      background: #1a2e4a; color: #fff; padding: 16px 32px;
-      display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      flex-wrap: wrap;
+    /* ══════════════════════════════════════════════════════════════════
+       Application shell: fixed left sidebar + top bar + breadcrumb.
+       Existing top-level sections are shown/hidden via [data-view] rather
+       than being physically relocated, so all internal markup/JS wiring
+       for each section stays untouched.
+       ══════════════════════════════════════════════════════════════════ */
+    .app-shell { min-height: 100vh; }
+    .app-sidebar {
+      position: fixed; top: 0; left: 0; bottom: 0; width: var(--sidebar-width);
+      background: var(--color-navy); color: #cdd8e6; z-index: 300;
+      display: flex; flex-direction: column; transition: width 0.18s ease;
+      overflow-x: hidden;
     }
-    header h1 { font-size: 1.2rem; font-weight: 600; letter-spacing: 0.01em; }
-    header .subtitle { font-size: 0.8rem; color: #8ba3c0; margin-top: 2px; }
+    body.sidebar-collapsed .app-sidebar { width: var(--sidebar-width-collapsed); }
+    .app-sidebar-brand {
+      display: flex; align-items: center; gap: 10px; padding: 16px 18px;
+      font-weight: 700; font-size: 0.95rem; color: #fff; white-space: nowrap;
+      border-bottom: 1px solid rgba(255,255,255,0.08); min-height: var(--topbar-height);
+    }
+    .app-sidebar-brand-mark {
+      width: 28px; height: 28px; border-radius: var(--radius-sm); flex-shrink: 0;
+      background: linear-gradient(135deg, var(--color-accent), #f97316);
+      display: flex; align-items: center; justify-content: center; font-size: 15px;
+    }
+    .app-sidebar-nav { flex: 1; padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+    .app-nav-item {
+      display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: var(--radius-sm);
+      color: #b9c6d9; font-size: 0.86rem; font-weight: 500; cursor: pointer; white-space: nowrap;
+      transition: background 0.12s, color 0.12s; user-select: none;
+    }
+    .app-nav-item .app-nav-icon { font-size: 1rem; width: 20px; text-align: center; flex-shrink: 0; }
+    .app-nav-item:hover { background: rgba(255,255,255,0.06); color: #fff; }
+    .app-nav-item.active { background: rgba(37,99,235,0.25); color: #fff; }
+    body.sidebar-collapsed .app-nav-item span.app-nav-label,
+    body.sidebar-collapsed .app-sidebar-brand span.app-brand-label { display: none; }
+    .app-sidebar-footer { padding: 10px 8px 14px; border-top: 1px solid rgba(255,255,255,0.08); }
+    .app-sidebar-collapse-btn {
+      width: 100%; background: transparent; color: #8ba3c0; border: 1px solid rgba(255,255,255,0.12);
+      padding: 7px 10px; font-size: 0.78rem; display: flex; align-items: center; gap: 8px;
+    }
+    .app-sidebar-collapse-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
+
+    .app-main { margin-left: var(--sidebar-width); transition: margin-left 0.18s ease; min-height: 100vh; }
+    body.sidebar-collapsed .app-main { margin-left: var(--sidebar-width-collapsed); }
+
+    .app-topbar {
+      height: var(--topbar-height); background: var(--color-surface); border-bottom: 1px solid var(--color-border);
+      display: flex; align-items: center; gap: 16px; padding: 0 24px; position: sticky; top: 0; z-index: 200;
+      box-shadow: var(--shadow-xs);
+    }
+    .app-breadcrumb { font-size: 0.8rem; color: var(--color-text-tertiary); display: flex; align-items: center; gap: 6px; }
+    .app-breadcrumb b { color: var(--color-text); font-weight: 600; }
+    .app-topbar-search {
+      flex: 1; max-width: 420px; position: relative; margin-left: 8px;
+    }
+    .app-topbar-search input {
+      width: 100%; padding: 7px 12px 7px 32px; border: 1px solid var(--color-border); border-radius: var(--radius-full);
+      background: var(--color-surface-alt); font-size: 0.82rem;
+    }
+    .app-topbar-search input:focus { outline: none; border-color: var(--color-primary); background: var(--color-surface); box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+    .app-topbar-search::before { content: "🔎"; position: absolute; left: 11px; top: 50%; transform: translateY(-50%); font-size: 0.78rem; opacity: 0.5; }
+    .app-topbar-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+    .app-icon-btn {
+      background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm);
+      padding: 6px 8px; font-size: 1rem; color: var(--color-text-secondary); position: relative; line-height: 1;
+    }
+    .app-icon-btn:hover { background: var(--color-surface-alt); border-color: var(--color-border); }
+    .app-icon-btn .app-notif-dot {
+      position: absolute; top: 3px; right: 4px; width: 7px; height: 7px; border-radius: 50%;
+      background: var(--color-accent); border: 1.5px solid var(--color-surface);
+    }
+    .app-user-menu { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 4px; border-radius: var(--radius-full); cursor: pointer; }
+    .app-user-menu:hover { background: var(--color-surface-alt); }
+    .app-user-avatar {
+      width: 30px; height: 30px; border-radius: 50%; background: var(--color-primary); color: #fff;
+      display: flex; align-items: center; justify-content: center; font-size: 0.78rem; font-weight: 700; flex-shrink: 0;
+    }
+    .app-user-menu-name { font-size: 0.82rem; font-weight: 600; color: var(--color-text); white-space: nowrap; }
+
+    .app-view-container { padding: 0; }
+    [data-view] { animation: view-fade-in 0.15s ease; }
+    @keyframes view-fade-in { from { opacity: 0; } to { opacity: 1; } }
+    /* Applied/removed only by showView() -- layers on top of any element's
+       own independent display logic (e.g. #export-bar hides itself until
+       there's something to export) without fighting it: when a view is
+       inactive this force-hides regardless of the element's own state; when
+       active, it simply steps aside and the element's own display rules apply. */
+    [data-view].view-hidden { display: none !important; }
+
+    @media (max-width: 860px) {
+      .app-sidebar { width: var(--sidebar-width-collapsed); }
+      .app-main { margin-left: var(--sidebar-width-collapsed); }
+      .app-sidebar .app-nav-label, .app-sidebar .app-brand-label { display: none; }
+      .app-topbar-search { display: none; }
+    }
+
+    header.legacy-header { display: none; }
+
     .btn-scan-card {
-      background: #ea580c; color: #fff; border: none; border-radius: 6px;
+      background: var(--color-accent); color: #fff; border: none; border-radius: var(--radius-sm);
       padding: 9px 18px; font-size: 13px; font-weight: 600; cursor: pointer;
       white-space: nowrap; display: flex; align-items: center; gap: 6px;
+      box-shadow: var(--shadow-xs);
     }
-    .btn-scan-card:hover { background: #c2410c; }
+    .btn-scan-card:hover { background: var(--color-accent-hover); }
 
     .container { max-width: 1280px; margin: 0 auto; padding: 24px 32px; }
 
     .card {
-      background: #fff; border: 1px solid #e0e4ea;
-      border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;
+      background: var(--color-surface); border: 1px solid var(--color-border);
+      border-radius: var(--radius-md); padding: 20px 24px; margin-bottom: 20px;
+      box-shadow: var(--shadow-sm);
     }
     .card-title {
       font-size: 0.85rem; font-weight: 600; text-transform: uppercase;
@@ -46,46 +196,102 @@
     }
     .sender-grid label { display: block; font-size: 0.8rem; color: #555; margin-bottom: 4px; }
 
-    input[type="text"] {
+    input[type="text"], input[type="date"], input[type="number"], select, textarea {
       width: 100%; padding: 8px 12px; border: 1px solid #d1d5db;
-      border-radius: 6px; font-size: 14px; color: #1a1a1a;
-      transition: border-color 0.15s; background: #fff;
+      border-radius: var(--radius-sm); font-size: 14px; color: var(--color-text);
+      transition: border-color 0.15s, box-shadow 0.15s; background: var(--color-surface);
+      font-family: inherit;
     }
-    input[type="text"]:focus {
-      outline: none; border-color: #2563eb;
+    input[type="text"]:focus, input[type="date"]:focus, input[type="number"]:focus, select:focus, textarea:focus {
+      outline: none; border-color: var(--color-primary);
       box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
     }
+    :focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
 
     button {
-      padding: 8px 18px; border: none; border-radius: 6px;
+      padding: 8px 18px; border: none; border-radius: var(--radius-sm);
       font-size: 14px; font-weight: 500; cursor: pointer;
-      transition: background 0.15s, opacity 0.15s; white-space: nowrap;
+      transition: background 0.15s, opacity 0.15s, box-shadow 0.15s, transform 0.05s; white-space: nowrap;
     }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn-primary { background: #2563eb; color: #fff; }
-    .btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+    button:active:not(:disabled) { transform: translateY(0.5px); }
+    .btn-primary { background: var(--color-primary); color: #fff; box-shadow: var(--shadow-xs); }
+    .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); }
     .btn-sm { padding: 5px 12px; font-size: 12px; }
-    .btn-ghost { background: transparent; color: #2563eb; border: 1px solid #2563eb; }
-    .btn-ghost:hover { background: #eff6ff; }
-    .btn-orange { background: #ea580c; color: #fff; }
-    .btn-orange:hover:not(:disabled) { background: #c2410c; }
-    .btn-saved { background: #16a34a; color: #fff; }
-    .btn-saved:hover:not(:disabled) { background: #15803d; }
+    .btn-ghost { background: var(--color-surface); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
+    .btn-ghost:hover { background: var(--color-surface-alt); border-color: #d0d5dd; }
+    .btn-orange { background: var(--color-accent); color: #fff; box-shadow: var(--shadow-xs); }
+    .btn-orange:hover:not(:disabled) { background: var(--color-accent-hover); }
+    .btn-saved { background: var(--color-success); color: #fff; }
+    .btn-saved:hover:not(:disabled) { background: var(--color-success-hover); }
+    .btn-danger { background: var(--color-danger); color: #fff; }
+    .btn-danger:hover:not(:disabled) { background: var(--color-danger-hover); }
     /* CRM layout */
     .crm-flex-wrap { display: flex; gap: 16px; align-items: flex-start; }
     .crm-main-col  { flex: 1; min-width: 0; }
     #crm-sidebar {
-      width: 210px; flex-shrink: 0;
+      width: 230px; flex-shrink: 0;
       background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;
       max-height: 640px; display: flex; flex-direction: column; overflow: hidden;
       position: sticky; top: 16px;
     }
-    .crm-sb-inner  { overflow-y: auto; padding: 10px 10px 14px; flex: 1; }
-    .crm-sb-title  { font-weight: 600; font-size: 0.8rem; color: #374151; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #e5e7eb; }
-    .crm-sb-section { font-size: 0.68rem; font-weight: 700; color: #9ca3af; text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 4px; }
+    .crm-sb-inner  { overflow-y: auto; padding: 12px 12px 14px; flex: 1; }
+    .crm-sb-title  { font-weight: 600; font-size: 0.8rem; color: #374151; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid #e5e7eb; }
+    .crm-sb-section { font-size: 0.68rem; font-weight: 700; color: #9ca3af; text-transform: uppercase; letter-spacing: .05em; margin: 14px 0 4px; }
+    .crm-sb-section:first-of-type { margin-top: 0; }
     .crm-sb-list   { display: flex; flex-direction: column; gap: 1px; }
     .crm-sb-item   { font-size: 0.75rem; padding: 5px 6px; border-radius: 4px; cursor: pointer; color: #374151; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .crm-sb-item:hover { background: #e5e7eb; }
+    /* Searchable Browse-by selectors */
+    .crm-sel-wrap { position: relative; }
+    .crm-sel-input {
+      width: 100%; box-sizing: border-box; font-size: 12px; padding: 6px 8px;
+      border: 1px solid #d1d5db; border-radius: 5px;
+    }
+    .crm-sel-dropdown {
+      position: absolute; top: calc(100% + 2px); left: 0; right: 0; z-index: 20;
+      background: #fff; border: 1px solid #d1d5db; border-radius: 6px;
+      max-height: 220px; overflow-y: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+      display: none;
+    }
+    .crm-sel-dropdown.open { display: block; }
+    .crm-sel-opt { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; padding: 6px 8px; cursor: pointer; color: #374151; }
+    .crm-sel-opt:hover { background: #eff6ff; }
+    .crm-sel-opt.selected { background: #eff6ff; font-weight: 600; }
+    .crm-sel-opt input[type="checkbox"] { flex-shrink: 0; margin: 0; }
+    .crm-sel-opt .crm-sel-sub { font-size: 0.68rem; color: #9ca3af; font-weight: 400; }
+    .crm-sel-empty { font-size: 0.72rem; color: #9ca3af; padding: 6px 8px; }
+    .crm-sel-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+    .crm-sel-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe;
+      border-radius: 5px; padding: 3px 7px; font-size: 0.72rem; max-width: 100%;
+    }
+    .crm-sel-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .crm-sel-chip button {
+      background: none; border: none; color: #1d4ed8; cursor: pointer;
+      font-size: 0.85rem; padding: 0; line-height: 1; flex-shrink: 0;
+    }
+    .crm-sel-clearall { font-size: 0.68rem; color: #2563eb; cursor: pointer; font-weight: 600; text-transform: none; letter-spacing: 0; display: none; }
+    .crm-sel-clearall.active { display: inline; }
+    #crm-filter-summary { font-size: 0.78rem; color: #6b7280; margin-bottom: 8px; }
+    /* Contact Discovery: search + search settings, feeding directly into the CRM below */
+    .discovery-row { display: flex; gap: 16px; align-items: stretch; margin-bottom: 20px; }
+    .card-sub { flex: 1; min-width: 0; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 16px; }
+    .card-sub-title { font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; margin-bottom: 10px; }
+    .search-hint { font-size: 0.74rem; color: #9ca3af; margin-top: 6px; }
+    .search-settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    .search-settings-grid label { display: block; font-size: 0.76rem; color: #555; margin-bottom: 3px; }
+    .search-settings-grid input[type="number"] { width: 100%; box-sizing: border-box; font-size: 12px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
+    .search-dept-label { font-size: 0.76rem; color: #555; margin-bottom: 6px; }
+    .search-checkbox-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px 10px; max-height: 140px; overflow-y: auto; }
+    .search-checkbox-grid label { display: flex; align-items: center; gap: 5px; font-size: 0.75rem; color: #374151; cursor: pointer; font-weight: 400; }
+    @media (max-width: 860px) {
+      .crm-flex-wrap { flex-direction: column; }
+      #crm-sidebar { width: 100%; max-height: none; position: static; order: -1; }
+      .discovery-row { flex-direction: column; }
+      .search-checkbox-grid { grid-template-columns: 1fr 1fr; }
+    }
     /* Email category badges */
     .badge-category { display:inline-block;padding:1px 7px;border-radius:10px;font-size:0.68rem;font-weight:600;white-space:nowrap; }
     .cat-cold_outreach       { background:#dbeafe;color:#1e40af; }
@@ -183,27 +389,26 @@
     .progress-label { font-size: 0.8rem; color: #555; margin-bottom: 4px; }
 
     /* ── Messages ── */
-    #messages { margin-bottom: 14px; }
-    .msg-info {
-      background: #eff6ff; border: 1px solid #bfdbfe;
-      color: #1e40af; padding: 10px 14px; border-radius: 6px;
-      font-size: 0.85rem; margin-bottom: 8px;
+    #messages { margin-bottom: 14px; position: relative; z-index: 1; }
+    .msg-info, .msg-warn, .msg-error, .msg-cache {
+      padding: 10px 14px; border-radius: var(--radius-sm);
+      font-size: 0.85rem; margin-bottom: 8px; box-shadow: var(--shadow-xs);
+      animation: msg-slide-in 0.15s ease;
+      display: flex; align-items: center; gap: 8px;
     }
-    .msg-warn {
-      background: #fffbeb; border: 1px solid #fde68a;
-      color: #92400e; padding: 10px 14px; border-radius: 6px;
-      font-size: 0.85rem; margin-bottom: 8px;
+    @keyframes msg-slide-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+    .msg-info { background: var(--color-primary-soft); border: 1px solid var(--color-primary-border); color: #1e40af; }
+    .msg-warn { background: var(--color-warn-soft); border: 1px solid var(--color-warn-border); color: var(--color-warn-text); }
+    .msg-error { background: var(--color-danger-soft); border: 1px solid var(--color-danger-border); color: var(--color-danger-text); }
+    .msg-cache { background: var(--color-success-soft); border: 1px solid var(--color-success-border); color: var(--color-success-text); }
+    .msg-summary {
+      background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px;
+      padding: 10px 14px; margin-bottom: 8px; font-size: 0.85rem; color: #374151;
     }
-    .msg-error {
-      background: #fef2f2; border: 1px solid #fecaca;
-      color: #991b1b; padding: 10px 14px; border-radius: 6px;
-      font-size: 0.85rem; margin-bottom: 8px;
-    }
-    .msg-cache {
-      background: #f0fdf4; border: 1px solid #86efac;
-      color: #166534; padding: 10px 14px; border-radius: 6px;
-      font-size: 0.85rem; margin-bottom: 8px;
-    }
+    .msg-summary-title { font-weight: 700; margin-bottom: 4px; }
+    .msg-summary-row { margin-top: 2px; }
+    .msg-summary-stats { margin-top: 4px; display: flex; gap: 14px; flex-wrap: wrap; }
+    .msg-summary-stats b { color: #111827; }
 
     /* ── Export bar ── */
     #export-bar {
@@ -228,20 +433,24 @@
     }
     .results-count { font-size: 0.85rem; color: #555; }
 
-    .table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid #e0e4ea; }
-    table { width: 100%; border-collapse: collapse; background: #fff; }
-    thead { background: #f1f5f9; }
+    .table-wrap { overflow-x: auto; border-radius: var(--radius-md); border: 1px solid var(--color-border); box-shadow: var(--shadow-xs); }
+    table { width: 100%; border-collapse: collapse; background: var(--color-surface); }
+    thead { background: var(--color-surface-alt); position: sticky; top: 0; z-index: 1; }
     th {
       padding: 10px 12px; text-align: left; font-size: 0.75rem; font-weight: 600;
-      text-transform: uppercase; letter-spacing: 0.05em; color: #475569;
-      white-space: nowrap; border-bottom: 1px solid #e0e4ea;
+      text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-secondary);
+      white-space: nowrap; border-bottom: 1px solid var(--color-border);
     }
     td {
       padding: 10px 12px; font-size: 0.85rem;
-      border-bottom: 1px solid #f1f5f9; vertical-align: middle;
+      border-bottom: 1px solid var(--color-border-soft); vertical-align: middle;
     }
     tr:last-child td { border-bottom: none; }
-    tr:hover td { background: #f8fafc; }
+    tr:hover td { background: var(--color-surface-alt); }
+    .table-empty-state { text-align: center; padding: 48px 20px; color: var(--color-text-tertiary); }
+    .table-empty-state .tes-icon { font-size: 1.8rem; margin-bottom: 8px; opacity: 0.6; }
+    .table-empty-state .tes-title { font-size: 0.88rem; font-weight: 600; color: var(--color-text-secondary); margin-bottom: 4px; }
+    .table-empty-state .tes-hint { font-size: 0.8rem; }
 
     .badge {
       display: inline-block; padding: 2px 8px;
@@ -283,16 +492,20 @@
     /* ── Modals (email draft + scan business card) ── */
     .modal-overlay {
       display: none; position: fixed; inset: 0;
-      background: rgba(0,0,0,0.45); z-index: 1000;
+      background: rgba(16,24,40,0.55); z-index: 1000;
       align-items: center; justify-content: center;
+      animation: modal-fade-in 0.12s ease;
     }
     .modal-overlay.open { display: flex; }
+    @keyframes modal-fade-in { from { opacity: 0; } to { opacity: 1; } }
     .modal {
-      background: #fff; border-radius: 10px;
+      background: var(--color-surface); border-radius: var(--radius-lg);
       width: min(680px, 94vw); max-height: 90vh;
       overflow-y: auto; padding: 28px 32px;
-      position: relative; box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+      position: relative; box-shadow: var(--shadow-lg);
+      animation: modal-pop-in 0.15s cubic-bezier(0.2,0.8,0.2,1);
     }
+    @keyframes modal-pop-in { from { opacity: 0; transform: translateY(6px) scale(0.98); } to { opacity: 1; transform: none; } }
     .modal-wide { width: min(780px, 96vw); }
     .modal-close {
       position: absolute; top: 14px; right: 16px;
@@ -314,6 +527,49 @@
       white-space: pre-wrap; word-break: break-word;
     }
     .draft-note { font-size: 0.78rem; color: #f59e0b; margin-top: 6px; }
+
+    /* ── Draft editor (Email Management lifecycle) ── */
+    .draft-field {
+      width: 100%; box-sizing: border-box; background: #fff; border: 1px solid #d1d5db;
+      border-radius: 6px; padding: 9px 12px; font-size: 0.88rem; line-height: 1.5;
+      font-family: inherit; resize: vertical;
+    }
+    .draft-field:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.1); }
+    .draft-meta-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; padding-bottom: 10px; border-bottom: 1px solid #e5e7eb; }
+    .draft-status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+    .status-draft { background: #f3f4f6; color: #6b7280; }
+    .status-ready_for_review { background: #fef9c3; color: #713f12; }
+    .status-approved { background: #dcfce7; color: #166534; }
+    .status-archived { background: #e0e7ff; color: #3730a3; }
+    .status-trash { background: #fee2e2; color: #991b1b; }
+    .draft-meta-text { font-size: 0.74rem; color: #9ca3af; }
+    .draft-recipient-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+    .draft-collapsible-header {
+      display: flex; align-items: center; justify-content: space-between; cursor: pointer;
+      font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+      color: #555; padding: 8px 0; border-top: 1px solid #e5e7eb; margin-top: 8px;
+    }
+    .draft-collapsible-body { display: none; padding: 4px 0 10px; }
+    .draft-collapsible-body.open { display: block; }
+    .draft-version-item, .draft-activity-item { font-size: 0.8rem; padding: 6px 0; border-bottom: 1px solid #f3f4f6; }
+    .draft-version-item:last-child, .draft-activity-item:last-child { border-bottom: none; }
+    .draft-version-item { cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+    .draft-version-item:hover { background: #f9fafb; }
+    .draft-activity-time { color: #9ca3af; font-size: 0.72rem; }
+
+    /* ── Draft Library (multiple independent drafts per contact, one per category) ── */
+    .draft-library-list { display: flex; flex-direction: column; gap: 2px; max-height: 160px; overflow-y: auto; }
+    .draft-library-item {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      font-size: 0.82rem; padding: 6px 8px; border-radius: 5px; cursor: pointer; color: #374151;
+    }
+    .draft-library-item:hover { background: #f3f4f6; }
+    .draft-library-item.active { background: #eff6ff; font-weight: 600; }
+    .draft-library-check { width: 16px; flex-shrink: 0; text-align: center; }
+    .draft-library-check.exists { color: #16a34a; }
+    .draft-library-check.missing { color: #d1d5db; }
+    .draft-library-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .draft-library-status { font-size: 0.7rem; color: #9ca3af; flex-shrink: 0; }
 
     .modal-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px; }
     .copy-btn { background: #f3f4f6; color: #1a1a1a; border: 1px solid #d1d5db; }
@@ -391,18 +647,50 @@
 </head>
 <body>
 
-<header>
-  <div>
-    <h1>Apollo Leadership Contact Search</h1>
-    <div class="subtitle">Upload a company list or type a name → find VP+/C-suite contacts → draft outreach emails</div>
-  </div>
-  <button class="btn-scan-card" id="open-scan-modal-btn">📇 Scan Business Card</button>
-</header>
+<div class="app-shell">
+  <aside class="app-sidebar" id="app-sidebar">
+    <div class="app-sidebar-brand">
+      <span class="app-sidebar-brand-mark">📇</span>
+      <span class="app-brand-label">Apollo CRM</span>
+    </div>
+    <nav class="app-sidebar-nav">
+      <div class="app-nav-item" data-nav-view="search" title="Search &amp; Scan">
+        <span class="app-nav-icon">🔍</span><span class="app-nav-label">Search &amp; Scan</span>
+      </div>
+      <div class="app-nav-item" data-nav-view="crm" title="CRM">
+        <span class="app-nav-icon">🗂️</span><span class="app-nav-label">CRM</span>
+      </div>
+      <div class="app-nav-item" data-nav-view="settings" title="Settings">
+        <span class="app-nav-icon">⚙️</span><span class="app-nav-label">Settings</span>
+      </div>
+    </nav>
+    <div class="app-sidebar-footer">
+      <button class="app-sidebar-collapse-btn" id="app-sidebar-collapse-btn" title="Collapse sidebar">
+        <span id="app-sidebar-collapse-icon">◀</span><span class="app-nav-label">Collapse</span>
+      </button>
+    </div>
+  </aside>
 
-<div class="container">
+  <div class="app-main">
+    <header class="app-topbar">
+      <div class="app-breadcrumb">Apollo CRM <span>›</span> <b id="app-breadcrumb-current">Search &amp; Scan</b></div>
+      <div class="app-topbar-search">
+        <input type="text" id="app-global-search" placeholder="Search contacts, companies…" />
+      </div>
+      <div class="app-topbar-actions">
+        <button class="btn-scan-card" id="open-scan-modal-btn">📇 Scan Business Card</button>
+        <button class="app-icon-btn" id="app-notifications-btn" title="Notifications">🔔<span class="app-notif-dot" id="app-notif-dot" style="display:none;"></span></button>
+        <div class="app-user-menu" id="app-user-menu" title="Account">
+          <span class="app-user-avatar" id="app-user-avatar">U</span>
+          <span class="app-user-menu-name" id="app-user-menu-name">Your Profile</span>
+        </div>
+      </div>
+    </header>
+
+<div class="container app-view-container">
 
   <!-- ── Sender profile card ── -->
-  <div class="card">
+  <div class="card view-hidden" data-view="settings">
     <div class="card-title">Your Profile <span style="font-weight:400;font-size:0.82rem;color:#9ca3af">(used to personalise outreach emails)</span></div>
     <div class="sender-grid">
       <div>
@@ -421,7 +709,7 @@
   </div>
 
   <!-- ── Company list upload card ── -->
-  <div class="card">
+  <div class="card" data-view="search">
     <div class="card-title">Upload Company List (CSV or Excel)</div>
     <div class="upload-zone" id="upload-zone">
       <input type="file" id="csv-file" accept=".csv,.xlsx,.xls,text/csv" />
@@ -472,26 +760,45 @@
     </div>
   </div>
 
-  <!-- ── Manual search card ── -->
-  <div class="card">
-    <div class="card-title">Manual Search</div>
-    <div class="search-row">
-      <div class="input-wrap">
-        <label for="company-input">Company name(s) <span style="color:#9ca3af">(comma-separated for multiple)</span></label>
-        <input type="text" id="company-input" placeholder="e.g. CATL, BYD, Tesla" />
-      </div>
-      <button class="btn-primary" id="search-btn">Search</button>
-    </div>
-  </div>
-
   <!-- ── CRM: saved contacts & companies ── -->
-  <div class="card">
+  <div class="card view-hidden" data-view="crm">
     <div class="card-title" id="crm-toggle">
       CRM — Saved Contacts &amp; Companies
       <span id="crm-review-badge" style="display:none;"></span>
       <span class="toggle-icon" id="crm-toggle-icon">▼</span>
     </div>
     <div id="crm-body">
+
+      <!-- ── Contact Discovery: search feeds directly into the CRM below ── -->
+      <div class="discovery-row">
+        <div class="discovery-search card-sub">
+          <div class="card-sub-title">Search Companies</div>
+          <div class="search-row">
+            <div class="input-wrap">
+              <label for="company-input">Company name(s) <span style="color:#9ca3af">(comma-separated for multiple)</span></label>
+              <input type="text" id="company-input" placeholder="e.g. CATL, BYD, Tesla" />
+            </div>
+            <button class="btn-primary" id="search-btn">Search</button>
+          </div>
+          <div class="search-hint">Searching saves contacts to your CRM below for review — it does not draft emails automatically.</div>
+        </div>
+        <div class="discovery-settings card-sub">
+          <div class="card-sub-title">Search Settings</div>
+          <div class="search-settings-grid">
+            <div>
+              <label for="search-per-company-limit">Contacts per company</label>
+              <input type="number" id="search-per-company-limit" value="25" min="1" max="500" />
+            </div>
+            <div>
+              <label for="search-max-total">Maximum total contacts</label>
+              <input type="number" id="search-max-total" value="100" min="1" max="2000" />
+            </div>
+          </div>
+          <div class="search-dept-label">Target Departments <span style="color:#9ca3af;font-weight:400;">(optional — leave blank for the default executive + specialist set)</span></div>
+          <div id="search-dept-checkboxes" class="search-checkbox-grid"></div>
+        </div>
+      </div>
+
       <div class="crm-flex-wrap">
 
         <!-- ── Main CRM column ── -->
@@ -520,10 +827,27 @@
               </select>
             </div>
             <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Salesperson</label><input type="text" id="crm-filter-owner" placeholder="e.g. Sarah Chen" style="font-size:12px;padding:6px 8px;" /></div>
+            <div>
+              <label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Department <span id="crm-sel-dept-clearall" class="crm-sel-clearall">Clear all</span></label>
+              <div class="crm-sel-wrap">
+                <input type="text" id="crm-sel-dept-input" class="crm-sel-input" placeholder="Filter by department…" autocomplete="off" />
+                <div id="crm-sel-dept-dropdown" class="crm-sel-dropdown"></div>
+              </div>
+              <div id="crm-sel-dept-chips" class="crm-sel-chips"></div>
+            </div>
+            <div>
+              <label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Seniority <span id="crm-sel-seniority-clearall" class="crm-sel-clearall">Clear all</span></label>
+              <div class="crm-sel-wrap">
+                <input type="text" id="crm-sel-seniority-input" class="crm-sel-input" placeholder="Filter by seniority…" autocomplete="off" />
+                <div id="crm-sel-seniority-dropdown" class="crm-sel-dropdown"></div>
+              </div>
+              <div id="crm-sel-seniority-chips" class="crm-sel-chips"></div>
+            </div>
           </div>
           <button class="btn-sm btn-ghost" id="crm-apply-filters-btn" style="margin-bottom:14px;">Apply filters</button>
           <button class="btn-sm btn-ghost" id="crm-clear-filters-btn" style="margin-bottom:14px;">Clear</button>
 
+          <div id="crm-filter-summary"></div>
           <div class="csv-header">
             <div class="csv-count" id="crm-count"></div>
             <div class="csv-actions">
@@ -543,7 +867,11 @@
               <input type="text" id="crm-extra-instructions" placeholder="e.g. mention our new automation line" />
             </div>
           </div>
-          <button class="btn-orange btn-sm" id="crm-bulk-draft-btn" style="margin-bottom:14px;">Draft Emails for Selected</button>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+            <button class="btn-orange btn-sm" id="crm-bulk-draft-btn" disabled>Draft Emails for Selected</button>
+            <button class="btn-danger btn-sm" id="crm-bulk-delete-btn" disabled>Delete Selected</button>
+            <span id="crm-selected-count" style="font-size:0.76rem;color:#6b7280;"></span>
+          </div>
 
           <div class="table-wrap">
             <table class="company-table">
@@ -565,16 +893,63 @@
         <aside id="crm-sidebar">
           <div class="crm-sb-inner">
             <div class="crm-sb-title">Quick Browse</div>
-            <input type="text" id="crm-sidebar-search" placeholder="Filter list…"
-              style="width:100%;box-sizing:border-box;font-size:12px;padding:5px 8px;border:1px solid #d1d5db;border-radius:5px;margin-bottom:6px;" />
-            <div class="crm-sb-section">Companies</div>
-            <div id="crm-sidebar-companies" class="crm-sb-list"></div>
-            <div class="crm-sb-section">Recent Contacts</div>
-            <div id="crm-sidebar-contacts" class="crm-sb-list"></div>
+
+            <div class="crm-sb-section" style="display:flex;justify-content:space-between;align-items:center;">
+              <span>Browse by Company</span>
+              <span id="crm-sel-account-clearall" class="crm-sel-clearall">Clear all</span>
+            </div>
+            <div class="crm-sel-wrap">
+              <input type="text" id="crm-sel-account-input" class="crm-sel-input" placeholder="Search companies…" autocomplete="off" />
+              <div id="crm-sel-account-dropdown" class="crm-sel-dropdown"></div>
+            </div>
+            <div id="crm-sel-account-chips" class="crm-sel-chips"></div>
+            <button type="button" class="btn-sm btn-ghost" id="crm-merge-accounts-btn" style="display:none;margin-top:6px;width:100%;">Merge Selected</button>
+
+            <div class="crm-sb-section" style="display:flex;justify-content:space-between;align-items:center;">
+              <span>Browse by Contact Name</span>
+              <span id="crm-sel-contact-clearall" class="crm-sel-clearall">Clear all</span>
+            </div>
+            <div class="crm-sel-wrap">
+              <input type="text" id="crm-sel-contact-input" class="crm-sel-input" placeholder="Search contacts…" autocomplete="off" />
+              <div id="crm-sel-contact-dropdown" class="crm-sel-dropdown"></div>
+            </div>
+            <div id="crm-sel-contact-chips" class="crm-sel-chips"></div>
           </div>
         </aside>
 
       </div><!-- /crm-flex-wrap -->
+    </div>
+  </div>
+
+  <!-- ── Bulk delete confirmation modal ── -->
+  <div class="modal-overlay" id="delete-confirm-modal">
+    <div class="modal" style="max-width:420px;">
+      <button class="modal-close" id="delete-confirm-close" title="Close">×</button>
+      <h2>Delete selected contacts?</h2>
+      <p id="delete-confirm-text" style="font-size:0.88rem;color:#374151;margin-bottom:4px;"></p>
+      <p style="font-size:0.78rem;color:#9ca3af;">This cannot be undone. Associated companies are not affected.</p>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="delete-confirm-cancel">Cancel</button>
+        <button class="btn-danger" id="delete-confirm-ok">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Merge accounts confirmation modal ── -->
+  <div class="modal-overlay" id="merge-accounts-modal">
+    <div class="modal" style="max-width:460px;">
+      <button class="modal-close" id="merge-accounts-close" title="Close">×</button>
+      <h2>Merge selected companies?</h2>
+      <p style="font-size:0.85rem;color:#374151;margin-bottom:10px;">
+        Every company currently under these accounts will move to the account you keep. The others will be removed. Contacts are not affected.
+      </p>
+      <div id="merge-accounts-list" style="font-size:0.82rem;color:#374151;margin-bottom:10px;"></div>
+      <label style="display:block;font-size:0.8rem;color:#555;margin-bottom:4px;">Keep this account (the rest merge into it):</label>
+      <select id="merge-accounts-target" style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff;margin-bottom:6px;"></select>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="merge-accounts-cancel">Cancel</button>
+        <button class="btn-orange" id="merge-accounts-ok">Merge</button>
+      </div>
     </div>
   </div>
 
@@ -670,7 +1045,7 @@
         </div>
       </div>
 
-      <div id="ac-error" style="color:#ef4444;font-size:0.8rem;margin-top:10px;display:none;"></div>
+      <div id="ac-error" class="msg-error" style="margin-top:10px;display:none;"></div>
       <div style="display:flex;gap:8px;margin-top:16px;">
         <button class="btn-primary" id="add-contact-submit-btn" style="flex:1;">Save Contact</button>
         <button class="btn-ghost" id="add-contact-save-another-btn" style="flex:1;">Save &amp; Add Another</button>
@@ -771,27 +1146,29 @@
   </div>
 
   <!-- ── Batch progress ── -->
-  <div id="batch-progress">
+  <div id="batch-progress" data-view="search">
     <div class="progress-label" id="progress-label">Searching…</div>
     <div class="progress-bar-wrap">
       <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
     </div>
   </div>
 
-  <!-- ── Status messages ── -->
+  <!-- ── Status messages (global -- visible regardless of active view) ── -->
   <div id="messages"></div>
 
   <!-- ── Export bar ── -->
-  <div id="export-bar" style="display:none">
+  <div id="export-bar" data-view="search" style="display:none">
     <div class="export-label">Export</div>
     <div class="export-buttons" id="export-buttons"></div>
   </div>
 
   <!-- ── Contact results ── -->
-  <div id="results"></div>
-  <div id="pagination"></div>
+  <div id="results" data-view="search"></div>
+  <div id="pagination" data-view="search"></div>
 
 </div>
+    </div><!-- /app-main -->
+  </div><!-- /app-shell -->
 
 <!-- ── Fixed usage bar ── -->
 <div id="usage-bar">
@@ -819,18 +1196,159 @@
     <button class="modal-close" id="email-modal-close" title="Close">×</button>
     <h2 id="modal-title">Drafting email…</h2>
     <div class="contact-info" id="modal-contact-info"></div>
+
+    <div class="draft-section" id="draft-library-section" style="border-top:1px solid #e0e4ea;border-bottom:1px solid #e0e4ea;padding:12px 0;">
+      <div class="draft-label">Drafts for this Contact</div>
+      <div id="draft-library-list" class="draft-library-list"></div>
+      <div style="display:flex;gap:8px;margin-top:10px;align-items:flex-end;">
+        <div style="flex:1;">
+          <label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Additional instructions <span style="color:#9ca3af;font-weight:400;">(used when generating/regenerating the selected category)</span></label>
+          <input type="text" id="modal-extra-instructions" placeholder="e.g. mention our new automation line" />
+        </div>
+        <button class="btn-sm btn-orange" id="modal-generate-btn">Generate Draft</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button class="btn-sm btn-ghost" id="modal-add-existing-email-btn">+ Add Existing Email</button>
+        <button class="btn-sm btn-ghost" id="modal-manage-library-btn">📎 Manage Attachment Library</button>
+      </div>
+    </div>
+
+    <div class="draft-collapsible-header" id="imported-emails-toggle">Sent / Imported Emails <span>▾</span></div>
+    <div class="draft-collapsible-body" id="imported-emails-body"></div>
+
     <div id="modal-body">
       <div style="text-align:center;padding:32px 0;">
         <span class="spinner"></span> Generating email draft with Claude…
       </div>
     </div>
-    <div class="draft-section" style="border-top:1px solid #e0e4ea;padding-top:16px;margin-top:8px;">
-      <div class="draft-label">Redraft with a different purpose/context</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
-        <select id="modal-mode-select" style="padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff;"></select>
-        <input type="text" id="modal-extra-instructions" placeholder="Additional instructions (optional)" />
+  </div>
+</div>
+
+<!-- ── Unsaved changes confirm ── -->
+<div class="modal-overlay" id="unsaved-changes-modal">
+  <div class="modal" style="max-width:400px;">
+    <h2>You have unsaved changes</h2>
+    <p style="font-size:0.85rem;color:#374151;margin-bottom:6px;">Save before closing?</p>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="unsaved-cancel-btn">Cancel</button>
+      <button class="btn-sm" id="unsaved-discard-btn" style="background:#f3f4f6;color:#374151;">Discard Changes</button>
+      <button class="btn-orange" id="unsaved-save-btn">Save Draft</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Add Existing Email (manual entry) ── -->
+<div class="modal-overlay" id="add-existing-email-modal">
+  <div class="modal">
+    <button class="modal-close" id="add-existing-email-close" title="Close">×</button>
+    <h2>Add Existing Email</h2>
+    <div class="contact-info">Log an email you already wrote and sent outside this system.</div>
+
+    <div class="draft-section">
+      <div class="draft-label">Category</div>
+      <select class="draft-field" id="aee-mode"></select>
+    </div>
+    <div class="draft-recipient-grid">
+      <div><div class="draft-label">Recipient</div><input class="draft-field" id="aee-to-email" placeholder="recipient@example.com"></div>
+      <div><div class="draft-label">Date Sent</div><input class="draft-field" type="date" id="aee-sent-at"></div>
+    </div>
+    <div class="draft-section">
+      <div class="draft-label">Subject Line</div>
+      <input class="draft-field" id="aee-subject">
+    </div>
+    <div class="draft-section">
+      <div class="draft-label">Email Body</div>
+      <textarea class="draft-field" id="aee-body" rows="8"></textarea>
+    </div>
+    <div class="draft-section">
+      <div class="draft-label">Notes / Context</div>
+      <textarea class="draft-field" id="aee-notes" rows="2" placeholder="Notes only your team can see"></textarea>
+    </div>
+
+    <div class="draft-section">
+      <div class="draft-label">Attachments</div>
+      <div class="upload-zone" id="aee-upload-zone">
+        <div class="upload-icon">📎</div>
+        <div>Click or drag files here (PDF, PPT, DOC, XLS, images, ZIP)</div>
+        <input type="file" id="aee-file-input" multiple>
       </div>
-      <button class="btn-sm btn-ghost" id="modal-regenerate-btn">Regenerate</button>
+      <div id="aee-attachment-chips" style="margin-top:8px;"></div>
+      <button class="btn-sm btn-ghost" id="aee-attach-from-library-btn" style="margin-top:8px;">+ Attach from Library</button>
+    </div>
+
+    <div class="msg-error" id="aee-error" style="display:none;"></div>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="aee-cancel-btn">Cancel</button>
+      <button class="btn-orange" id="aee-save-btn">Save Email</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Attachment Library (management + picker) ── -->
+<div class="modal-overlay" id="attachment-library-modal">
+  <div class="modal">
+    <button class="modal-close" id="attachment-library-close" title="Close">×</button>
+    <h2 id="attachment-library-title">Attachment Library</h2>
+
+    <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:flex-end;">
+      <div style="flex:1;min-width:160px;">
+        <label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Search</label>
+        <input class="draft-field" id="al-search" placeholder="Search by name…">
+      </div>
+      <div>
+        <label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Category</label>
+        <select class="draft-field" id="al-category-filter">
+          <option value="">All categories</option>
+          <option value="brochure">Brochure</option>
+          <option value="catalog">Catalog</option>
+          <option value="certification">Certification</option>
+          <option value="case_study">Case Study</option>
+          <option value="datasheet">Datasheet</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <button class="btn-sm btn-ghost" id="al-favorites-toggle">☆ Favorites Only</button>
+    </div>
+
+    <div id="al-list" class="draft-library-list" style="max-height:260px;"></div>
+
+    <div class="modal-actions" id="al-picker-actions" style="display:none;">
+      <button class="btn-orange" id="al-apply-picker-btn">Attach Selected</button>
+    </div>
+
+    <div class="draft-section" id="al-manage-only-section" style="margin-top:14px;border-top:1px solid #e0e4ea;padding-top:12px;">
+      <div class="draft-label">Add New Library Item</div>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div style="flex:1;min-width:140px;">
+          <label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Name</label>
+          <input class="draft-field" id="al-new-name" placeholder="e.g. Company Brochure">
+        </div>
+        <div>
+          <label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Category</label>
+          <select class="draft-field" id="al-new-category">
+            <option value="brochure">Brochure</option>
+            <option value="catalog">Catalog</option>
+            <option value="certification">Certification</option>
+            <option value="case_study">Case Study</option>
+            <option value="datasheet">Datasheet</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+        <div>
+          <input type="file" id="al-new-file">
+        </div>
+        <button class="btn-sm btn-orange" id="al-upload-btn">Upload</button>
+      </div>
+    </div>
+
+    <div id="al-versions-panel" style="display:none;margin-top:12px;border-top:1px solid #e0e4ea;padding-top:12px;">
+      <div class="draft-label">Version History — <span id="al-versions-name"></span></div>
+      <div id="al-versions-list"></div>
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+        <input type="file" id="al-replace-file">
+        <button class="btn-sm btn-orange" id="al-replace-btn">Upload New Version</button>
+        <button class="btn-sm btn-ghost" id="al-delete-item-btn" style="margin-left:auto;color:#b91c1c;">Delete Item</button>
+      </div>
     </div>
   </div>
 </div>

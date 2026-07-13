@@ -14,6 +14,78 @@ let _csvCompanies = [];
 let _filteredCsvIndices = [];
 let _sender = { name: "", title: "", company: "" };
 
+/* ── Application shell: sidebar nav / view switching / collapse persistence ── */
+
+const APP_VIEW_LABELS = { search: "Search & Scan", crm: "CRM", settings: "Settings" };
+
+function showView(name) {
+  if (!APP_VIEW_LABELS[name]) return;
+  document.querySelectorAll("[data-view]").forEach((el) => {
+    el.classList.toggle("view-hidden", el.dataset.view !== name);
+  });
+  document.querySelectorAll(".app-nav-item").forEach((item) => {
+    item.classList.toggle("active", item.dataset.navView === name);
+  });
+  document.getElementById("app-breadcrumb-current").textContent = APP_VIEW_LABELS[name];
+  try { localStorage.setItem("app_active_view", name); } catch (e) { /* ignore (private browsing, etc.) */ }
+}
+
+function initAppShell() {
+  document.querySelectorAll(".app-nav-item").forEach((item) => {
+    item.addEventListener("click", () => showView(item.dataset.navView));
+  });
+
+  let savedView = "search";
+  try { savedView = localStorage.getItem("app_active_view") || "search"; } catch (e) { /* ignore */ }
+  showView(APP_VIEW_LABELS[savedView] ? savedView : "search");
+
+  const collapseBtn = document.getElementById("app-sidebar-collapse-btn");
+  const collapseIcon = document.getElementById("app-sidebar-collapse-icon");
+  function applyCollapsed(collapsed) {
+    document.body.classList.toggle("sidebar-collapsed", collapsed);
+    collapseIcon.textContent = collapsed ? "▶" : "◀";
+  }
+  let savedCollapsed = false;
+  try { savedCollapsed = localStorage.getItem("app_sidebar_collapsed") === "true"; } catch (e) { /* ignore */ }
+  applyCollapsed(savedCollapsed);
+  collapseBtn.addEventListener("click", () => {
+    const collapsed = !document.body.classList.contains("sidebar-collapsed");
+    applyCollapsed(collapsed);
+    try { localStorage.setItem("app_sidebar_collapsed", String(collapsed)); } catch (e) { /* ignore */ }
+  });
+
+  // User-profile menu in the top bar mirrors the sender-profile name/company
+  // (already tracked in `_sender`) rather than introducing a separate concept.
+  document.getElementById("app-user-menu").addEventListener("click", () => showView("settings"));
+
+  document.getElementById("app-global-search").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const q = e.target.value.trim();
+    if (!q) return;
+    showView("crm");
+    document.getElementById("crm-search-input").value = q;
+    loadCrmContacts(q);
+  });
+}
+
+function updateUserMenuFromSender() {
+  const name = (_sender && _sender.name) || "";
+  document.getElementById("app-user-menu-name").textContent = name || "Your Profile";
+  document.getElementById("app-user-avatar").textContent = name ? name.trim()[0].toUpperCase() : "U";
+}
+
+/* ── Modal open/close: single helper for every .modal-overlay, replacing
+   the ~30 hand-written classList.add/remove("open") call sites that had
+   accumulated across each feature added this session. ── */
+function openModal(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.add("open");
+}
+function closeModal(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.remove("open");
+}
+
 /* ── Sender profile ── */
 
 async function loadSenderProfile() {
@@ -25,6 +97,7 @@ async function loadSenderProfile() {
       document.getElementById("sender-name").value = _sender.name || "";
       document.getElementById("sender-title").value = _sender.title || "";
       document.getElementById("sender-company").value = _sender.company || "";
+      updateUserMenuFromSender();
     }
   } catch (e) { /* silent */ }
 }
@@ -34,6 +107,7 @@ function saveSender() {
   _sender.name    = document.getElementById("sender-name").value.trim();
   _sender.title   = document.getElementById("sender-title").value.trim();
   _sender.company = document.getElementById("sender-company").value.trim();
+  updateUserMenuFromSender();
   clearTimeout(_senderSaveTimeout);
   _senderSaveTimeout = setTimeout(() => {
     fetch("/api/settings/sender", {
@@ -208,6 +282,7 @@ async function searchFromCsv() {
   const total = selected.length;
   let done = 0;
   const allMessages = [];
+  const allSummaries = [];
   const forceRefresh = document.getElementById("force-refresh")?.checked || false;
 
   for (const company of selected) {
@@ -216,7 +291,7 @@ async function searchFromCsv() {
     try {
       const r = await fetch("/api/leads/search", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ companies: company.english_name, force: forceRefresh }),
+        body: JSON.stringify({ companies: company.english_name, force: forceRefresh, ...getSearchSettingsPayload() }),
       });
       const d = await r.json();
       if (d.error) {
@@ -225,6 +300,7 @@ async function searchFromCsv() {
         _currentContacts.push(...(d.contacts || []));
         _currentCompanies.push(...(d.companies || [company.english_name]));
         (d.messages || []).forEach(m => allMessages.push(m));
+        (d.summaries || []).forEach(s => allSummaries.push(s));
       }
     } catch (e) {
       allMessages.push(`${company.english_name}: network error — ${e.message}`);
@@ -237,6 +313,7 @@ async function searchFromCsv() {
   setTimeout(() => { prog.style.display = "none"; }, 2000);
 
   allMessages.forEach(m => showMessage(m, "warn"));
+  renderSearchSummary(allSummaries);
 
   if (_currentContacts.length === 0) {
     showMessage(`No matching leadership contacts found across ${total} companies. Try broader search terms or check your Apollo plan tier.`, "info");
@@ -248,6 +325,29 @@ async function searchFromCsv() {
     btn.disabled = false; btn.textContent = "Search Selected";
     await autoProcessContacts();
   }
+}
+
+/* ── Search settings: user-controlled Apollo limits + department targeting ──
+   Never fetch an unbounded number of Apollo contacts -- the user controls
+   how many, per company and overall. */
+
+let _searchDepartmentOptions = [];
+
+function renderSearchSettingsDepartmentCheckboxes() {
+  const el = document.getElementById("search-dept-checkboxes");
+  if (!el) return;
+  _searchDepartmentOptions = _departmentOptions;
+  el.innerHTML = _searchDepartmentOptions.map((d) => `
+    <label><input type="checkbox" class="search-dept-check" value="${escapeAttr(d.key)}"> ${escapeHtml(d.label)}</label>
+  `).join("");
+}
+
+function getSearchSettingsPayload() {
+  const perCompanyLimit = Number(document.getElementById("search-per-company-limit").value) || 25;
+  const maxTotal = Number(document.getElementById("search-max-total").value) || 100;
+  const departments = [];
+  document.querySelectorAll(".search-dept-check:checked").forEach((cb) => departments.push(cb.value));
+  return { perCompanyLimit, maxTotal, departments };
 }
 
 /* ── Manual search ── */
@@ -271,7 +371,7 @@ async function doSearch() {
     const forceRefresh = document.getElementById("force-refresh")?.checked || false;
     const r = await fetch("/api/leads/search", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ companies: company, force: forceRefresh }),
+      body: JSON.stringify({ companies: company, force: forceRefresh, ...getSearchSettingsPayload() }),
     });
     const d = await r.json();
     if (!r.ok || d.error) { showMessage(d.error || "Search failed.", "error"); return; }
@@ -280,6 +380,7 @@ async function doSearch() {
     _currentCompanies = d.companies || [company];
 
     (d.messages || []).forEach(m => showMessage(m, "warn"));
+    renderSearchSummary(d.summaries);
 
     if (d.orgs && d.orgs.length > 0) {
       renderOrgFallback(d.orgs);
@@ -305,6 +406,15 @@ async function doSearch() {
 
 function renderContacts(contacts, companyLabel) {
   const resultsEl = document.getElementById("results");
+  if (!contacts.length) {
+    resultsEl.innerHTML = `
+      <div class="table-empty-state">
+        <div class="tes-icon">🔍</div>
+        <div class="tes-title">No leadership contacts found</div>
+        <div class="tes-hint">Try a different company name, or widen your target departments in Search Settings.</div>
+      </div>`;
+    return;
+  }
   const header = `
     <div class="results-header">
       <div class="results-count">${contacts.length} leadership contact${contacts.length !== 1 ? "s" : ""} found</div>
@@ -381,11 +491,8 @@ function renderContacts(contacts, companyLabel) {
   resultsEl.querySelectorAll(".export-selected-btn").forEach(btn => {
     btn.addEventListener("click", () => exportSelected(btn.dataset.fmt));
   });
-  resultsEl.querySelectorAll(".draft-email-btn").forEach(btn => {
+  resultsEl.querySelectorAll(".draft-email-btn, .view-draft-btn").forEach(btn => {
     btn.addEventListener("click", () => openEmailDraft(Number(btn.dataset.idx)));
-  });
-  resultsEl.querySelectorAll(".view-draft-btn").forEach(btn => {
-    btn.addEventListener("click", () => openSavedDraft(Number(btn.dataset.idx)));
   });
   resultsEl.querySelectorAll(".reveal-btn").forEach(btn => {
     btn.addEventListener("click", () => revealEmail(Number(btn.dataset.idx)));
@@ -447,7 +554,7 @@ const CRM_FIELDS = ["name", "title", "company", "department", "email", "linkedin
 
 async function exportSelected(fmt) {
   const selected = getSelectedContacts();
-  if (!selected) { alert("Select at least one contact using the checkboxes."); return; }
+  if (!selected) { showMessage("Select at least one contact using the checkboxes.", "warn"); return; }
 
   if (fmt === "xlsx") {
     await downloadPostBlob("/api/export-xlsx", { contacts: selected }, "selected_contacts.xlsx");
@@ -474,13 +581,13 @@ async function downloadPostBlob(url, body, filename) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!r.ok) { alert("Export failed: " + r.statusText); return; }
+    if (!r.ok) { showMessage("Export failed: " + r.statusText, "error"); return; }
     const blob = await r.blob();
     const objUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = objUrl; a.download = filename; a.click();
     setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
-  } catch (e) { alert("Export error: " + e.message); }
+  } catch (e) { showMessage("Export error: " + e.message, "error"); }
 }
 
 function toCsvString(contacts, fields) {
@@ -500,71 +607,152 @@ function downloadFile(content, filename, mime) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-/* ── Email drafting modal ── */
+/* ── Email drafting modal: real editor + status/version/activity workflow ──
+   _modalContact: the recipient the modal is open for.
+   _modalComm: the live communications row being edited (null for the
+   read-only historical-timeline preview path, which still uses the old
+   simple renderDraft()).
+   _modalCategories: Draft Library data -- one entry per outreach category
+   (from claude.js's DRAFT_MODES), each independently generated/edited/
+   deleted. _modalSelectedMode: which category is currently shown.
+   _modalRefreshFn: called after any lifecycle action so the underlying
+   table (CRM or search-results) re-syncs from the server instead of being
+   hand-patched.
+   _modalDirty: true once any editable field has changed since the last save. */
 
 let _modalContact = null;
-let _modalOnUpdate = null;
+let _modalComm = null;
+let _modalCategories = [];
+let _modalSelectedMode = "cold_outreach";
+let _modalRefreshFn = null;
+let _modalDirty = false;
+
+// Add Existing Email (manual import) sub-dialog state
+let _aeeFiles = [];
+let _aeeLibraryIds = [];
+
+// Attachment Library dialog state -- _libraryPickerCallback set = picker
+// mode (checkbox-select, applied on close); null = full management mode.
+let _libraryItems = [];
+let _libraryPickerCallback = null;
+let _libraryPickerSelected = new Set();
+let _libraryVersionsKey = null;
+
+function effectiveDraftStatus(comm) {
+  if (comm.deleted_at) return "trash";
+  if (comm.archived_at) return "archived";
+  return comm.status || "draft";
+}
 
 async function openEmailDraft(idx) {
-  const contact = _currentContacts[idx];
+  await openDraftModalForContact(_currentContacts[idx], null);
+}
+
+// Single entry point for opening the draft modal for any contact, from
+// anywhere (CRM table, search-results table, bulk flows). Loads the Draft
+// Library (one independent draft per outreach category) and selects
+// whichever category already has content, defaulting to Cold Outreach.
+async function openDraftModalForContact(contact, refreshFn, options = {}) {
   if (!contact) return;
-  await openEmailDraftForContact(contact, (d) => {
-    _currentContacts[idx].draft_subject   = d.subject   || "";
-    _currentContacts[idx].draft_body      = d.body       || "";
-    _currentContacts[idx].draft_followup  = d.followup   || "";
-    _currentContacts[idx].draft_rationale = d.rationale  || "";
-    setDraftActionButton(idx);
+  _modalContact = contact;
+  _modalComm = null;
+  _modalCategories = [];
+  _modalDirty = false;
+  _modalRefreshFn = refreshFn || null;
+  document.getElementById("modal-title").textContent = `Draft email to ${contact.name}`;
+  document.getElementById("modal-contact-info").textContent =
+    `${contact.title || ""} · ${contact.company || ""} · ${contact.department || ""}`;
+  document.getElementById("modal-extra-instructions").value = "";
+  openModal("email-modal");
+  document.getElementById("modal-body").innerHTML = `<div style="text-align:center;padding:32px 0;"><span class="spinner"></span> Loading…</div>`;
+  document.getElementById("draft-library-list").innerHTML = "";
+  resetImportedEmailsPanel();
+
+  if (!contact.contact_id) {
+    // Ephemeral contact (not yet saved) -- no per-category library to load, just draft directly.
+    document.getElementById("draft-library-section").style.display = "none";
+    document.getElementById("imported-emails-toggle").style.display = "none";
+    _modalSelectedMode = "cold_outreach";
+    await requestDraft(contact, _modalSelectedMode, "", Boolean(options.forceRegenerateOnOpen));
+    return;
+  }
+  document.getElementById("draft-library-section").style.display = "";
+  document.getElementById("imported-emails-toggle").style.display = "";
+
+  await loadDraftLibrary(contact.contact_id);
+  const preferredMode = options.forceRegenerateOnOpen
+    ? _modalSelectedMode
+    : (_modalCategories.find((c) => c.exists) || _modalCategories[0] || { mode: "cold_outreach" }).mode;
+  await selectDraftCategory(preferredMode, { forceRegenerateOnOpen: options.forceRegenerateOnOpen });
+}
+
+async function loadDraftLibrary(contactId) {
+  try {
+    const r = await fetch(`/api/contacts/${contactId}/draft-categories`);
+    const d = await r.json();
+    _modalCategories = d.categories || [];
+  } catch (e) {
+    _modalCategories = [];
+  }
+  renderDraftLibrary();
+}
+
+function renderDraftLibrary() {
+  const el = document.getElementById("draft-library-list");
+  if (!el) return;
+  el.innerHTML = _modalCategories.map((c) => `
+    <div class="draft-library-item${c.mode === _modalSelectedMode ? ' active' : ''}" data-mode="${escapeAttr(c.mode)}">
+      <span class="draft-library-check ${c.exists ? 'exists' : 'missing'}">${c.exists ? '✓' : '○'}</span>
+      <span class="draft-library-name">${escapeHtml(c.label)}</span>
+      <span class="draft-library-status">${c.exists ? escapeHtml(DRAFT_STATUS_LABELS[c.status] || c.status) : 'Not Generated'}</span>
+    </div>`).join("");
+  el.querySelectorAll(".draft-library-item").forEach((item) => {
+    item.addEventListener("click", () => selectDraftCategory(item.dataset.mode));
   });
 }
 
-function setDraftActionButton(idx) {
-  const cell = document.getElementById(`draft-action-${idx}`);
-  if (!cell) return;
-  cell.innerHTML = `<button class="btn-sm btn-saved view-draft-btn" data-idx="${idx}">View Draft</button>`;
-  cell.querySelector(".view-draft-btn").addEventListener("click", () => openSavedDraft(idx));
+// Selecting a category loads its existing draft, or shows a "not generated
+// yet" placeholder with a Generate button -- never auto-generates.
+async function selectDraftCategory(mode, options = {}) {
+  _modalSelectedMode = mode;
+  _modalDirty = false;
+  renderDraftLibrary();
+  resetImportedEmailsPanel();
+
+  const category = _modalCategories.find((c) => c.mode === mode);
+  const genBtn = document.getElementById("modal-generate-btn");
+
+  if (options.forceRegenerateOnOpen) {
+    genBtn.textContent = "Regenerate Draft";
+    await requestDraft(_modalContact, mode, document.getElementById("modal-extra-instructions").value.trim(), true);
+    return;
+  }
+
+  if (category && category.exists) {
+    genBtn.textContent = "Regenerate Draft";
+    document.getElementById("modal-body").innerHTML = `<div style="text-align:center;padding:32px 0;"><span class="spinner"></span> Loading…</div>`;
+    try {
+      const r = await fetch(`/api/contacts/${_modalContact.contact_id}/current-draft?mode=${encodeURIComponent(mode)}`);
+      const d = await r.json();
+      if (d.ok && d.draft) {
+        _modalComm = d.draft;
+        renderDraftEditor(_modalComm, _modalContact);
+        return;
+      }
+    } catch (e) { /* fall through to the "not generated" placeholder */ }
+  }
+
+  genBtn.textContent = "Generate Draft";
+  _modalComm = null;
+  const label = (category && category.label) || mode;
+  document.getElementById("modal-body").innerHTML = `
+    <div style="text-align:center;padding:32px 0;color:#6b7280;">
+      No draft yet for <strong>${escapeHtml(label)}</strong>.<br>
+      <span style="font-size:0.82rem;">Add any additional instructions above, then click "Generate Draft".</span>
+    </div>`;
 }
 
-function openSavedDraft(idx) {
-  const contact = _currentContacts[idx];
-  if (!contact) return;
-  _modalContact = contact;
-  _modalOnUpdate = (d) => {
-    _currentContacts[idx].draft_subject   = d.subject   || "";
-    _currentContacts[idx].draft_body      = d.body       || "";
-    _currentContacts[idx].draft_followup  = d.followup   || "";
-    _currentContacts[idx].draft_rationale = d.rationale  || "";
-  };
-  document.getElementById("modal-title").textContent = `Draft email to ${contact.name}`;
-  document.getElementById("modal-contact-info").textContent =
-    `${contact.title || ""} · ${contact.company || ""} · ${contact.department || ""}`;
-  document.getElementById("modal-mode-select").value = "cold_outreach";
-  document.getElementById("modal-extra-instructions").value = "";
-  document.getElementById("email-modal").classList.add("open");
-  renderDraft({
-    subject: contact.draft_subject || "",
-    body: contact.draft_body || "",
-    followup: contact.draft_followup || "",
-    rationale: contact.draft_rationale || "",
-    claude_configured: true,
-  }, contact);
-}
-
-// Generic entry point for drafting an email to any contact -- used by the
-// search-results table AND the CRM browser. onUpdate(draft) is called after
-// each successful draft so the caller can persist the result locally.
-async function openEmailDraftForContact(contact, onUpdate) {
-  _modalContact = contact;
-  _modalOnUpdate = onUpdate || null;
-  document.getElementById("modal-title").textContent = `Draft email to ${contact.name}`;
-  document.getElementById("modal-contact-info").textContent =
-    `${contact.title || ""} · ${contact.company || ""} · ${contact.department || ""}`;
-  document.getElementById("modal-mode-select").value = "cold_outreach";
-  document.getElementById("modal-extra-instructions").value = "";
-  document.getElementById("email-modal").classList.add("open");
-  await requestDraft(contact, "cold_outreach", "");
-}
-
-async function requestDraft(contact, mode, extraInstructions) {
+async function requestDraft(contact, mode, extraInstructions, regenerate) {
   document.getElementById("modal-body").innerHTML = `
     <div style="text-align:center;padding:32px 0;">
       <span class="spinner"></span> Generating personalised email draft with Claude…
@@ -574,12 +762,21 @@ async function requestDraft(contact, mode, extraInstructions) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contact, sender: _sender, contactId: contact.contact_id, companyKey: contact.company,
-        mode, extraInstructions,
+        mode, extraInstructions, regenerate: Boolean(regenerate),
       }),
     });
     const d = await r.json();
-    renderDraft(d, contact);
-    if (_modalOnUpdate) _modalOnUpdate(d);
+    _modalComm = {
+      id: d.id, contact_id: contact.contact_id, subject: d.subject, body: d.body,
+      followup_text: d.followup, rationale: d.rationale, to_email: d.to_email || contact.email || "",
+      cc: d.cc || "", bcc: d.bcc || "", notes: d.notes || "", status: d.status || "draft",
+      source: d.source || "email_draft", created_at: d.created_at, updated_at: d.updated_at,
+      deleted_at: null, archived_at: null, claude_configured: d.claude_configured,
+    };
+    _modalDirty = false;
+    renderDraftEditor(_modalComm, contact);
+    if (contact.contact_id) await loadDraftLibrary(contact.contact_id);
+    if (_modalRefreshFn) _modalRefreshFn();
     refreshUsage();
   } catch (e) {
     document.getElementById("modal-body").innerHTML =
@@ -587,25 +784,685 @@ async function requestDraft(contact, mode, extraInstructions) {
   }
 }
 
-document.getElementById("modal-regenerate-btn").addEventListener("click", () => {
+// Generate (no draft yet for this category) / Regenerate (one already
+// exists) -- always calls Claude fresh and always creates a NEW version in
+// this category's chain (see the per-mode version scoping in db.js), so the
+// previous version is never overwritten -- it's one click away in Version
+// History if the regeneration isn't wanted.
+document.getElementById("modal-generate-btn").addEventListener("click", () => {
   if (!_modalContact) return;
-  const mode = document.getElementById("modal-mode-select").value;
   const extra = document.getElementById("modal-extra-instructions").value.trim();
-  requestDraft(_modalContact, mode, extra);
+  const category = _modalCategories.find((c) => c.mode === _modalSelectedMode);
+  requestDraft(_modalContact, _modalSelectedMode, extra, Boolean(category && category.exists));
 });
+
+let _draftModesCache = [];
 
 async function loadDraftModes() {
   try {
     const r = await fetch("/api/draft-modes");
     const d = await r.json();
-    const optionsHtml = (d.modes || []).map(m => `<option value="${m.value}">${escapeHtml(m.label)}</option>`).join("");
+    _draftModesCache = d.modes || [];
+    const optionsHtml = _draftModesCache.map(m => `<option value="${m.value}">${escapeHtml(m.label)}</option>`).join("");
     document.getElementById("crm-mode-select").innerHTML = optionsHtml;
-    document.getElementById("modal-mode-select").innerHTML = optionsHtml;
+    document.getElementById("aee-mode").innerHTML = optionsHtml;
   } catch (e) { /* silent */ }
 }
 
+const DRAFT_STATUS_LABELS = { draft: "Draft", ready_for_review: "Ready for Review", approved: "Approved", archived: "Archived", trash: "Trash" };
+const DRAFT_SOURCE_LABELS = { email_draft: "AI Generated", manual_edit: "Manual", manual: "Manual", manual_entry: "Manually Imported", duplicated: "Duplicated", follow_up: "Follow-Up", apollo_search: "AI Generated" };
+
+const DRAFT_ACTION_BAR = {
+  draft: [["save", "Save Draft", "btn-orange"], ["ready", "Mark Ready for Review", "btn-ghost"], ["duplicate", "Duplicate", "btn-ghost"], ["trash", "Delete", "btn-danger"]],
+  ready_for_review: [["save", "Save Changes", "btn-orange"], ["approve", "Approve", "btn-saved"], ["return_to_draft", "Return to Draft", "btn-ghost"], ["trash", "Delete", "btn-danger"]],
+  approved: [["return_to_draft", "Return to Draft", "btn-ghost"], ["archive", "Archive", "btn-ghost"], ["duplicate", "Duplicate", "btn-ghost"], ["followup", "Create Follow-Up", "btn-ghost"]],
+  archived: [["restore", "Restore", "btn-saved"], ["duplicate", "Duplicate", "btn-ghost"]],
+  trash: [["restore", "Restore", "btn-saved"]],
+};
+
+function renderDraftEditor(comm, contact) {
+  const status = effectiveDraftStatus(comm);
+  const note = comm.claude_configured === false
+    ? `<div class="draft-note">⚠ Claude key not set — this is a template stub. Add a Claude key in the Config section for AI-generated drafts.</div>`
+    : "";
+
+  document.getElementById("modal-body").innerHTML = `
+    ${note}
+    <div class="draft-meta-row">
+      <div>
+        <span class="draft-status-badge status-${status}">${DRAFT_STATUS_LABELS[status] || status}</span>
+        <span class="draft-meta-text" style="margin-left:8px;">Source: ${DRAFT_SOURCE_LABELS[comm.source] || comm.source || "AI Generated"}</span>
+      </div>
+      <div class="draft-meta-text">
+        ${comm.created_at ? `Created ${new Date(comm.created_at).toLocaleString()}` : ""}
+        ${comm.updated_at && comm.updated_at !== comm.created_at ? ` · Edited ${new Date(comm.updated_at).toLocaleString()}` : ""}
+      </div>
+    </div>
+
+    <div class="draft-recipient-grid">
+      <div><div class="draft-label">Recipient</div><input class="draft-field" id="draft-field-to" value="${escapeAttr(comm.to_email || "")}" placeholder="recipient@example.com"></div>
+      <div><div class="draft-label">CC</div><input class="draft-field" id="draft-field-cc" value="${escapeAttr(comm.cc || "")}" placeholder="optional"></div>
+    </div>
+    <div class="draft-recipient-grid">
+      <div><div class="draft-label">BCC</div><input class="draft-field" id="draft-field-bcc" value="${escapeAttr(comm.bcc || "")}" placeholder="optional"></div>
+      <div><div class="draft-label">From</div><input class="draft-field" value="${escapeAttr((_sender && _sender.name) || "")}" disabled></div>
+    </div>
+
+    <div class="draft-section">
+      <div class="draft-label">Subject Line</div>
+      <input class="draft-field" id="draft-field-subject" value="${escapeAttr(comm.subject || "")}">
+    </div>
+    <div class="draft-section">
+      <div class="draft-label">Email Body</div>
+      <textarea class="draft-field" id="draft-field-body" rows="8">${escapeHtml(comm.body || "")}</textarea>
+    </div>
+    <div class="draft-section">
+      <div class="draft-label">Follow-up Template</div>
+      <textarea class="draft-field" id="draft-field-followup" rows="3">${escapeHtml(comm.followup_text || comm.followup || "")}</textarea>
+    </div>
+    <div class="draft-section">
+      <div class="draft-label">Why This Contact</div>
+      <div class="draft-value">${escapeHtml(comm.rationale || "")}</div>
+    </div>
+    <div class="draft-section">
+      <div class="draft-label">Internal Notes</div>
+      <textarea class="draft-field" id="draft-field-notes" rows="2" placeholder="Notes only your team can see">${escapeHtml(comm.notes || "")}</textarea>
+    </div>
+
+    <div class="draft-section">
+      <div class="draft-label">Attachments</div>
+      <div id="draft-attachment-chips"></div>
+      <button class="btn-sm btn-ghost" id="draft-add-attachment-btn" style="margin-top:6px;">+ Add Attachment</button>
+      <button class="btn-sm btn-ghost" id="draft-attach-from-library-btn" style="margin-top:6px;">+ From Library</button>
+    </div>
+
+    <div class="draft-collapsible-header" id="draft-versions-toggle">Version History <span>▾</span></div>
+    <div class="draft-collapsible-body" id="draft-versions-body"></div>
+
+    <div class="draft-collapsible-header" id="draft-activity-toggle">Activity <span>▾</span></div>
+    <div class="draft-collapsible-body" id="draft-activity-body"></div>
+
+    <div class="modal-actions" id="draft-lifecycle-actions"></div>
+    <div class="modal-actions">
+      <button class="btn-sm copy-btn" id="copy-all-btn">Copy Full Draft</button>
+      <button class="btn-sm btn-ghost" id="export-draft-txt-btn">Export .txt</button>
+      <button class="btn-sm btn-ghost" id="export-draft-json-btn">Export JSON</button>
+    </div>`;
+
+  const fullText = `Subject: ${comm.subject}\n\n${comm.body}\n\n---\nFollow-up: ${comm.followup_text || comm.followup}\n\nRationale: ${comm.rationale}`;
+  document.getElementById("copy-all-btn").addEventListener("click", () => copyDraft(fullText));
+  document.getElementById("export-draft-txt-btn").addEventListener("click", () => exportDraftText(fullText, contact.name));
+  document.getElementById("export-draft-json-btn").addEventListener("click", () => exportDraftJson(JSON.stringify(comm), contact.name));
+
+  document.querySelectorAll(".draft-field").forEach((el) => el.addEventListener("input", () => { _modalDirty = true; }));
+
+  renderDraftActionBar(status);
+  loadAttachmentChips(comm.id, "draft-attachment-chips");
+  document.getElementById("draft-add-attachment-btn").addEventListener("click", () => uploadOneOffAttachmentsTo(comm.id, "draft-attachment-chips"));
+  document.getElementById("draft-attach-from-library-btn").addEventListener("click", () => attachFromLibraryTo(comm.id, "draft-attachment-chips"));
+
+  document.getElementById("draft-versions-toggle").addEventListener("click", () =>
+    toggleDraftCollapsible("draft-versions-body", () => loadDraftVersionsPanel(contact.contact_id)));
+  document.getElementById("draft-activity-toggle").addEventListener("click", () =>
+    toggleDraftCollapsible("draft-activity-body", () => loadDraftActivityPanel(contact.contact_id)));
+}
+
+// ── Attachment chips: shared rendering for any communication (draft or imported email) ──
+
+function renderAttachmentChips(attachments, containerEl, { onRemove } = {}) {
+  if (!attachments || !attachments.length) {
+    containerEl.innerHTML = `<span style="font-size:0.8rem;color:#9ca3af;">No attachments.</span>`;
+    return;
+  }
+  containerEl.innerHTML = attachments.map((a) => `
+    <span class="draft-library-item" style="display:inline-flex;width:auto;margin:0 6px 6px 0;">
+      <a href="/api/attachments/${a.id}/download" target="_blank" rel="noopener">${escapeHtml(a.original_filename)}</a>
+      ${onRemove ? `<a href="#" class="remove-attachment-chip" data-id="${a.id}" style="color:#dc2626;margin-left:6px;">✕</a>` : ""}
+    </span>`).join("");
+  if (onRemove) {
+    containerEl.querySelectorAll(".remove-attachment-chip").forEach((el) => {
+      el.addEventListener("click", (e) => { e.preventDefault(); onRemove(Number(el.dataset.id)); });
+    });
+  }
+}
+
+async function loadAttachmentChips(communicationId, containerId) {
+  const el = document.getElementById(containerId);
+  if (!el || !communicationId) return;
+  try {
+    const r = await fetch(`/api/communications/${communicationId}/attachments`);
+    const d = await r.json();
+    renderAttachmentChips(d.attachments || [], el, {
+      onRemove: async (attachmentId) => {
+        await fetch(`/api/communications/${communicationId}/attachments/${attachmentId}`, { method: "DELETE" });
+        loadAttachmentChips(communicationId, containerId);
+      },
+    });
+  } catch (e) { /* silent */ }
+}
+
+// Native multi-file picker -> upload as one-off attachments on an existing communication.
+function uploadOneOffAttachmentsTo(communicationId, refreshContainerId) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.multiple = true;
+  input.addEventListener("change", async () => {
+    const files = Array.from(input.files || []);
+    if (!files.length) return;
+    const form = new FormData();
+    files.forEach((f) => form.append("files", f));
+    await fetch(`/api/communications/${communicationId}/attachments`, { method: "POST", body: form });
+    loadAttachmentChips(communicationId, refreshContainerId);
+  });
+  input.click();
+}
+
+// Opens the Attachment Library in picker mode -> link an existing library file to a communication.
+function attachFromLibraryTo(communicationId, refreshContainerId) {
+  openLibraryPicker(async (attachmentIds) => {
+    if (!attachmentIds.length) return;
+    const form = new FormData();
+    form.append("libraryAttachmentIds", JSON.stringify(attachmentIds));
+    await fetch(`/api/communications/${communicationId}/attachments`, { method: "POST", body: form });
+    loadAttachmentChips(communicationId, refreshContainerId);
+  });
+}
+
+// ── Attachment Library dialog: shared between full management and a
+// checkbox picker mode (opened from "+ From Library" buttons elsewhere). ──
+
+function openLibraryPicker(onApply) {
+  _libraryPickerCallback = onApply;
+  _libraryPickerSelected = new Set();
+  document.getElementById("attachment-library-title").textContent = "Pick Attachments";
+  document.getElementById("al-picker-actions").style.display = "";
+  document.getElementById("al-manage-only-section").style.display = "none";
+  document.getElementById("al-versions-panel").style.display = "none";
+  openModal("attachment-library-modal");
+  loadLibraryList();
+}
+
+function openAttachmentLibraryManager() {
+  _libraryPickerCallback = null;
+  _libraryPickerSelected = new Set();
+  document.getElementById("attachment-library-title").textContent = "Attachment Library";
+  document.getElementById("al-picker-actions").style.display = "none";
+  document.getElementById("al-manage-only-section").style.display = "";
+  document.getElementById("al-versions-panel").style.display = "none";
+  openModal("attachment-library-modal");
+  loadLibraryList();
+}
+
+async function loadLibraryList() {
+  const search = document.getElementById("al-search").value.trim();
+  const category = document.getElementById("al-category-filter").value;
+  const favoritesOnly = document.getElementById("al-favorites-toggle").dataset.active === "true";
+  const params = new URLSearchParams();
+  if (search) params.set("search", search);
+  if (category) params.set("category", category);
+  if (favoritesOnly) params.set("favorite", "true");
+  try {
+    const r = await fetch(`/api/attachment-library?${params.toString()}`);
+    const d = await r.json();
+    _libraryItems = d.items || [];
+  } catch (e) { _libraryItems = []; }
+  renderLibraryList();
+}
+
+function renderLibraryList() {
+  const el = document.getElementById("al-list");
+  if (!_libraryItems.length) {
+    el.innerHTML = `<div style="color:#9ca3af;font-size:0.85rem;padding:8px 0;">No library items yet.</div>`;
+    return;
+  }
+  el.innerHTML = _libraryItems.map((item) => `
+    <div class="draft-library-item" data-key="${escapeAttr(item.library_key)}">
+      ${_libraryPickerCallback
+        ? `<input type="checkbox" class="al-pick-checkbox" data-id="${item.id}" ${_libraryPickerSelected.has(item.id) ? "checked" : ""}>`
+        : `<span class="draft-library-check exists al-favorite-star" data-key="${escapeAttr(item.library_key)}" style="cursor:pointer;">${item.is_favorite ? "★" : "☆"}</span>`}
+      <span class="draft-library-name">${escapeHtml(item.library_name)}</span>
+      <span class="draft-library-status">${escapeHtml(item.library_category || "")} · v${item.version}</span>
+    </div>`).join("");
+
+  el.querySelectorAll(".al-pick-checkbox").forEach((cb) => {
+    cb.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = Number(cb.dataset.id);
+      if (cb.checked) _libraryPickerSelected.add(id); else _libraryPickerSelected.delete(id);
+    });
+  });
+  if (_libraryPickerCallback) return;
+
+  el.querySelectorAll(".al-favorite-star").forEach((star) => {
+    star.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const item = _libraryItems.find((i) => i.library_key === star.dataset.key);
+      if (item) await fetch(`/api/attachment-library/${item.id}/favorite`, { method: "POST" });
+      loadLibraryList();
+    });
+  });
+  el.querySelectorAll(".draft-library-item").forEach((row) => {
+    row.addEventListener("click", () => openLibraryVersions(row.dataset.key));
+  });
+}
+
+async function openLibraryVersions(libraryKey) {
+  _libraryVersionsKey = libraryKey;
+  const item = _libraryItems.find((i) => i.library_key === libraryKey);
+  document.getElementById("al-versions-name").textContent = item ? item.library_name : "";
+  document.getElementById("al-versions-panel").style.display = "";
+  try {
+    const r = await fetch(`/api/attachment-library/${encodeURIComponent(libraryKey)}/versions`);
+    const d = await r.json();
+    document.getElementById("al-versions-list").innerHTML = (d.versions || []).map((v) => `
+      <div class="draft-version-item">
+        <span>Version ${v.version} — <a href="/api/attachments/${v.id}/download" target="_blank" rel="noopener">${escapeHtml(v.original_filename)}</a></span>
+        <span class="draft-activity-time">${new Date(v.created_at).toLocaleString()}</span>
+      </div>`).join("") || `<div class="draft-activity-time">No versions.</div>`;
+  } catch (e) { /* silent */ }
+}
+
+document.getElementById("attachment-library-close").addEventListener("click", () => {
+  closeModal("attachment-library-modal");
+});
+document.getElementById("al-search").addEventListener("input", () => loadLibraryList());
+document.getElementById("al-category-filter").addEventListener("change", () => loadLibraryList());
+document.getElementById("al-favorites-toggle").addEventListener("click", () => {
+  const btn = document.getElementById("al-favorites-toggle");
+  const active = btn.dataset.active === "true";
+  btn.dataset.active = String(!active);
+  btn.textContent = !active ? "★ Favorites Only" : "☆ Favorites Only";
+  loadLibraryList();
+});
+document.getElementById("al-apply-picker-btn").addEventListener("click", () => {
+  const cb = _libraryPickerCallback;
+  const ids = Array.from(_libraryPickerSelected);
+  closeModal("attachment-library-modal");
+  if (cb) cb(ids);
+});
+document.getElementById("al-upload-btn").addEventListener("click", async () => {
+  const fileInput = document.getElementById("al-new-file");
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) { showMessage("Choose a file first.", "error"); return; }
+  const form = new FormData();
+  form.append("file", file);
+  form.append("name", document.getElementById("al-new-name").value.trim() || file.name);
+  form.append("category", document.getElementById("al-new-category").value);
+  await fetch("/api/attachment-library", { method: "POST", body: form });
+  document.getElementById("al-new-name").value = "";
+  fileInput.value = "";
+  loadLibraryList();
+});
+document.getElementById("al-replace-btn").addEventListener("click", async () => {
+  const fileInput = document.getElementById("al-replace-file");
+  const file = fileInput.files && fileInput.files[0];
+  if (!file || !_libraryVersionsKey) { showMessage("Choose a file first.", "error"); return; }
+  const form = new FormData();
+  form.append("file", file);
+  await fetch(`/api/attachment-library/${encodeURIComponent(_libraryVersionsKey)}/replace`, { method: "POST", body: form });
+  fileInput.value = "";
+  loadLibraryList();
+  openLibraryVersions(_libraryVersionsKey);
+});
+document.getElementById("al-delete-item-btn").addEventListener("click", async () => {
+  if (!_libraryVersionsKey) return;
+  if (!confirm("Delete this library item and all its versions?")) return;
+  await fetch(`/api/attachment-library/${encodeURIComponent(_libraryVersionsKey)}`, { method: "DELETE" });
+  document.getElementById("al-versions-panel").style.display = "none";
+  loadLibraryList();
+});
+document.getElementById("modal-manage-library-btn").addEventListener("click", () => openAttachmentLibraryManager());
+
+function toggleDraftCollapsible(bodyId, onOpenLoad) {
+  const body = document.getElementById(bodyId);
+  const wasOpen = body.classList.contains("open");
+  body.classList.toggle("open");
+  if (!wasOpen && onOpenLoad) onOpenLoad();
+}
+
+function renderDraftActionBar(status) {
+  const el = document.getElementById("draft-lifecycle-actions");
+  if (!el) return;
+  const buttons = DRAFT_ACTION_BAR[status] || DRAFT_ACTION_BAR.draft;
+  el.innerHTML = buttons.map(([action, label, cls]) => `<button class="btn-sm ${cls}" data-action="${action}">${label}</button>`).join("");
+  el.querySelectorAll("button").forEach((btn) => btn.addEventListener("click", () => handleDraftAction(btn.dataset.action)));
+}
+
+function collectDraftFieldValues() {
+  return {
+    to_email: document.getElementById("draft-field-to").value.trim(),
+    cc: document.getElementById("draft-field-cc").value.trim(),
+    bcc: document.getElementById("draft-field-bcc").value.trim(),
+    subject: document.getElementById("draft-field-subject").value,
+    body: document.getElementById("draft-field-body").value,
+    followup_text: document.getElementById("draft-field-followup").value,
+    notes: document.getElementById("draft-field-notes").value,
+  };
+}
+
+async function saveCurrentDraft(asNewVersion) {
+  if (!_modalComm) return;
+  try {
+    const r = await fetch(`/api/communications/${_modalComm.id}/save`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...collectDraftFieldValues(), asNewVersion: Boolean(asNewVersion) }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || "Save failed");
+    _modalComm = d.communication;
+    _modalDirty = false;
+    renderDraftEditor(_modalComm, _modalContact);
+    showMessage(asNewVersion ? "Saved as a new version." : "Draft saved.", "info");
+    if (_modalContact.contact_id) await loadDraftLibrary(_modalContact.contact_id);
+    if (_modalRefreshFn) _modalRefreshFn();
+  } catch (e) {
+    showMessage(`Save failed: ${e.message}`, "error");
+  }
+}
+
+async function handleDraftAction(action) {
+  if (!_modalComm) return;
+  const id = _modalComm.id;
+  if (action === "save") return saveCurrentDraft(false);
+  if (action === "duplicate") {
+    try {
+      const r = await fetch(`/api/communications/${id}/duplicate`, { method: "POST" });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || "Duplicate failed");
+      showMessage("Draft duplicated.", "info");
+      if (_modalContact.contact_id) await loadDraftLibrary(_modalContact.contact_id);
+      if (_modalRefreshFn) _modalRefreshFn();
+    } catch (e) { showMessage(`Duplicate failed: ${e.message}`, "error"); }
+    return;
+  }
+  if (action === "followup") {
+    try {
+      const r = await fetch(`/api/communications/${id}/follow-up`, { method: "POST" });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || "Follow-up failed");
+      showMessage("Follow-up draft created.", "info");
+      if (_modalContact.contact_id) await loadDraftLibrary(_modalContact.contact_id);
+      if (_modalRefreshFn) _modalRefreshFn();
+    } catch (e) { showMessage(`Follow-up failed: ${e.message}`, "error"); }
+    return;
+  }
+
+  const endpointByAction = {
+    ready: { url: `/api/communications/${id}/status`, body: { status: "ready_for_review" } },
+    approve: { url: `/api/communications/${id}/status`, body: { status: "approved" } },
+    return_to_draft: { url: `/api/communications/${id}/status`, body: { status: "draft" } },
+    archive: { url: `/api/communications/${id}/archive` },
+    trash: { url: `/api/communications/${id}/trash` },
+    restore: { url: `/api/communications/${id}/restore` },
+  };
+  const cfg = endpointByAction[action];
+  if (!cfg) return;
+  try {
+    const r = await fetch(cfg.url, {
+      method: "POST",
+      headers: cfg.body ? { "Content-Type": "application/json" } : undefined,
+      body: cfg.body ? JSON.stringify(cfg.body) : undefined,
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || "Action failed");
+    _modalComm = d.communication;
+    renderDraftEditor(_modalComm, _modalContact);
+    if (_modalContact.contact_id) await loadDraftLibrary(_modalContact.contact_id);
+    if (_modalRefreshFn) _modalRefreshFn();
+  } catch (e) {
+    showMessage(`Action failed: ${e.message}`, "error");
+  }
+}
+
+function draftSourceLabel(source) { return DRAFT_SOURCE_LABELS[source] || source || "Unknown"; }
+
+async function loadDraftVersionsPanel(contactId) {
+  const body = document.getElementById("draft-versions-body");
+  if (!body || !contactId) return;
+  try {
+    const r = await fetch(`/api/contacts/${contactId}/draft-versions?mode=${encodeURIComponent(_modalSelectedMode)}`);
+    const d = await r.json();
+    const versions = d.versions || [];
+    body.innerHTML = versions.length
+      ? versions.map((v) => `
+        <div class="draft-version-item" data-id="${v.id}">
+          <span>Version ${v.version} — ${escapeHtml(draftSourceLabel(v.source))}${_modalComm && v.id === _modalComm.id ? " (current)" : ""}</span>
+          <span class="draft-activity-time">${new Date(v.created_at).toLocaleString()}</span>
+        </div>`).join("")
+      : `<div class="draft-activity-time">No versions yet.</div>`;
+    body.querySelectorAll(".draft-version-item").forEach((el) => {
+      el.addEventListener("click", () => {
+        const version = versions.find((v) => v.id === Number(el.dataset.id));
+        if (!version || (_modalComm && version.id === _modalComm.id)) return;
+        if (confirm(`Restore Version ${version.version}? This saves it as a new version -- nothing is lost.`)) restoreDraftVersion(version);
+      });
+    });
+  } catch (e) { /* silent */ }
+}
+
+async function restoreDraftVersion(version) {
+  if (!_modalComm) return;
+  try {
+    const r = await fetch(`/api/communications/${_modalComm.id}/save`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subject: version.subject, body: version.body, followup_text: version.followup_text,
+        to_email: version.to_email, cc: version.cc, bcc: version.bcc, notes: version.notes,
+        asNewVersion: true,
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || "Restore failed");
+    _modalComm = d.communication;
+    renderDraftEditor(_modalComm, _modalContact);
+    showMessage(`Restored Version ${version.version} as a new version.`, "info");
+    if (_modalContact.contact_id) await loadDraftLibrary(_modalContact.contact_id);
+    if (_modalRefreshFn) _modalRefreshFn();
+  } catch (e) {
+    showMessage(`Restore failed: ${e.message}`, "error");
+  }
+}
+
+async function loadDraftActivityPanel(contactId) {
+  const body = document.getElementById("draft-activity-body");
+  if (!body || !contactId) return;
+  try {
+    const r = await fetch(`/api/contacts/${contactId}/activity`);
+    const d = await r.json();
+    const items = d.activity || [];
+    body.innerHTML = items.length
+      ? items.map((a) => `<div class="draft-activity-item"><span class="draft-activity-time">${new Date(a.created_at).toLocaleString()}</span> — ${escapeHtml(a.description || a.activity_type)}</div>`).join("")
+      : `<div class="draft-activity-time">No activity yet.</div>`;
+  } catch (e) { /* silent */ }
+}
+
+// ── Sent / Imported Emails panel: manually-logged emails for the selected category ──
+
+function resetImportedEmailsPanel() {
+  const toggle = document.getElementById("imported-emails-toggle");
+  const body = document.getElementById("imported-emails-body");
+  if (toggle) toggle.classList.remove("open");
+  if (body) { body.classList.remove("open"); body.innerHTML = ""; }
+}
+
+async function loadImportedEmailsPanel(contactId, mode) {
+  const body = document.getElementById("imported-emails-body");
+  if (!body || !contactId) return;
+  try {
+    const r = await fetch(`/api/contacts/${contactId}/imported-emails?mode=${encodeURIComponent(mode)}`);
+    const d = await r.json();
+    renderImportedEmailsList(d.emails || [], body);
+  } catch (e) { /* silent */ }
+}
+
+function renderImportedEmailsList(emails, body) {
+  if (!emails.length) {
+    body.innerHTML = `<div class="draft-activity-time">No manually-logged emails in this category yet.</div>`;
+    return;
+  }
+  body.innerHTML = emails.map((e) => `
+    <div class="draft-version-item" style="flex-direction:column;align-items:stretch;" data-id="${e.id}">
+      <div style="display:flex;justify-content:space-between;">
+        <strong>${escapeHtml(e.subject || "(no subject)")}</strong>
+        <span class="draft-activity-time">${e.sent_at ? new Date(e.sent_at).toLocaleDateString() : ""}</span>
+      </div>
+      <div style="font-size:0.82rem;color:#555;margin:4px 0;">To: ${escapeHtml(e.to_email || "")} · <span class="draft-status-badge status-approved">Manually Imported</span></div>
+      <div class="ie-attachment-chips" id="ie-chips-${e.id}"></div>
+      <div style="display:flex;gap:6px;margin-top:6px;">
+        <button class="btn-sm btn-ghost ie-edit-btn" data-id="${e.id}">Edit</button>
+        <button class="btn-sm btn-ghost ie-template-btn" data-id="${e.id}">Use as Template</button>
+        <button class="btn-sm btn-danger ie-delete-btn" data-id="${e.id}">Delete</button>
+      </div>
+    </div>`).join("");
+
+  emails.forEach((e) => renderAttachmentChips(e.attachments, document.getElementById(`ie-chips-${e.id}`)));
+
+  body.querySelectorAll(".ie-edit-btn").forEach((btn) => btn.addEventListener("click", () => editImportedEmail(Number(btn.dataset.id), emails)));
+  body.querySelectorAll(".ie-delete-btn").forEach((btn) => btn.addEventListener("click", () => deleteImportedEmail(Number(btn.dataset.id))));
+  body.querySelectorAll(".ie-template-btn").forEach((btn) => btn.addEventListener("click", () => useImportedEmailAsTemplate(Number(btn.dataset.id))));
+}
+
+async function editImportedEmail(id, emails) {
+  const email = emails.find((e) => e.id === id);
+  if (!email) return;
+  const subject = prompt("Subject:", email.subject || "");
+  if (subject === null) return;
+  const body = prompt("Body:", email.body || "");
+  if (body === null) return;
+  await fetch(`/api/communications/${id}/imported-email`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subject, body }),
+  });
+  loadImportedEmailsPanel(_modalContact.contact_id, _modalSelectedMode);
+}
+
+async function deleteImportedEmail(id) {
+  if (!confirm("Delete this logged email? This cannot be undone.")) return;
+  await fetch(`/api/communications/${id}`, { method: "DELETE" });
+  loadImportedEmailsPanel(_modalContact.contact_id, _modalSelectedMode);
+}
+
+async function useImportedEmailAsTemplate(id) {
+  try {
+    const r = await fetch(`/api/communications/${id}/duplicate`, { method: "POST" });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || "Failed to use as template");
+    showMessage("Created a new editable draft from this email.", "info");
+    await loadDraftLibrary(_modalContact.contact_id);
+    await selectDraftCategory(_modalSelectedMode);
+    if (_modalRefreshFn) _modalRefreshFn();
+  } catch (e) { showMessage(`Use as Template failed: ${e.message}`, "error"); }
+}
+
+document.getElementById("imported-emails-toggle").addEventListener("click", () =>
+  toggleDraftCollapsible("imported-emails-body", () => loadImportedEmailsPanel(_modalContact.contact_id, _modalSelectedMode)));
+
+// ── Add Existing Email (manual entry) sub-dialog ──
+
+function openAddExistingEmailModal() {
+  if (!_modalContact || !_modalContact.contact_id) return;
+  _aeeFiles = [];
+  _aeeLibraryIds = [];
+  document.getElementById("aee-mode").value = _modalSelectedMode;
+  document.getElementById("aee-to-email").value = _modalContact.email || "";
+  document.getElementById("aee-sent-at").value = new Date().toISOString().slice(0, 10);
+  document.getElementById("aee-subject").value = "";
+  document.getElementById("aee-body").value = "";
+  document.getElementById("aee-notes").value = "";
+  document.getElementById("aee-error").style.display = "none";
+  renderAeeAttachmentChips();
+  openModal("add-existing-email-modal");
+}
+
+function closeAddExistingEmailModal() {
+  closeModal("add-existing-email-modal");
+}
+
+function renderAeeAttachmentChips() {
+  const el = document.getElementById("aee-attachment-chips");
+  const fileChips = _aeeFiles.map((f, i) => `
+    <span class="draft-library-item" style="display:inline-flex;width:auto;margin:0 6px 6px 0;">
+      ${escapeHtml(f.name)} <a href="#" class="aee-remove-file" data-idx="${i}" style="color:#dc2626;margin-left:6px;">✕</a>
+    </span>`).join("");
+  const libraryChips = _aeeLibraryIds.map((id) => `
+    <span class="draft-library-item" style="display:inline-flex;width:auto;margin:0 6px 6px 0;">
+      Library #${id} <a href="#" class="aee-remove-lib" data-id="${id}" style="color:#dc2626;margin-left:6px;">✕</a>
+    </span>`).join("");
+  el.innerHTML = fileChips + libraryChips || `<span style="font-size:0.8rem;color:#9ca3af;">No attachments yet.</span>`;
+  el.querySelectorAll(".aee-remove-file").forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault(); _aeeFiles.splice(Number(a.dataset.idx), 1); renderAeeAttachmentChips();
+  }));
+  el.querySelectorAll(".aee-remove-lib").forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault(); _aeeLibraryIds = _aeeLibraryIds.filter((id) => id !== Number(a.dataset.id)); renderAeeAttachmentChips();
+  }));
+}
+
+const aeeUploadZone = document.getElementById("aee-upload-zone");
+const aeeFileInput = document.getElementById("aee-file-input");
+aeeUploadZone.addEventListener("click", () => aeeFileInput.click());
+aeeUploadZone.addEventListener("dragover", (e) => { e.preventDefault(); aeeUploadZone.classList.add("drag-over"); });
+aeeUploadZone.addEventListener("dragleave", () => aeeUploadZone.classList.remove("drag-over"));
+aeeUploadZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  aeeUploadZone.classList.remove("drag-over");
+  _aeeFiles = _aeeFiles.concat(Array.from(e.dataTransfer.files || []));
+  renderAeeAttachmentChips();
+});
+aeeFileInput.addEventListener("change", () => {
+  _aeeFiles = _aeeFiles.concat(Array.from(aeeFileInput.files || []));
+  renderAeeAttachmentChips();
+});
+
+document.getElementById("modal-add-existing-email-btn").addEventListener("click", openAddExistingEmailModal);
+document.getElementById("add-existing-email-close").addEventListener("click", closeAddExistingEmailModal);
+document.getElementById("aee-cancel-btn").addEventListener("click", closeAddExistingEmailModal);
+document.getElementById("aee-attach-from-library-btn").addEventListener("click", () => {
+  openLibraryPicker((ids) => {
+    ids.forEach((id) => { if (!_aeeLibraryIds.includes(id)) _aeeLibraryIds.push(id); });
+    renderAeeAttachmentChips();
+  });
+});
+
+document.getElementById("aee-save-btn").addEventListener("click", async () => {
+  clearInlineError("aee-error");
+  const subject = document.getElementById("aee-subject").value.trim();
+  const body = document.getElementById("aee-body").value.trim();
+  if (!subject && !body) {
+    showInlineError("aee-error", "Enter at least a subject or body.");
+    return;
+  }
+  const form = new FormData();
+  form.append("mode", document.getElementById("aee-mode").value);
+  form.append("subject", subject);
+  form.append("body", body);
+  form.append("toEmail", document.getElementById("aee-to-email").value.trim());
+  form.append("sentAt", document.getElementById("aee-sent-at").value);
+  form.append("notes", document.getElementById("aee-notes").value.trim());
+  form.append("libraryAttachmentIds", JSON.stringify(_aeeLibraryIds));
+  _aeeFiles.forEach((f) => form.append("attachments", f));
+
+  try {
+    const r = await fetch(`/api/contacts/${_modalContact.contact_id}/imported-emails`, { method: "POST", body: form });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || "Save failed");
+    closeAddExistingEmailModal();
+    showMessage("Email logged.", "info");
+    await loadDraftLibrary(_modalContact.contact_id);
+    if (document.getElementById("imported-emails-body").classList.contains("open")) {
+      loadImportedEmailsPanel(_modalContact.contact_id, _modalSelectedMode);
+    }
+    if (_modalRefreshFn) _modalRefreshFn();
+  } catch (e) {
+    showInlineError("aee-error", e.message);
+  }
+});
+
+// Simple read-only preview, used only by the contact-detail timeline's
+// "View" button for arbitrary past interactions (not necessarily the live
+// editable draft) -- keeps that lightweight rather than routing every
+// historical timeline entry through the full lifecycle editor.
 function renderDraft(d, contact) {
-  const note = !d.claude_configured
+  const note = d.claude_configured === false
     ? `<div class="draft-note">⚠ Claude key not set — this is a template stub. Add a Claude key in the Config section for AI-generated drafts.</div>`
     : "";
   const fullText = `Subject: ${d.subject}\n\n${d.body}\n\n---\nFollow-up: ${d.followup}\n\nRationale: ${d.rationale}`;
@@ -643,7 +1500,7 @@ function copyDraft(text) {
     const btn = document.getElementById("copy-all-btn");
     if (btn) { btn.textContent = "Copied!"; btn.classList.add("copied"); }
     setTimeout(() => { if (btn) { btn.textContent = "Copy Full Draft"; btn.classList.remove("copied"); } }, 2000);
-  }).catch(() => alert("Copy failed — please select and copy manually."));
+  }).catch(() => showMessage("Copy failed — please select and copy manually.", "error"));
 }
 
 function exportDraftText(text, name) {
@@ -654,11 +1511,19 @@ function exportDraftJson(jsonStr, name) {
   try {
     const obj = JSON.parse(jsonStr);
     downloadFile(JSON.stringify(obj, null, 2), (name || "draft").replace(/\s+/g, "_") + "_email.json", "application/json");
-  } catch (e) { alert("JSON export error: " + e.message); }
+  } catch (e) { showMessage("JSON export error: " + e.message, "error"); }
 }
 
-function closeEmailModal() { document.getElementById("email-modal").classList.remove("open"); }
-document.getElementById("email-modal-close").addEventListener("click", closeEmailModal);
+// Closing with unsaved changes prompts to save/discard rather than silently
+// dropping edits.
+function closeEmailModal(force) {
+  if (_modalDirty && _modalComm && !force) {
+    openModal("unsaved-changes-modal");
+    return;
+  }
+  closeModal("email-modal");
+}
+document.getElementById("email-modal-close").addEventListener("click", () => closeEmailModal());
 document.getElementById("email-modal").addEventListener("click", e => {
   if (e.target === document.getElementById("email-modal")) closeEmailModal();
 });
@@ -669,7 +1534,24 @@ document.addEventListener("keydown", e => {
   }
 });
 
-/* ── Auto-process: reveal emails + draft for all contacts ── */
+document.getElementById("unsaved-cancel-btn").addEventListener("click", () => {
+  closeModal("unsaved-changes-modal");
+});
+document.getElementById("unsaved-discard-btn").addEventListener("click", () => {
+  _modalDirty = false;
+  closeModal("unsaved-changes-modal");
+  closeEmailModal(true);
+});
+document.getElementById("unsaved-save-btn").addEventListener("click", async () => {
+  closeModal("unsaved-changes-modal");
+  await saveCurrentDraft(false);
+  closeEmailModal(true);
+});
+
+/* ── Auto-process: reveal emails for just-searched contacts, then hand off
+   to the CRM for review/select/draft. Drafting is never triggered here --
+   it's an explicit action from "Draft Emails for Selected" after the user
+   has reviewed and filtered, even when several companies were searched at once. ── */
 
 async function autoProcessContacts() {
   const total = _currentContacts.length;
@@ -680,7 +1562,8 @@ async function autoProcessContacts() {
   const label = document.getElementById("progress-label");
   prog.style.display = "block";
 
-  // Enrich contacts that have an Apollo ID, no email, and haven't been checked yet
+  // Enrich contacts that have an Apollo ID, no email, and haven't been checked yet.
+  // This is a data lookup (not an LLM call), so it's safe to do automatically.
   const revealable = _currentContacts
     .map((c, i) => ({ c, i }))
     .filter(({ c }) => c.contact_id && c.apollo_id && !c.email
@@ -689,7 +1572,7 @@ async function autoProcessContacts() {
   for (let r = 0; r < revealable.length; r++) {
     const { c, i } = revealable[r];
     label.textContent = `Enriching emails… ${r + 1} / ${revealable.length}`;
-    fill.style.width = Math.round((r / (revealable.length + total)) * 100) + "%";
+    fill.style.width = Math.round(((r + 1) / (revealable.length || 1)) * 100) + "%";
     try {
       const resp = await fetch(`/api/contacts/${c.contact_id}/enrich-email`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -704,41 +1587,28 @@ async function autoProcessContacts() {
     } catch (e) { /* skip */ }
   }
 
+  fill.style.width = "100%";
   renderContacts(_currentContacts, _currentCompanies.join(", "));
   renderExportBar(_currentCompanies[0]);
-
-  const needDraft = _currentContacts
-    .map((c, i) => ({ c, i }))
-    .filter(({ c }) => !c.draft_subject);
-  const skipped = total - needDraft.length;
-
-  for (let d = 0; d < needDraft.length; d++) {
-    const { c, i } = needDraft[d];
-    label.textContent = `Drafting emails… ${d + 1} / ${needDraft.length}${skipped ? ` (${skipped} loaded from cache)` : ""}`;
-    fill.style.width = Math.round(((revealable.length + d) / (revealable.length + needDraft.length)) * 100) + "%";
-    try {
-      const resp = await fetch("/api/draft-email", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contact: c, sender: _sender, contactId: c.contact_id, companyKey: c.company }),
-      });
-      const data = await resp.json();
-      _currentContacts[i].draft_subject   = data.subject   || "";
-      _currentContacts[i].draft_body      = data.body       || "";
-      _currentContacts[i].draft_followup  = data.followup   || "";
-      _currentContacts[i].draft_rationale = data.rationale  || "";
-    } catch (e) { /* skip */ }
-  }
-
-  fill.style.width = "100%";
-  const draftMsg = needDraft.length
-    ? `${needDraft.length} new draft${needDraft.length !== 1 ? "s" : ""} generated`
-    : "all drafts loaded from cache";
-  const cacheMsg = skipped ? `, ${skipped} reused from cache (no Claude tokens used)` : "";
-  label.textContent = `Done — ${draftMsg}${cacheMsg}. Download Excel/CSV to see all.`;
-  renderContacts(_currentContacts, _currentCompanies.join(", "));
-  if (_currentCompanies[0]) renderExportBar(_currentCompanies[0]);
+  label.textContent = `Saved ${total} contact${total !== 1 ? "s" : ""} to your CRM — review, filter, and select below to draft emails.`;
   setTimeout(() => { prog.style.display = "none"; }, 4000);
   refreshUsage();
+
+  await focusCrmOnAccounts(_currentCompanies);
+}
+
+// After a search, bring the just-saved contacts into view in the CRM
+// section instead of leaving the user to hunt for them: refresh the
+// Browse-by-Company options (so the new/updated account shows up), pre-select
+// the searched company name(s) there, and scroll to the CRM section. Reuses
+// the multi-select filter infrastructure rather than building a separate
+// hand-off mechanism.
+async function focusCrmOnAccounts(names) {
+  if (!names || !names.length) return;
+  await loadBrowseSelectors();
+  if (typeof accountSelect !== "undefined" && accountSelect) accountSelect.selectByKeys(names);
+  const crmSection = document.getElementById("crm-toggle");
+  if (crmSection) crmSection.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 /* ── Email reveal ── */
@@ -804,6 +1674,46 @@ function showMessage(text, type = "info") {
 
 function clearMessages() { document.getElementById("messages").innerHTML = ""; }
 
+// Inline, modal-scoped error banner -- reuses the same .msg-error look as
+// showMessage(), but rendered inside the modal itself (a global #messages
+// banner would be hidden behind the modal overlay while it's open).
+function showInlineError(elId, text) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.textContent = text;
+  el.style.display = "";
+}
+function clearInlineError(elId) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.textContent = "";
+  el.style.display = "none";
+}
+
+// Renders a "Search completed" panel per company after a fresh Apollo search
+// (not shown for cache hits, which already get their own CACHE: message --
+// found/imported/duplicate counts aren't meaningful for "loaded what we had").
+function renderSearchSummary(summaries) {
+  if (!summaries || !summaries.length) return;
+  const container = document.getElementById("messages");
+  summaries.forEach((s) => {
+    const div = document.createElement("div");
+    div.className = "msg-summary";
+    const deptLine = s.departments && s.departments.length
+      ? `Departments searched: ${s.departments.map((d) => `✓ ${escapeHtml(d)}`).join(" ")}`
+      : "Departments searched: (default executive + specialist set)";
+    div.innerHTML = `
+      <div class="msg-summary-title">Search completed — ${escapeHtml(s.company)}</div>
+      <div class="msg-summary-row">${deptLine}</div>
+      <div class="msg-summary-stats">
+        <span>Contacts found: <b>${s.foundCount}</b></span>
+        <span>Imported: <b>${s.importedCount}</b></span>
+        <span>Duplicates skipped: <b>${s.duplicatesSkipped}</b></span>
+      </div>`;
+    container.appendChild(div);
+  });
+}
+
 function escapeHtml(str) {
   const div = document.createElement("div");
   div.textContent = str == null ? "" : str;
@@ -859,13 +1769,13 @@ let _scanImageData = null;
 let _scanOcrText = "";
 
 document.getElementById("open-scan-modal-btn").addEventListener("click", () => {
-  scanModal.classList.add("open");
+  openModal("scan-modal");
 });
 document.getElementById("scan-modal-close").addEventListener("click", closeScanModal);
 scanModal.addEventListener("click", e => { if (e.target === scanModal) closeScanModal(); });
 
 function closeScanModal() {
-  scanModal.classList.remove("open");
+  closeModal("scan-modal");
   resetScanCapture();
 }
 
@@ -1192,22 +2102,38 @@ function debounce(fn, wait) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
 }
 
-async function loadCrmContacts(query, filters) {
+// Merged, persistent filter state -- every control (existing filter inputs,
+// the Browse-by-Company/Contact selectors, the Clear buttons) updates only
+// its own key here so filters combine instead of clobbering each other.
+let _crmActiveFilters = {};
+
+async function loadCrmContacts(query, filterPatch) {
   try {
+    if (filterPatch) Object.assign(_crmActiveFilters, filterPatch);
     const params = new URLSearchParams();
     if (query) params.set("q", query);
-    if (filters) {
-      Object.entries(filters).forEach(([k, v]) => { if (v) params.set(k, v); });
-    }
+    Object.entries(_crmActiveFilters).forEach(([k, v]) => {
+      if (Array.isArray(v)) { if (v.length) params.set(k, v.join(",")); }
+      else if (v) { params.set(k, v); }
+    });
     const url = "/api/contacts" + (params.toString() ? "?" + params.toString() : "");
     const r = await fetch(url);
     const d = await r.json();
     _crmContacts = d.contacts || [];
     _crmPage = 1;
     renderCrmTable(_crmContacts);
-    renderCrmSidebar(_crmContacts);
+    renderCrmFilterSummary();
     autoEnrichCrmPage();
   } catch (e) { /* silent */ }
+}
+
+function renderCrmFilterSummary() {
+  const el = document.getElementById("crm-filter-summary");
+  if (!el) return;
+  const accounts = _crmActiveFilters.accounts || [];
+  if (!accounts.length) { el.textContent = ""; return; }
+  const scope = accounts.length === 1 ? accounts[0] : `${accounts.length} selected companies (${accounts.join(", ")})`;
+  el.textContent = `Showing ${_crmContacts.length} contact${_crmContacts.length !== 1 ? "s" : ""} across ${scope}.`;
 }
 
 // Background enrichment for contacts on the current CRM page that have
@@ -1257,7 +2183,13 @@ document.getElementById("crm-clear-filters-btn").addEventListener("click", () =>
   document.getElementById("crm-filter-industry").value = "";
   document.getElementById("crm-filter-status").value = "";
   document.getElementById("crm-filter-owner").value = "";
-  loadCrmContacts(document.getElementById("crm-search-input").value);
+  clearAccountSelection();
+  clearContactSelection();
+  clearDeptSeniorityFilters();
+  loadCrmContacts(document.getElementById("crm-search-input").value, {
+    event: "", industry: "", follow_up_status: "", assigned_salesperson: "",
+    accounts: [], contact_ids: [], department_categories: [], seniority_levels: [],
+  });
 });
 
 const FOLLOW_UP_STATUSES = ["not_contacted", "contacted", "replied", "meeting_scheduled", "closed"];
@@ -1273,6 +2205,19 @@ function renderCrmTable(contacts) {
 
   document.getElementById("crm-count").textContent =
     `${total} contact${total !== 1 ? "s" : ""} in your CRM`;
+
+  if (!total) {
+    document.getElementById("crm-tbody").innerHTML = `
+      <tr><td colspan="13">
+        <div class="table-empty-state">
+          <div class="tes-icon">🗂️</div>
+          <div class="tes-title">No contacts yet</div>
+          <div class="tes-hint">Search a company above or click "+ Add Contact" to start building your CRM.</div>
+        </div>
+      </td></tr>`;
+    document.getElementById("crm-pagination").innerHTML = "";
+    return;
+  }
 
   document.getElementById("crm-tbody").innerHTML = pageSlice.map((c, pi) => {
     const i = pageStart + pi;  // index into _crmContacts
@@ -1339,32 +2284,11 @@ function renderCrmTable(contacts) {
   document.querySelectorAll(".crm-status-select").forEach(sel => {
     sel.addEventListener("change", () => patchCrmContact(sel.dataset.id, { follow_up_status: sel.value }));
   });
-  document.querySelectorAll(".crm-draft-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const idx = Number(btn.dataset.idx);
-      openEmailDraftForContact(crmRowToDraftFormat(_crmContacts[idx]), (d) => {
-        _crmContacts[idx].draft_subject   = d.subject   || "";
-        _crmContacts[idx].draft_body      = d.body       || "";
-        _crmContacts[idx].draft_followup  = d.followup   || "";
-        _crmContacts[idx].draft_rationale = d.rationale  || "";
-        setCrmDraftButtons(idx);
-      });
-    });
-  });
-  document.querySelectorAll(".crm-view-draft-btn").forEach(btn => {
-    btn.addEventListener("click", () => openSavedCrmDraft(Number(btn.dataset.idx)));
+  document.querySelectorAll(".crm-draft-btn, .crm-view-draft-btn").forEach(btn => {
+    btn.addEventListener("click", () => openCrmDraftModal(Number(btn.dataset.idx)));
   });
   document.querySelectorAll(".crm-redraft-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const idx = Number(btn.dataset.idx);
-      openEmailDraftForContact(crmRowToDraftFormat(_crmContacts[idx]), (d) => {
-        _crmContacts[idx].draft_subject   = d.subject   || "";
-        _crmContacts[idx].draft_body      = d.body       || "";
-        _crmContacts[idx].draft_followup  = d.followup   || "";
-        _crmContacts[idx].draft_rationale = d.rationale  || "";
-        setCrmDraftButtons(idx);
-      });
-    });
+    btn.addEventListener("click", () => openCrmDraftModal(Number(btn.dataset.idx), { forceRegenerateOnOpen: true }));
   });
   document.querySelectorAll(".crm-details-btn").forEach(btn => {
     btn.addEventListener("click", () => openContactDetailModal(_crmContacts[Number(btn.dataset.idx)]));
@@ -1389,48 +2313,269 @@ function renderCrmPagination(total, totalPages) {
   });
 }
 
-function renderCrmSidebar(contacts) {
-  const companies = [...new Set(contacts.map(c => c.company).filter(Boolean))].sort().slice(0, 40);
-  const recentContacts = contacts.slice(0, 35);
+/* ── Quick Browse: Browse-by-Company / Browse-by-Contact multi-select ──
+   These load from dedicated endpoints backed by the accounts/companies
+   tables directly (not from the currently-loaded _crmContacts page), so a
+   saved account/contact is always browsable even with zero contacts loaded
+   on the current CRM page or search.
 
-  const companiesEl = document.getElementById("crm-sidebar-companies");
-  if (companiesEl) {
-    companiesEl.innerHTML = companies.length
-      ? companies.map(name => `<div class="crm-sb-item" data-val="${escapeAttr(name)}">${escapeHtml(name)}</div>`).join("")
-      : `<div style="font-size:0.73rem;color:#9ca3af;padding:4px 6px;">No companies yet</div>`;
-    companiesEl.querySelectorAll(".crm-sb-item").forEach(el => {
+   Reusable multi-select: search input + checkbox dropdown + removable chips.
+   Selections persist in _crmActiveFilters until "Clear all" / "Clear Filters"
+   is clicked -- searching, paging, or changing other filters never resets
+   them. The option lists themselves (lightweight name/count metadata, not
+   full contact rows) are filtered client-side for a snappy dropdown even
+   with a large number of accounts/contacts; the actual contact-table
+   filtering always happens server-side via filterContacts(). */
+
+let _accountOptions = [];
+let _contactOptions = [];
+
+function createMultiSelect({ inputId, dropdownId, chipsId, clearAllId, getItems, keyOf, renderChipLabel, renderOptionLabel, matchText, filterKey, onChange }) {
+  const input = document.getElementById(inputId);
+  const dropdown = document.getElementById(dropdownId);
+  const chipsEl = document.getElementById(chipsId);
+  const clearAllEl = document.getElementById(clearAllId);
+  if (!input || !dropdown || !chipsEl) return null;
+
+  let selectedKeys = new Set();
+  let selectedItems = new Map(); // key -> item, so chips/labels survive even if the option list is filtered out
+
+  function isSelected(item) { return selectedKeys.has(keyOf(item)); }
+
+  function renderDropdown() {
+    const term = input.value.toLowerCase();
+    const items = getItems();
+    const filtered = term ? items.filter((it) => matchText(it).toLowerCase().includes(term)) : items;
+    dropdown.innerHTML = filtered.length
+      ? filtered.slice(0, 300).map((it, i) => `
+          <div class="crm-sel-opt${isSelected(it) ? ' selected' : ''}" data-i="${i}">
+            <input type="checkbox" ${isSelected(it) ? 'checked' : ''} tabindex="-1">
+            <span>${renderOptionLabel(it)}</span>
+          </div>`).join("")
+      : `<div class="crm-sel-empty">No matches</div>`;
+    dropdown.querySelectorAll(".crm-sel-opt").forEach((el) => {
       el.addEventListener("click", () => {
-        document.getElementById("crm-search-input").value = el.dataset.val;
-        loadCrmContacts(el.dataset.val);
+        const item = filtered[Number(el.dataset.i)];
+        toggle(item);
+        renderDropdown(); // keep dropdown open so users can pick several in a row
       });
     });
   }
 
-  const contactsEl = document.getElementById("crm-sidebar-contacts");
-  if (contactsEl) {
-    contactsEl.innerHTML = recentContacts.length
-      ? recentContacts.map(c => `<div class="crm-sb-item crm-sb-contact-item" data-val="${escapeAttr(c.full_name || "")}">
-          <div style="font-size:0.75rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(c.full_name || "Unnamed")}</div>
-          <div style="font-size:0.7rem;color:#9ca3af;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(c.company || "")}</div>
-        </div>`).join("")
-      : `<div style="font-size:0.73rem;color:#9ca3af;padding:4px 6px;">No contacts yet</div>`;
-    contactsEl.querySelectorAll(".crm-sb-contact-item").forEach(el => {
-      el.addEventListener("click", () => {
-        document.getElementById("crm-search-input").value = el.dataset.val;
-        loadCrmContacts(el.dataset.val);
+  function renderChips() {
+    chipsEl.innerHTML = [...selectedItems.values()].map((it) => `
+      <span class="crm-sel-chip" data-key="${escapeAttr(String(keyOf(it)))}">
+        <span>${escapeHtml(renderChipLabel(it))}</span>
+        <button type="button" title="Remove">✕</button>
+      </span>`).join("");
+    chipsEl.querySelectorAll(".crm-sel-chip button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.parentElement.dataset.key;
+        const item = selectedItems.get(key) || [...selectedItems.values()].find((it) => String(keyOf(it)) === key);
+        if (item) toggle(item, /* skipRender */ true);
+        renderChips();
+        renderDropdown();
+        emitChange();
       });
+    });
+    if (clearAllEl) clearAllEl.classList.toggle("active", selectedItems.size > 0);
+  }
+
+  function emitChange() {
+    onChange([...selectedItems.values()]);
+  }
+
+  function toggle(item, skipChipRender) {
+    const key = keyOf(item);
+    if (selectedKeys.has(key)) {
+      selectedKeys.delete(key);
+      selectedItems.delete(key);
+    } else {
+      selectedKeys.add(key);
+      selectedItems.set(key, item);
+    }
+    if (!skipChipRender) { renderChips(); emitChange(); }
+  }
+
+  function clearAll() {
+    selectedKeys = new Set();
+    selectedItems = new Map();
+    renderChips();
+    renderDropdown();
+  }
+
+  input.addEventListener("focus", () => { renderDropdown(); dropdown.classList.add("open"); });
+  input.addEventListener("input", () => { renderDropdown(); dropdown.classList.add("open"); });
+  document.addEventListener("click", (e) => {
+    if (!input.contains(e.target) && !dropdown.contains(e.target)) dropdown.classList.remove("open");
+  });
+  if (clearAllEl) {
+    clearAllEl.addEventListener("click", () => {
+      clearAll();
+      emitChange();
     });
   }
 
-  const searchEl = document.getElementById("crm-sidebar-search");
-  if (searchEl) {
-    searchEl.oninput = function () {
-      const term = this.value.toLowerCase();
-      document.querySelectorAll("#crm-sidebar-companies .crm-sb-item, #crm-sidebar-contacts .crm-sb-item").forEach(el => {
-        el.style.display = el.textContent.toLowerCase().includes(term) ? "" : "none";
-      });
-    };
+  // Programmatic pre-selection (e.g. after a search, select the searched
+  // company/account without the user manually re-picking it). Case-insensitive
+  // since a typed search term and the stored account name may differ in case.
+  function selectByKeys(keys) {
+    const wanted = new Set((keys || []).map((k) => String(k).toLowerCase()));
+    let changed = false;
+    getItems().forEach((it) => {
+      const key = keyOf(it);
+      if (wanted.has(String(key).toLowerCase()) && !selectedKeys.has(key)) {
+        selectedKeys.add(key);
+        selectedItems.set(key, it);
+        changed = true;
+      }
+    });
+    renderChips();
+    renderDropdown();
+    if (changed) emitChange();
   }
+
+  return { clearAll, refreshOptions: renderDropdown, selectByKeys };
+}
+
+let _selectedAccountsForMerge = [];
+
+const accountSelect = createMultiSelect({
+  inputId: "crm-sel-account-input", dropdownId: "crm-sel-account-dropdown",
+  chipsId: "crm-sel-account-chips", clearAllId: "crm-sel-account-clearall",
+  getItems: () => _accountOptions,
+  keyOf: (it) => it.name,
+  matchText: (it) => it.name || "",
+  renderOptionLabel: (it) => `${escapeHtml(it.name)} <span class="crm-sel-sub">(${it.contact_count})</span>`,
+  renderChipLabel: (it) => it.name,
+  onChange: (items) => {
+    loadCrmContacts(document.getElementById("crm-search-input").value, { accounts: items.map((it) => it.name) });
+    _selectedAccountsForMerge = items;
+    document.getElementById("crm-merge-accounts-btn").style.display = items.length >= 2 ? "" : "none";
+  },
+});
+
+document.getElementById("crm-merge-accounts-btn").addEventListener("click", () => {
+  if (_selectedAccountsForMerge.length < 2) return;
+  const sorted = [..._selectedAccountsForMerge].sort((a, b) => (b.contact_count || 0) - (a.contact_count || 0));
+  document.getElementById("merge-accounts-list").innerHTML =
+    "Selected: " + sorted.map((a) => `${escapeHtml(a.name)} (${a.contact_count})`).join(", ");
+  const targetSelect = document.getElementById("merge-accounts-target");
+  targetSelect.innerHTML = sorted.map((a) => `<option value="${a.id}">${escapeHtml(a.name)} (${a.contact_count})</option>`).join("");
+  openModal("merge-accounts-modal");
+});
+
+function closeMergeAccountsModal() {
+  closeModal("merge-accounts-modal");
+}
+document.getElementById("merge-accounts-close").addEventListener("click", closeMergeAccountsModal);
+document.getElementById("merge-accounts-cancel").addEventListener("click", closeMergeAccountsModal);
+document.getElementById("merge-accounts-modal").addEventListener("click", (e) => {
+  if (e.target.id === "merge-accounts-modal") closeMergeAccountsModal();
+});
+
+document.getElementById("merge-accounts-ok").addEventListener("click", async () => {
+  const targetAccountId = Number(document.getElementById("merge-accounts-target").value);
+  const sourceAccountIds = _selectedAccountsForMerge.map((a) => a.id).filter((id) => id !== targetAccountId);
+  if (!sourceAccountIds.length) { closeMergeAccountsModal(); return; }
+  const okBtn = document.getElementById("merge-accounts-ok");
+  okBtn.disabled = true;
+  try {
+    const r = await fetch("/api/accounts/merge", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceAccountIds, targetAccountId }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || "Failed to merge accounts");
+    showMessage(`Merged ${d.accountsRemoved} account(s), moved ${d.companiesMoved} compan${d.companiesMoved !== 1 ? "ies" : "y"}.`, "info");
+    closeMergeAccountsModal();
+    clearAccountSelection();
+    _selectedAccountsForMerge = [];
+    document.getElementById("crm-merge-accounts-btn").style.display = "none";
+    loadBrowseSelectors();
+    loadCrmContacts(document.getElementById("crm-search-input").value, { accounts: [] });
+  } catch (e) {
+    showMessage(`Merge failed: ${e.message}`, "error");
+  } finally {
+    okBtn.disabled = false;
+  }
+});
+
+const contactSelect = createMultiSelect({
+  inputId: "crm-sel-contact-input", dropdownId: "crm-sel-contact-dropdown",
+  chipsId: "crm-sel-contact-chips", clearAllId: "crm-sel-contact-clearall",
+  getItems: () => _contactOptions,
+  keyOf: (it) => it.id,
+  matchText: (it) => `${it.full_name || ""} ${it.company || ""}`,
+  renderOptionLabel: (it) => `${escapeHtml(it.full_name || "Unnamed")}<br><span class="crm-sel-sub">${escapeHtml(it.company || "")}</span>`,
+  renderChipLabel: (it) => `${it.full_name || "Unnamed"}${it.company ? " — " + it.company : ""}`,
+  onChange: (items) => {
+    loadCrmContacts(document.getElementById("crm-search-input").value, { contact_ids: items.map((it) => it.id) });
+  },
+});
+
+let _departmentOptions = [];
+let _seniorityOptions = [];
+
+const deptSelect = createMultiSelect({
+  inputId: "crm-sel-dept-input", dropdownId: "crm-sel-dept-dropdown",
+  chipsId: "crm-sel-dept-chips", clearAllId: "crm-sel-dept-clearall",
+  getItems: () => _departmentOptions,
+  keyOf: (it) => it.key,
+  matchText: (it) => it.label || "",
+  renderOptionLabel: (it) => escapeHtml(it.label),
+  renderChipLabel: (it) => it.label,
+  onChange: (items) => {
+    loadCrmContacts(document.getElementById("crm-search-input").value, { department_categories: items.map((it) => it.key) });
+  },
+});
+
+const senioritySelect = createMultiSelect({
+  inputId: "crm-sel-seniority-input", dropdownId: "crm-sel-seniority-dropdown",
+  chipsId: "crm-sel-seniority-chips", clearAllId: "crm-sel-seniority-clearall",
+  getItems: () => _seniorityOptions,
+  keyOf: (it) => it.key,
+  matchText: (it) => it.label || "",
+  renderOptionLabel: (it) => escapeHtml(it.label),
+  renderChipLabel: (it) => it.label,
+  onChange: (items) => {
+    loadCrmContacts(document.getElementById("crm-search-input").value, { seniority_levels: items.map((it) => it.key) });
+  },
+});
+
+function clearAccountSelection() { if (accountSelect) accountSelect.clearAll(); }
+function clearContactSelection() { if (contactSelect) contactSelect.clearAll(); }
+function clearDeptSeniorityFilters() {
+  if (deptSelect) deptSelect.clearAll();
+  if (senioritySelect) senioritySelect.clearAll();
+}
+
+async function loadBrowseSelectors() {
+  try {
+    const [accRes, contactRes] = await Promise.all([
+      fetch("/api/accounts/grouped"), fetch("/api/contacts/names"),
+    ]);
+    const accData = await accRes.json();
+    const contactData = await contactRes.json();
+    _accountOptions = accData.accounts || [];
+    _contactOptions = contactData.contacts || [];
+    if (accountSelect) accountSelect.refreshOptions();
+    if (contactSelect) contactSelect.refreshOptions();
+  } catch (e) { /* silent */ }
+}
+
+// Department/Seniority option lists are a small fixed taxonomy (see
+// contactClassify.js) -- fetched once, not tied to currently-loaded contacts.
+async function loadSearchTaxonomy() {
+  try {
+    const r = await fetch("/api/search-taxonomy");
+    const d = await r.json();
+    _departmentOptions = d.departments || [];
+    _seniorityOptions = d.seniorities || [];
+    if (deptSelect) deptSelect.refreshOptions();
+    if (senioritySelect) senioritySelect.refreshOptions();
+    renderSearchSettingsDepartmentCheckboxes();
+  } catch (e) { /* silent */ }
 }
 
 function crmRowToDraftFormat(c) {
@@ -1440,30 +2585,17 @@ function crmRowToDraftFormat(c) {
   };
 }
 
-function openSavedCrmDraft(idx) {
+// Single entry point for every CRM-table draft button (Draft Email / View
+// Draft / Redraft) -- the modal itself now detects whether a draft already
+// exists (via GET current-draft) rather than each button needing its own
+// fetch-vs-view branch, and refreshes the CRM table from the server after
+// any lifecycle action instead of hand-patching the local _crmContacts array.
+async function openCrmDraftModal(idx, options) {
   const c = _crmContacts[idx];
   if (!c) return;
-  const contact = crmRowToDraftFormat(c);
-  _modalContact = contact;
-  _modalOnUpdate = (d) => {
-    _crmContacts[idx].draft_subject   = d.subject   || "";
-    _crmContacts[idx].draft_body      = d.body       || "";
-    _crmContacts[idx].draft_followup  = d.followup   || "";
-    _crmContacts[idx].draft_rationale = d.rationale  || "";
-  };
-  document.getElementById("modal-title").textContent = `Draft email to ${contact.name || "contact"}`;
-  document.getElementById("modal-contact-info").textContent =
-    `${c.job_title || ""} · ${c.company || ""} · ${c.department || ""}`;
-  document.getElementById("modal-mode-select").value = "cold_outreach";
-  document.getElementById("modal-extra-instructions").value = "";
-  document.getElementById("email-modal").classList.add("open");
-  renderDraft({
-    subject: c.draft_subject || "",
-    body: c.draft_body || "",
-    followup: c.draft_followup || "",
-    rationale: c.draft_rationale || "",
-    claude_configured: true,
-  }, contact);
+  await openDraftModalForContact(crmRowToDraftFormat(c), () => {
+    loadCrmContacts(document.getElementById("crm-search-input").value);
+  }, options);
 }
 
 function setCrmDraftButtons(idx) {
@@ -1473,17 +2605,8 @@ function setCrmDraftButtons(idx) {
     <button class="btn-sm btn-saved crm-view-draft-btn" data-idx="${idx}">View Draft</button>
     <button class="btn-sm btn-orange crm-redraft-btn" data-idx="${idx}">Redraft</button>
     <button class="btn-sm btn-ghost crm-details-btn" data-idx="${idx}">Details</button>`;
-  cell.querySelector(".crm-view-draft-btn").addEventListener("click", () => openSavedCrmDraft(idx));
-  cell.querySelector(".crm-redraft-btn").addEventListener("click", () => {
-    openEmailDraftForContact(crmRowToDraftFormat(_crmContacts[idx]), (d) => {
-      _crmContacts[idx].draft_subject   = d.subject   || "";
-      _crmContacts[idx].draft_body      = d.body       || "";
-      _crmContacts[idx].draft_followup  = d.followup   || "";
-      _crmContacts[idx].draft_rationale = d.rationale  || "";
-      _crmContacts[idx].draft_count     = (_crmContacts[idx].draft_count || 0) + 1;
-      setCrmDraftButtons(idx);
-    });
-  });
+  cell.querySelector(".crm-view-draft-btn").addEventListener("click", () => openCrmDraftModal(idx));
+  cell.querySelector(".crm-redraft-btn").addEventListener("click", () => openCrmDraftModal(idx, { forceRegenerateOnOpen: true }));
   cell.querySelector(".crm-details-btn").addEventListener("click", () => openContactDetailModal(_crmContacts[idx]));
 
   const statusCell = document.getElementById(`crm-draft-status-${idx}`);
@@ -1520,7 +2643,7 @@ async function openContactDetailModal(c) {
   document.getElementById("cd-products").value = c.products_discussed || "";
   document.getElementById("cd-meeting-notes").value = c.meeting_notes || "";
   document.getElementById("cd-salesperson").value = c.assigned_salesperson || "";
-  contactDetailModal.classList.add("open");
+  openModal("contact-detail-modal");
 }
 
 async function loadContactTimeline(c) {
@@ -1542,13 +2665,12 @@ async function loadContactTimeline(c) {
         const body = btn.dataset.body || "";
         const contact = crmRowToDraftFormat(c);
         _modalContact = contact;
-        _modalOnUpdate = null;
+        _modalComm = null; // read-only historical timeline preview, not the live editable draft
         document.getElementById("modal-title").textContent = `Draft email to ${contact.name || "contact"}`;
         document.getElementById("modal-contact-info").textContent = `${c.job_title || ""} · ${c.company || ""}`;
-        document.getElementById("modal-mode-select").value = "cold_outreach";
         document.getElementById("modal-extra-instructions").value = "";
-        document.getElementById("email-modal").classList.add("open");
-        document.getElementById("contact-detail-modal").classList.remove("open");
+        openModal("email-modal");
+        closeModal("contact-detail-modal");
         renderDraft({ subject, body, followup: "", rationale: "", claude_configured: true }, contact);
       });
     });
@@ -1639,10 +2761,10 @@ async function enrichCrmEmail(idx) {
 }
 
 document.getElementById("contact-detail-close").addEventListener("click", () => {
-  contactDetailModal.classList.remove("open");
+  closeModal("contact-detail-modal");
 });
 contactDetailModal.addEventListener("click", (e) => {
-  if (e.target === contactDetailModal) contactDetailModal.classList.remove("open");
+  if (e.target === contactDetailModal) closeModal("contact-detail-modal");
 });
 
 document.getElementById("contact-detail-save-btn").addEventListener("click", async () => {
@@ -1659,7 +2781,7 @@ document.getElementById("contact-detail-save-btn").addEventListener("click", asy
   if (eventName) fields.event_name = eventName;
 
   await patchCrmContact(_detailContactId, fields);
-  contactDetailModal.classList.remove("open");
+  closeModal("contact-detail-modal");
   showMessage("Contact details updated.", "info");
   loadCrmContacts(document.getElementById("crm-search-input").value);
 });
@@ -1683,45 +2805,118 @@ document.getElementById("crm-search-input").addEventListener("input", debounce(f
 document.getElementById("crm-refresh-btn").addEventListener("click", () => {
   loadCrmContacts(document.getElementById("crm-search-input").value);
 });
+function getCheckedCrmIdxs() {
+  const idxs = [];
+  document.querySelectorAll(".crm-check:checked").forEach(cb => idxs.push(Number(cb.dataset.idx)));
+  return idxs;
+}
+
+function updateCrmSelectionUI() {
+  const count = getCheckedCrmIdxs().length;
+  document.getElementById("crm-bulk-draft-btn").disabled = count === 0;
+  document.getElementById("crm-bulk-delete-btn").disabled = count === 0;
+  document.getElementById("crm-selected-count").textContent = count ? `${count} selected` : "";
+}
+
 document.getElementById("crm-select-all").addEventListener("change", function () {
   document.querySelectorAll(".crm-check").forEach(c => c.checked = this.checked);
+  updateCrmSelectionUI();
+});
+// Event delegation: individual row checkboxes are re-created on every table
+// render, so listen on the stable tbody parent instead of each checkbox.
+document.getElementById("crm-tbody").addEventListener("change", (e) => {
+  if (e.target.classList.contains("crm-check")) updateCrmSelectionUI();
 });
 
 document.getElementById("crm-bulk-draft-btn").addEventListener("click", async () => {
-  const idxs = [];
-  document.querySelectorAll(".crm-check:checked").forEach(cb => idxs.push(Number(cb.dataset.idx)));
-  if (!idxs.length) { alert("Select at least one contact using the checkboxes."); return; }
+  const idxs = getCheckedCrmIdxs();
+  if (!idxs.length) { showMessage("Select at least one contact using the checkboxes.", "warn"); return; }
 
   const mode = document.getElementById("crm-mode-select").value;
   const extra = document.getElementById("crm-extra-instructions").value.trim();
   const btn = document.getElementById("crm-bulk-draft-btn");
   btn.disabled = true;
 
-  for (const i of idxs) {
+  let reusedCount = 0;
+  let generatedCount = 0;
+  for (let n = 0; n < idxs.length; n++) {
+    const i = idxs[n];
     const c = _crmContacts[i];
-    btn.textContent = `Drafting for ${c.full_name}…`;
+    btn.textContent = `Drafting ${n + 1} of ${idxs.length} selected…`;
     try {
-      await fetch("/api/draft-email", {
+      // No `regenerate` flag -- reuses an existing equivalent (contact, mode,
+      // instructions) draft instead of re-calling Claude, so re-running this
+      // over a category that's partly already drafted doesn't waste tokens.
+      const r = await fetch("/api/draft-email", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contact: crmRowToDraftFormat(c), sender: _sender, contactId: c.id, mode, extraInstructions: extra,
         }),
       });
+      const d = await r.json();
+      if (d.reused) reusedCount++; else generatedCount++;
     } catch (e) { /* skip */ }
   }
 
-  btn.disabled = false;
   btn.textContent = "Draft Emails for Selected";
-  showMessage(`Drafted emails for ${idxs.length} selected contact(s) -- open "Draft Email" on each to review/edit before sending.`, "info");
+  const reuseNote = reusedCount ? ` (${reusedCount} reused from cache, ${generatedCount} newly generated)` : "";
+  showMessage(`Drafted emails for ${idxs.length} selected contact(s)${reuseNote} -- open "Draft Email" on each to review/edit before sending.`, "info");
   loadCrmContacts(document.getElementById("crm-search-input").value);
   refreshUsage();
 });
 
+/* ── Bulk delete ── */
+
+document.getElementById("crm-bulk-delete-btn").addEventListener("click", () => {
+  const idxs = getCheckedCrmIdxs();
+  if (!idxs.length) return;
+  document.getElementById("delete-confirm-text").textContent =
+    `Are you sure you want to delete ${idxs.length} selected contact${idxs.length !== 1 ? "s" : ""}?`;
+  openModal("delete-confirm-modal");
+});
+
+function closeDeleteConfirmModal() {
+  closeModal("delete-confirm-modal");
+}
+document.getElementById("delete-confirm-close").addEventListener("click", closeDeleteConfirmModal);
+document.getElementById("delete-confirm-cancel").addEventListener("click", closeDeleteConfirmModal);
+document.getElementById("delete-confirm-modal").addEventListener("click", (e) => {
+  if (e.target.id === "delete-confirm-modal") closeDeleteConfirmModal();
+});
+
+document.getElementById("delete-confirm-ok").addEventListener("click", async () => {
+  const idxs = getCheckedCrmIdxs();
+  if (!idxs.length) { closeDeleteConfirmModal(); return; }
+  const ids = idxs.map(i => _crmContacts[i].id);
+  const okBtn = document.getElementById("delete-confirm-ok");
+  okBtn.disabled = true;
+  try {
+    const r = await fetch("/api/contacts/bulk-delete", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || "Failed to delete contacts");
+    showMessage(`Deleted ${d.deleted} contact${d.deleted !== 1 ? "s" : ""}.`, "info");
+    closeDeleteConfirmModal();
+    document.getElementById("crm-select-all").checked = false;
+    loadCrmContacts(document.getElementById("crm-search-input").value);
+    loadBrowseSelectors();
+  } catch (e) {
+    showMessage(`Delete failed: ${e.message}`, "error");
+  } finally {
+    okBtn.disabled = false;
+  }
+});
+
 /* ── Init ── */
 
+initAppShell();
 loadSenderProfile();
 loadDraftModes();
 loadCrmContacts();
+loadBrowseSelectors();
+loadSearchTaxonomy();
 refreshUsage();
 
 // =========================================================================
@@ -1759,14 +2954,14 @@ document.getElementById("crm-import-email-btn").addEventListener("click", () => 
   document.getElementById("import-date").value = "";
   document.getElementById("import-body").value = "";
   _importResult = null;
-  importEmailModal.classList.add("open");
+  openModal("import-email-modal");
 });
 
 document.getElementById("import-email-close").addEventListener("click", () => {
-  importEmailModal.classList.remove("open");
+  closeModal("import-email-modal");
 });
 importEmailModal.addEventListener("click", e => {
-  if (e.target === importEmailModal) importEmailModal.classList.remove("open");
+  if (e.target === importEmailModal) closeModal("import-email-modal");
 });
 
 document.getElementById("import-email-submit-btn").addEventListener("click", async () => {
@@ -1779,7 +2974,7 @@ document.getElementById("import-email-submit-btn").addEventListener("click", asy
   const body = document.getElementById("import-body").value.trim();
 
   if (!raw && !from && !subject && !body) {
-    alert("Please paste an email or fill in at least From / Subject / Body.");
+    showMessage("Please paste an email or fill in at least From / Subject / Body.", "warn");
     return;
   }
 
@@ -1792,7 +2987,7 @@ document.getElementById("import-email-submit-btn").addEventListener("click", asy
       body: JSON.stringify({ raw_text: raw || undefined, from: from || undefined, to: to || undefined, subject: subject || undefined, body: body || undefined, sent_at: date || undefined })
     });
     const d = await r.json();
-    if (!r.ok || d.error) { alert("Error: " + (d.error || "Unknown")); return; }
+    if (!r.ok || d.error) { showMessage("Error: " + (d.error || "Unknown"), "error"); return; }
 
     _importResult = d;
 
@@ -1815,7 +3010,7 @@ document.getElementById("import-email-submit-btn").addEventListener("click", asy
     document.getElementById("import-email-form").style.display = "none";
     document.getElementById("import-email-confirm").style.display = "";
   } catch (e) {
-    alert("Network error: " + e.message);
+    showMessage("Network error: " + e.message, "error");
   } finally {
     btn.disabled = false;
     btn.textContent = "Parse & Save";
@@ -1923,8 +3118,7 @@ function acResetForm() {
   ids.forEach(id => { const el = document.getElementById(id); if (el) el.value = ""; });
   const selects = ["ac-status","ac-followup","ac-priority"];
   selects.forEach(id => { const el = document.getElementById(id); if (el) el.selectedIndex = 0; });
-  const err = document.getElementById("ac-error");
-  if (err) { err.style.display = "none"; err.textContent = ""; }
+  clearInlineError("ac-error");
   const dupe = document.getElementById("ac-duplicate-warning");
   if (dupe) dupe.style.display = "none";
   _acSkipDupeCheck = false;
@@ -1983,17 +3177,15 @@ async function acCheckDuplicate(payload) {
 }
 
 async function acSaveContact(closeAfter) {
-  const errEl = document.getElementById("ac-error");
   const payload = acGetPayload();
   const firstName = payload.first_name;
   const lastName = payload.last_name;
 
   if (!firstName && !lastName && !payload.email) {
-    errEl.textContent = "First name, last name, or email is required.";
-    errEl.style.display = "";
+    showInlineError("ac-error", "First name, last name, or email is required.");
     return false;
   }
-  errEl.style.display = "none"; errEl.textContent = "";
+  clearInlineError("ac-error");
 
   // Duplicate check (skipped if user already clicked "save anyway")
   const isDupe = await acCheckDuplicate(payload);
@@ -2019,15 +3211,14 @@ async function acSaveContact(closeAfter) {
     loadCrmContacts(document.getElementById("crm-search-input").value);
 
     if (closeAfter) {
-      addContactModal.classList.remove("open");
+      closeModal("add-contact-modal");
     } else {
       acResetForm();
       document.getElementById("ac-first-name").focus();
     }
     return true;
   } catch (err) {
-    errEl.textContent = err.message;
-    errEl.style.display = "";
+    showInlineError("ac-error", err.message);
     return false;
   } finally {
     btnSave.disabled = btnAnother.disabled = false;
@@ -2038,18 +3229,18 @@ async function acSaveContact(closeAfter) {
 
 document.getElementById("crm-add-contact-btn").addEventListener("click", () => {
   acResetForm();
-  addContactModal.classList.add("open");
+  openModal("add-contact-modal");
   document.getElementById("ac-first-name").focus();
 });
 
 document.getElementById("add-contact-close").addEventListener("click", () => {
-  addContactModal.classList.remove("open");
+  closeModal("add-contact-modal");
 });
 document.getElementById("add-contact-cancel-btn").addEventListener("click", () => {
-  addContactModal.classList.remove("open");
+  closeModal("add-contact-modal");
 });
 addContactModal.addEventListener("click", (e) => {
-  if (e.target === addContactModal) addContactModal.classList.remove("open");
+  if (e.target === addContactModal) closeModal("add-contact-modal");
 });
 
 document.getElementById("add-contact-submit-btn").addEventListener("click", () => acSaveContact(true));
@@ -2066,11 +3257,11 @@ document.getElementById("ac-view-existing-btn").addEventListener("click", () => 
   if (!id) return;
   const contact = _crmContacts.find(c => String(c.id) === String(id));
   if (contact) {
-    addContactModal.classList.remove("open");
+    closeModal("add-contact-modal");
     openContactDetailModal(contact);
   } else {
     // Contact might not be on the current page — navigate to CRM and search
-    addContactModal.classList.remove("open");
+    closeModal("add-contact-modal");
     showMessage("Opening CRM to find existing contact…", "info");
     loadCrmContacts(""); // reload without filter so the contact appears
   }
