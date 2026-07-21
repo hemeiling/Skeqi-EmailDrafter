@@ -11,5 +11,14 @@ services:
         value: production
       - key: PORT
         value: 10000
-      - key: DATABASE_URL
+      # Secrets — set these in the Render dashboard (never committed).
+      - key: DATABASE_URL          # Neon Postgres connection string (…?sslmode=require)
+        sync: false
+      - key: CLAUDE_API_KEY        # Anthropic API key (sk-ant-…)
+        sync: false
+      - key: APOLLO_API_KEY        # Apollo.io API key
+        sync: false
+      - key: APP_USERNAME          # HTTP Basic Auth username for the app login gate
+        sync: false
+      - key: APP_PASSWORD          # HTTP Basic Auth password
         sync: false

@@ -2,9 +2,15 @@ const { Pool } = require('pg');
 const { normalizeNameKey, isInvalidCompanyName } = require('./companyKey');
 const { classifyDepartment, classifySeniority } = require('./contactClassify');
 
+// Enable SSL for production, for managed Postgres (Neon), or whenever the URL
+// asks for it — otherwise Neon rejects the connection when running locally.
+const DB_URL = process.env.DATABASE_URL || '';
+const DB_NEEDS_SSL = process.env.NODE_ENV === 'production'
+  || /sslmode=require/i.test(DB_URL)
+  || /\.neon\.tech/i.test(DB_URL);
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: DB_NEEDS_SSL ? { rejectUnauthorized: false } : false
 });
 
 async function q(text, params = []) {
@@ -339,6 +345,704 @@ async function initDb() {
       [dept ? dept.key : null, seniority.key, contact.id]
     );
   }
+
+  // ===========================================================================
+  // Customer Intelligence: tag taxonomy + SKQ product-capability matrix
+  // ===========================================================================
+
+  // Curated, hierarchical tag taxonomy. tag_categories/tags hold the reference
+  // vocabulary (seeded below); company_tags/contact_tags hold per-entity tags,
+  // each stamped with a source so AI suggestions never silently overwrite a
+  // human-confirmed or manually-entered tag (enforced in the tagging layer).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tag_categories (
+      id SERIAL PRIMARY KEY,
+      key TEXT UNIQUE NOT NULL,
+      name_en TEXT NOT NULL,
+      name_cn TEXT,
+      parent_category_key TEXT,
+      applies_to TEXT NOT NULL DEFAULT 'company',
+      multi_select BOOLEAN NOT NULL DEFAULT TRUE,
+      sort_order INTEGER DEFAULT 0
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tags (
+      id SERIAL PRIMARY KEY,
+      category_key TEXT NOT NULL REFERENCES tag_categories(key) ON DELETE CASCADE,
+      value TEXT NOT NULL,
+      name_en TEXT NOT NULL,
+      name_cn TEXT,
+      sort_order INTEGER DEFAULT 0,
+      UNIQUE(category_key, value)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS company_tags (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+      source TEXT NOT NULL DEFAULT 'ai_suggested',
+      confidence REAL,
+      verification_status TEXT DEFAULT 'unverified',
+      confirmed_by TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      last_verified_at TIMESTAMPTZ,
+      UNIQUE(company_id, tag_id)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS contact_tags (
+      id SERIAL PRIMARY KEY,
+      contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+      tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+      source TEXT NOT NULL DEFAULT 'ai_suggested',
+      confidence REAL,
+      verification_status TEXT DEFAULT 'unverified',
+      confirmed_by TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      last_verified_at TIMESTAMPTZ,
+      UNIQUE(contact_id, tag_id)
+    )
+  `);
+
+  // SKQ product-capability matrix, imported from 整线蓝本的15个模块分类.xlsx by
+  // scripts/import-skq-matrix.js. 15 modules, 10 systems, 93 equipment; each
+  // equipment maps to one module + one system + a department. Bilingual names
+  // from the sheet are preserved.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS skq_systems (
+      id SERIAL PRIMARY KEY,
+      system_no INTEGER UNIQUE NOT NULL,
+      name_en TEXT,
+      name_cn TEXT
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS skq_modules (
+      id SERIAL PRIMARY KEY,
+      module_no INTEGER UNIQUE NOT NULL,
+      name_en TEXT,
+      name_cn TEXT,
+      color_name TEXT,
+      color_ral TEXT
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS skq_equipment (
+      id SERIAL PRIMARY KEY,
+      seq_no INTEGER UNIQUE NOT NULL,
+      name_en TEXT,
+      name_cn TEXT,
+      module_id INTEGER REFERENCES skq_modules(id) ON DELETE SET NULL,
+      system_id INTEGER REFERENCES skq_systems(id) ON DELETE SET NULL,
+      department TEXT
+    )
+  `);
+
+  // Matching glue + outputs (populated in later phases, tables created now so
+  // the schema is complete and stable).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS product_tag_mappings (
+      id SERIAL PRIMARY KEY,
+      tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+      target_type TEXT NOT NULL,
+      target_id INTEGER NOT NULL,
+      weight REAL DEFAULT 1.0,
+      note TEXT,
+      UNIQUE(tag_id, target_type, target_id)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS company_recommendations (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      target_type TEXT NOT NULL,
+      target_id INTEGER NOT NULL,
+      matched_tag_ids INTEGER[],
+      reason TEXT,
+      confidence TEXT,
+      status TEXT NOT NULL DEFAULT 'suggested',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(company_id, target_type, target_id)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS research_sources (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      url TEXT,
+      title TEXT,
+      snippet TEXT,
+      fetched_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS attachment_product_mappings (
+      id SERIAL PRIMARY KEY,
+      library_key TEXT,
+      attachment_id INTEGER REFERENCES attachments(id) ON DELETE CASCADE,
+      target_type TEXT NOT NULL,
+      target_id INTEGER NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  // Persistent AI usage log — one row per AI-relevant event (real call OR a
+  // reuse/skip). Powers today / month / all-time + per-feature + per-company
+  // stats and the "tokens saved" accounting.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_usage_events (
+      id SERIAL PRIMARY KEY,
+      feature TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      model TEXT,
+      input_tokens INTEGER DEFAULT 0,
+      output_tokens INTEGER DEFAULT 0,
+      cost_usd NUMERIC DEFAULT 0,
+      tokens_saved_input INTEGER DEFAULT 0,
+      tokens_saved_output INTEGER DEFAULT 0,
+      cost_saved_usd NUMERIC DEFAULT 0,
+      company_id INTEGER,
+      contact_id INTEGER,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage_events (created_at)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ai_usage_feature ON ai_usage_events (feature)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ai_usage_company ON ai_usage_events (company_id)`);
+  // Enterprise-grade event detail (added incrementally; all nullable).
+  for (const col of [
+    `session_id TEXT`, `user_id TEXT`, `sub_feature TEXT`, `thread_id INTEGER`,
+    `provider TEXT DEFAULT 'anthropic'`, `cache_read_tokens INTEGER DEFAULT 0`,
+    `cache_write_tokens INTEGER DEFAULT 0`, `reasoning_tokens INTEGER DEFAULT 0`,
+    `total_tokens INTEGER DEFAULT 0`, `response_ms INTEGER`, `status TEXT DEFAULT 'success'`,
+    `error_message TEXT`, `request_type TEXT`, `request_id TEXT`, `currency TEXT DEFAULT 'USD'`,
+  ]) {
+    await pool.query(`ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS ${col}`);
+  }
+  // Idempotency: a non-null request_id may appear at most once (multiple NULLs allowed).
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_usage_request_id ON ai_usage_events (request_id)`);
+
+  // Model pricing table — cost is computed from the price ACTIVE at request time
+  // and the resulting cost_usd is stored on each event (preserved if prices change).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_model_pricing (
+      id SERIAL PRIMARY KEY,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      input_price_per_m NUMERIC NOT NULL,
+      output_price_per_m NUMERIC NOT NULL,
+      cache_read_price_per_m NUMERIC DEFAULT 0,
+      cache_write_price_per_m NUMERIC DEFAULT 0,
+      reasoning_price_per_m NUMERIC DEFAULT 0,
+      currency TEXT DEFAULT 'USD',
+      effective_start DATE DEFAULT CURRENT_DATE,
+      effective_end DATE,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ai_pricing_model ON ai_model_pricing (provider, model, effective_start)`);
+  await seedAiModelPricing();
+
+  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS ai_research_summary TEXT`);
+  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS intelligence_reviewed_at TIMESTAMPTZ`);
+  // Distinct from intelligence_reviewed_at (human review): when the AI last ran.
+  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS ai_analyzed_at TIMESTAMPTZ`);
+  // Per-tag "last updated" (AI confidence refresh or human decision).
+  await pool.query(`ALTER TABLE company_tags ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`);
+  await pool.query(`ALTER TABLE contact_tags ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`);
+
+  // Bilingual (and future multilingual) tag metadata. name_en/name_cn are the
+  // two primary display languages; `translations` JSONB holds any additional
+  // language ({ "ja": {"name":...,"description":...} }) so new languages need
+  // NO schema change. The AI always receives the English `value`, never these.
+  await pool.query(`ALTER TABLE tags ADD COLUMN IF NOT EXISTS description_en TEXT`);
+  await pool.query(`ALTER TABLE tags ADD COLUMN IF NOT EXISTS description_cn TEXT`);
+  await pool.query(`ALTER TABLE tags ADD COLUMN IF NOT EXISTS translations JSONB`);
+  await pool.query(`ALTER TABLE tag_categories ADD COLUMN IF NOT EXISTS description_en TEXT`);
+  await pool.query(`ALTER TABLE tag_categories ADD COLUMN IF NOT EXISTS description_cn TEXT`);
+  await pool.query(`ALTER TABLE tag_categories ADD COLUMN IF NOT EXISTS translations JSONB`);
+
+  await seedTagTaxonomy();
+  await seedSkqSystems();
+}
+
+// ===========================================================================
+// Customer Intelligence: tag taxonomy + SKQ matrix (seed + CRUD)
+// ===========================================================================
+
+// Curated tag taxonomy. Categories are hierarchical: parent_category_key gates
+// display (e.g. the application categories only apply once a Segment is set).
+// Each tag is [english_value, chinese_name]. The english value is the
+// language-independent canonical (also what the AI receives); chinese is display.
+const TAG_TAXONOMY = [
+  { key: 'segment', name_en: 'Segment', name_cn: '业务板块', parent: null, applies_to: 'company',
+    tags: [['Energy Storage', '储能'], ['Power Battery', '动力电池']] },
+  { key: 'energy_storage_app', name_en: 'Energy Storage Application', name_cn: '储能应用', parent: 'segment', applies_to: 'company',
+    tags: [['Residential ESS', '户用储能'], ['Commercial & Industrial ESS', '工商业储能'], ['Utility ESS', '电网储能']] },
+  { key: 'power_battery_app', name_en: 'Power Battery Application', name_cn: '动力电池应用', parent: 'segment', applies_to: 'company',
+    tags: [['Passenger EV', '乘用车'], ['Commercial Vehicle', '商用车'], ['Special Vehicle', '特种车辆'], ['Light Vehicle', '轻型车'], ['Power Tools', '电动工具']] },
+  { key: 'cell_format', name_en: 'Cell Format', name_cn: '电芯形态', parent: null, applies_to: 'company',
+    tags: [['Prismatic', '方形'], ['Cylindrical', '圆柱'], ['Pouch', '软包']] },
+  { key: 'product_scope', name_en: 'Customer Product Scope', name_cn: '产品范围', parent: null, applies_to: 'company',
+    tags: [['Cell', '电芯'], ['Module', '模组'], ['PACK', 'PACK'], ['Energy Storage System', '储能系统'],
+           ['Battery Production Line', '电池产线'], ['Laser Welding', '激光焊接'], ['Resistance Welding', '电阻焊'],
+           ['Vision Inspection', '视觉检测'], ['Intelligent Logistics', '智能物流'], ['Smart Factory', '智能工厂'],
+           ['Automation', '自动化']] },
+  { key: 'contact_role', name_en: 'Contact Role', name_cn: '联系人角色', parent: null, applies_to: 'contact',
+    tags: [['Executive Decision Maker', '高层决策者'], ['R&D', '研发'], ['Engineering', '工程'], ['Manufacturing', '制造'],
+           ['Automation', '自动化'], ['Purchasing', '采购'], ['Quality', '质量'], ['Operations', '运营'],
+           ['Supply Chain', '供应链'], ['IT or Digital Transformation', 'IT/数字化转型']] },
+  { key: 'customer_priority', name_en: 'Customer Priorities', name_cn: '客户优先事项', parent: null, applies_to: 'company',
+    tags: [['Cost Reduction', '降本'], ['Capacity Expansion', '产能扩张'], ['Throughput', '生产节拍'], ['Yield Improvement', '良率提升'],
+           ['Quality', '质量'], ['Traceability', '追溯'], ['Automation', '自动化'], ['Labor Reduction', '减少人工'],
+           ['Flexible Manufacturing', '柔性制造'], ['Digitalization', '数字化'], ['Faster Commissioning', '快速调试']] },
+];
+
+// The 10 SKQ systems ("十大体系"). English names are canonical (the sheet only
+// carries the Chinese name + a leading number); the importer links equipment to
+// these by that number.
+const SKQ_SYSTEMS = [
+  { system_no: 1, name_en: 'Pick-and-Place Platform Equipment', name_cn: '取放平台设备' },
+  { system_no: 2, name_en: 'Material Handling Equipment', name_cn: '拿取搬运设备' },
+  { system_no: 3, name_en: 'Carrier Conveyance Equipment', name_cn: '载具输送设备' },
+  { system_no: 4, name_en: 'Cleaning Equipment', name_cn: '清洁清洗设备' },
+  { system_no: 5, name_en: 'Connection Process Equipment', name_cn: '连接工艺设备' },
+  { system_no: 6, name_en: 'Inspection and Testing Equipment', name_cn: '检测检验设备' },
+  { system_no: 7, name_en: 'Stacking and Assembly Equipment', name_cn: '堆叠合装设备' },
+  { system_no: 8, name_en: 'Functional Standalone Equipment', name_cn: '功能单机设备' },
+  { system_no: 9, name_en: 'Manual Workstations', name_cn: '人工工位' },
+  { system_no: 10, name_en: 'Other Equipment', name_cn: '其他' },
+];
+
+// Idempotent: safe to run on every startup. Keeps names in sync but never
+// removes categories/tags (so any that later carry live company_tags survive).
+async function seedTagTaxonomy() {
+  for (let ci = 0; ci < TAG_TAXONOMY.length; ci++) {
+    const cat = TAG_TAXONOMY[ci];
+    await q(`
+      INSERT INTO tag_categories (key, name_en, name_cn, parent_category_key, applies_to, multi_select, sort_order)
+      VALUES ($1, $2, $3, $4, $5, TRUE, $6)
+      ON CONFLICT (key) DO UPDATE SET
+        name_en = EXCLUDED.name_en,
+        name_cn = EXCLUDED.name_cn,
+        parent_category_key = EXCLUDED.parent_category_key,
+        applies_to = EXCLUDED.applies_to,
+        sort_order = EXCLUDED.sort_order
+    `, [cat.key, cat.name_en, cat.name_cn || null, cat.parent, cat.applies_to, ci]);
+    for (let ti = 0; ti < cat.tags.length; ti++) {
+      const [value, cn] = cat.tags[ti];
+      await q(`
+        INSERT INTO tags (category_key, value, name_en, name_cn, sort_order)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (category_key, value) DO UPDATE SET
+          name_en = EXCLUDED.name_en, name_cn = EXCLUDED.name_cn, sort_order = EXCLUDED.sort_order
+      `, [cat.key, value, value, cn || null, ti]);
+    }
+  }
+}
+
+async function seedSkqSystems() {
+  for (const s of SKQ_SYSTEMS) {
+    await q(`
+      INSERT INTO skq_systems (system_no, name_en, name_cn)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (system_no) DO UPDATE SET
+        name_en = EXCLUDED.name_en, name_cn = EXCLUDED.name_cn
+    `, [s.system_no, s.name_en, s.name_cn]);
+  }
+}
+
+// Full taxonomy (categories with their tags nested) for the tag-picker UI.
+async function getTaxonomy() {
+  const categories = await q(`SELECT * FROM tag_categories ORDER BY sort_order, id`);
+  const tags = await q(`SELECT * FROM tags ORDER BY category_key, sort_order, id`);
+  return categories.map((c) => ({
+    ...c,
+    tags: tags.filter((t) => t.category_key === c.key),
+  }));
+}
+
+async function listTagCategories() {
+  return q(`SELECT * FROM tag_categories ORDER BY sort_order, id`);
+}
+
+async function listTags() {
+  return q(`SELECT * FROM tags ORDER BY category_key, sort_order, id`);
+}
+
+// --- SKQ matrix upserts (used by scripts/import-skq-matrix.js) ---------------
+// COALESCE-on-conflict so re-importing never blanks a field the sheet left empty.
+
+async function upsertSkqModule({ module_no, name_en, name_cn, color_name, color_ral }) {
+  return q1(`
+    INSERT INTO skq_modules (module_no, name_en, name_cn, color_name, color_ral)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (module_no) DO UPDATE SET
+      name_en = COALESCE(EXCLUDED.name_en, skq_modules.name_en),
+      name_cn = COALESCE(EXCLUDED.name_cn, skq_modules.name_cn),
+      color_name = COALESCE(EXCLUDED.color_name, skq_modules.color_name),
+      color_ral = COALESCE(EXCLUDED.color_ral, skq_modules.color_ral)
+    RETURNING *
+  `, [module_no, name_en || null, name_cn || null, color_name || null, color_ral || null]);
+}
+
+async function upsertSkqSystem({ system_no, name_en, name_cn }) {
+  return q1(`
+    INSERT INTO skq_systems (system_no, name_en, name_cn)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (system_no) DO UPDATE SET
+      name_en = COALESCE(EXCLUDED.name_en, skq_systems.name_en),
+      name_cn = COALESCE(EXCLUDED.name_cn, skq_systems.name_cn)
+    RETURNING *
+  `, [system_no, name_en || null, name_cn || null]);
+}
+
+async function upsertSkqEquipment({ seq_no, name_en, name_cn, module_no, system_no, department }) {
+  return q1(`
+    INSERT INTO skq_equipment (seq_no, name_en, name_cn, module_id, system_id, department)
+    VALUES ($1, $2, $3,
+            (SELECT id FROM skq_modules WHERE module_no = $4),
+            (SELECT id FROM skq_systems WHERE system_no = $5),
+            $6)
+    ON CONFLICT (seq_no) DO UPDATE SET
+      name_en = COALESCE(EXCLUDED.name_en, skq_equipment.name_en),
+      name_cn = COALESCE(EXCLUDED.name_cn, skq_equipment.name_cn),
+      module_id = COALESCE(EXCLUDED.module_id, skq_equipment.module_id),
+      system_id = COALESCE(EXCLUDED.system_id, skq_equipment.system_id),
+      department = COALESCE(EXCLUDED.department, skq_equipment.department)
+    RETURNING *
+  `, [seq_no, name_en || null, name_cn || null, module_no || null, system_no || null, department || null]);
+}
+
+async function listSkqModules() {
+  return q(`SELECT * FROM skq_modules ORDER BY module_no`);
+}
+
+async function listSkqSystems() {
+  return q(`SELECT * FROM skq_systems ORDER BY system_no`);
+}
+
+async function listSkqEquipment() {
+  return q(`
+    SELECT e.*,
+           m.module_no, m.name_en AS module_name_en, m.name_cn AS module_name_cn,
+           s.system_no, s.name_en AS system_name_en, s.name_cn AS system_name_cn
+    FROM skq_equipment e
+    LEFT JOIN skq_modules m ON m.id = e.module_id
+    LEFT JOIN skq_systems s ON s.id = e.system_id
+    ORDER BY e.seq_no
+  `);
+}
+
+// Effective status of a tag from its source + confidence. AI tags are USABLE by
+// default (confirmation is refinement, not a gate): >=0.9 → confirmed-grade,
+// >=0.7 → suggested, <0.7 → needs review (excluded by default, user can include).
+function tagTier(source, confidence) {
+  if (source === 'user_confirmed') return { tier: 'confirmed', label: 'Confirmed', used: true };
+  if (source === 'manual') return { tier: 'manual', label: 'Manual', used: true };
+  if (source === 'rejected') return { tier: 'rejected', label: 'Rejected', used: false };
+  if (source === 'needs_review') return { tier: 'needs_review', label: 'Needs review', used: false };
+  // ai_suggested (or anything else): confidence-tiered. Null confidence → treat as suggested.
+  const c = confidence == null ? 0.8 : Number(confidence);
+  if (c >= 0.9) return { tier: 'ai_confirmed', label: 'Confirmed (AI)', used: true };
+  if (c >= 0.7) return { tier: 'ai_suggested', label: 'AI Suggested', used: true };
+  return { tier: 'needs_review', label: 'Needs review', used: false };
+}
+
+// Deterministic tag → SKQ module mapping (NO AI). Maps customer tag values to
+// keywords matched against skq_modules names, so email/product grounding pulls
+// only relevant SKQ capabilities from the DB.
+const TAG_TO_SKQ_KEYWORDS = {
+  'Laser Welding': ['Welding'],
+  'Resistance Welding': ['Welding', 'riveting'],
+  'Vision Inspection': ['Visual'],
+  'Cell': ['Loading', 'Electrical performance', 'Air tightness'],
+  'Module': ['Stacking', 'Restrictive', 'Tightening'],
+  'PACK': ['Stacking', 'Restrictive', 'Tightening', 'Welding'],
+  'Energy Storage System': ['Stacking', 'Tightening', 'Air tightness'],
+  'Battery Production Line': ['Loading', 'Stacking', 'Welding', 'Visual'],
+  'Smart Factory': ['Manual workstation', 'ODM', 'Internal supplier'],
+  'Automation': ['载具输送', 'Manual workstation'],
+  'Intelligent Logistics': ['载具输送'],
+  'Prismatic': ['Stacking', 'Welding', 'Restrictive'],
+  'Cylindrical': ['Welding'],
+  'Pouch': ['Stacking', 'Taping'],
+  'Utility ESS': ['Stacking', 'Tightening'],
+  'Passenger EV': ['Welding', 'Stacking'],
+};
+
+async function matchSkqForTags(values) {
+  const kws = new Set();
+  (values || []).forEach((v) => (TAG_TO_SKQ_KEYWORDS[v] || []).forEach((k) => kws.add(k)));
+  if (!kws.size) return [];
+  const arr = [...kws];
+  const clauses = arr.map((_, i) => `name_en ILIKE $${i + 1} OR name_cn ILIKE $${i + 1}`).join(' OR ');
+  const params = arr.map((k) => `%${k}%`);
+  return q(`SELECT DISTINCT module_no, COALESCE(NULLIF(name_en,''), name_cn) AS name_en, name_cn FROM skq_modules WHERE ${clauses} ORDER BY module_no`, params);
+}
+
+// --- Company / contact tags --------------------------------------------------
+// A human-reviewed tag must never be silently overwritten by AI. These sources
+// are protected: an AI suggestion for the same (entity, tag) is a no-op.
+// (Mirrored by the ON CONFLICT ... WHERE guards below — keep them in sync.)
+const PROTECTED_TAG_SOURCES = ['user_confirmed', 'manual', 'rejected'];
+
+// Pure mirror of the SQL guard, exported for unit testing.
+function shouldReplaceWithSuggestion(existingSource) {
+  return !existingSource || !PROTECTED_TAG_SOURCES.includes(existingSource);
+}
+
+async function tagIdFor(categoryKey, value) {
+  const row = await q1(`SELECT id FROM tags WHERE category_key = $1 AND value = $2`, [categoryKey, value]);
+  return row ? row.id : null;
+}
+
+// Bilingual resolver: match a tag within a category by its English value/name OR
+// its Chinese name (so "方形" and "Prismatic" both resolve to the same tag).
+async function resolveTagId(categoryKey, text) {
+  if (!text) return null;
+  const row = await q1(`
+    SELECT id FROM tags
+    WHERE category_key = $1
+      AND (LOWER(value) = LOWER($2) OR LOWER(name_en) = LOWER($2) OR name_cn = $2)
+    LIMIT 1
+  `, [categoryKey, String(text).trim()]);
+  return row ? row.id : null;
+}
+
+async function listCompanyTags(companyId) {
+  return q(`
+    SELECT ct.id, ct.tag_id, ct.source, ct.confidence, ct.verification_status,
+           ct.confirmed_by, ct.created_at, ct.last_verified_at,
+           t.category_key, t.value, t.name_en AS tag_name_en, t.name_cn AS tag_name_cn, t.sort_order AS tag_sort,
+           tc.name_en AS category_name_en, tc.name_cn AS category_name_cn, tc.sort_order AS category_sort
+    FROM company_tags ct
+    JOIN tags t ON t.id = ct.tag_id
+    JOIN tag_categories tc ON tc.key = t.category_key
+    WHERE ct.company_id = $1
+    ORDER BY tc.sort_order, t.sort_order
+  `, [companyId]);
+}
+
+// Apply AI suggestions WITHOUT overwriting human-reviewed tags. New tags are
+// inserted as 'ai_suggested'; existing non-protected rows have only their
+// confidence refreshed (source/status untouched); protected rows are skipped.
+async function applyCompanyTagSuggestions(companyId, suggestions) {
+  let applied = 0;
+  let skipped = 0;
+  for (const s of suggestions || []) {
+    const tagId = await tagIdFor(s.category_key, s.value);
+    if (!tagId) { skipped++; continue; }
+    const res = await pool.query(`
+      INSERT INTO company_tags (company_id, tag_id, source, confidence, verification_status)
+      VALUES ($1, $2, 'ai_suggested', $3, 'unverified')
+      ON CONFLICT (company_id, tag_id) DO UPDATE SET confidence = EXCLUDED.confidence, updated_at = NOW()
+      WHERE company_tags.source NOT IN ('user_confirmed', 'manual', 'rejected')
+      RETURNING id
+    `, [companyId, tagId, s.confidence == null ? null : s.confidence]);
+    if (res.rowCount > 0) applied++; else skipped++;
+  }
+  return { applied, skipped };
+}
+
+// Set an explicit human decision on a tag (confirm / reject / manual /
+// needs_review). Upserts so it works whether or not the tag already exists.
+async function setCompanyTagStatus(companyId, tagId, source, confirmedBy) {
+  return q1(`
+    INSERT INTO company_tags (company_id, tag_id, source, verification_status, confirmed_by, last_verified_at)
+    VALUES ($1, $2, $3, 'verified', $4, NOW())
+    ON CONFLICT (company_id, tag_id) DO UPDATE SET
+      source = EXCLUDED.source,
+      verification_status = 'verified',
+      confirmed_by = EXCLUDED.confirmed_by,
+      last_verified_at = NOW(),
+      updated_at = NOW()
+    RETURNING *
+  `, [companyId, tagId, source, confirmedBy || null]);
+}
+
+async function addManualCompanyTag(companyId, categoryKey, value, confirmedBy) {
+  const tagId = await resolveTagId(categoryKey, value);
+  if (!tagId) return null;
+  return setCompanyTagStatus(companyId, tagId, 'manual', confirmedBy);
+}
+
+async function removeCompanyTag(companyId, tagId) {
+  await q(`DELETE FROM company_tags WHERE company_id = $1 AND tag_id = $2`, [companyId, tagId]);
+}
+
+async function listResearchSources(companyId) {
+  return q(`SELECT id, url, title, snippet, fetched_at FROM research_sources WHERE company_id = $1 ORDER BY id`, [companyId]);
+}
+
+// How long a saved AI analysis is considered fresh (staleness = DB-first cache
+// window). Overridable per-deployment via the settings table key below.
+const INTEL_REVIEW_PERIOD_DAYS = 90;
+
+async function getIntelReviewPeriodDays() {
+  const raw = await getSetting('intel_review_period_days');
+  const n = raw != null ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : INTEL_REVIEW_PERIOD_DAYS;
+}
+
+// Store the AI research summary + its cited sources (replacing any prior set),
+// and stamp ai_analyzed_at so we know when the AI last ran (for DB-first reuse).
+async function setCompanyResearch(companyId, summary, sources) {
+  await q(`UPDATE companies SET ai_research_summary = COALESCE($1, ai_research_summary), ai_analyzed_at = NOW(), updated_at = NOW() WHERE id = $2`, [summary || null, companyId]);
+  if (Array.isArray(sources) && sources.length) {
+    await q(`DELETE FROM research_sources WHERE company_id = $1`, [companyId]);
+    for (const src of sources) {
+      await q(`INSERT INTO research_sources (company_id, url, title, snippet) VALUES ($1, $2, $3, $4)`,
+        [companyId, src.url || null, src.title || null, src.snippet || null]);
+    }
+  }
+}
+
+// Company-scoped tag categories that currently have NO tag for this company —
+// so a refresh can ask the AI for ONLY the missing ones (saves tokens).
+async function missingCompanyCategories(companyId, taxonomy) {
+  const present = await q(
+    `SELECT DISTINCT t.category_key FROM company_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.company_id = $1`,
+    [companyId]
+  );
+  const have = new Set(present.map((r) => r.category_key));
+  return (taxonomy || [])
+    .filter((c) => c.applies_to === 'company' && !have.has(c.key))
+    .map((c) => c.key);
+}
+
+async function markIntelligenceReviewed(companyId) {
+  await q(`UPDATE companies SET intelligence_reviewed_at = NOW() WHERE id = $1`, [companyId]);
+}
+
+// Everything the Customer Intelligence panel needs for one company, including
+// the analysis freshness so the UI can be DB-first (reuse) vs. offer a refresh.
+async function getCompanyIntelligence(companyId) {
+  const company = await getCompany(companyId);
+  if (!company) return null;
+  const [tags, sources, reviewDays] = await Promise.all([
+    listCompanyTags(companyId),
+    listResearchSources(companyId),
+    getIntelReviewPeriodDays()
+  ]);
+  const analyzedAt = company.ai_analyzed_at ? new Date(company.ai_analyzed_at) : null;
+  const ageDays = analyzedAt ? (Date.now() - analyzedAt.getTime()) / 86400000 : null;
+  // "analyzed" tolerates rows written before ai_analyzed_at existed (have a
+  // summary or tags but no timestamp) so they aren't treated as never-analyzed.
+  const status = {
+    analyzed: Boolean(analyzedAt) || Boolean(company.ai_research_summary) || tags.length > 0,
+    analyzed_at: company.ai_analyzed_at || null,
+    reviewed_at: company.intelligence_reviewed_at || null,
+    review_period_days: reviewDays,
+    stale: analyzedAt ? ageDays > reviewDays : false,
+    tag_count: tags.length,
+    confirmed_count: tags.filter((t) => t.source === 'user_confirmed' || t.source === 'manual').length
+  };
+  return { company, tags, sources, status };
+}
+
+// Consolidate one company's intelligence into another (for duplicate rows —
+// e.g. tags landed on a contactless duplicate). Moves non-colliding tags,
+// research summary, and sources into `toId`, then clears them from `fromId`.
+// Never touches contacts. Returns a summary of what moved.
+async function mergeCompanyIntelligence(fromId, toId) {
+  fromId = Number(fromId); toId = Number(toId);
+  if (!fromId || !toId || fromId === toId) return { moved_tags: 0 };
+  const moved = await q(`
+    UPDATE company_tags SET company_id = $2, updated_at = NOW()
+    WHERE company_id = $1 AND tag_id NOT IN (SELECT tag_id FROM company_tags WHERE company_id = $2)
+    RETURNING id
+  `, [fromId, toId]);
+  await q(`DELETE FROM company_tags WHERE company_id = $1`, [fromId]);
+
+  const from = await getCompany(fromId);
+  const to = await getCompany(toId);
+  let movedSummary = false;
+  if (from && to) {
+    if (!to.ai_research_summary && from.ai_research_summary) {
+      await q(`UPDATE companies SET ai_research_summary = $1, ai_analyzed_at = COALESCE(ai_analyzed_at, $2), updated_at = NOW() WHERE id = $3`,
+        [from.ai_research_summary, from.ai_analyzed_at, toId]);
+      movedSummary = true;
+    }
+    const toSrc = await q1(`SELECT COUNT(*)::int n FROM research_sources WHERE company_id = $1`, [toId]);
+    if (toSrc.n === 0) await q(`UPDATE research_sources SET company_id = $1 WHERE company_id = $2`, [toId, fromId]);
+    else await q(`DELETE FROM research_sources WHERE company_id = $1`, [fromId]);
+  }
+  // The source row is no longer an intelligence "profile".
+  await q(`UPDATE companies SET ai_research_summary = NULL, ai_analyzed_at = NULL, intelligence_reviewed_at = NULL WHERE id = $1`, [fromId]);
+  return { moved_tags: moved.length, moved_summary: movedSummary, from: fromId, to: toId };
+}
+
+// Company rows that share a name_key (likely duplicates), with which one has
+// intelligence vs contacts — so the UI can flag "consolidate these".
+async function findDuplicateCompanies() {
+  return q(`
+    SELECT c.id, c.name, c.name_key,
+      (SELECT COUNT(*)::int FROM company_tags ct WHERE ct.company_id = c.id) AS tag_count,
+      (SELECT COUNT(*)::int FROM contacts co WHERE co.company_id = c.id) AS contact_count
+    FROM companies c
+    WHERE c.name_key IN (
+      SELECT name_key FROM companies WHERE name_key IS NOT NULL GROUP BY name_key HAVING COUNT(*) > 1
+    )
+    ORDER BY c.name_key, tag_count DESC
+  `);
+}
+
+// Resolve a contact to its company's saved intelligence + the contact's own
+// tags — the bridge the Draft Email modal and generation use. DB-only (no AI).
+async function getContactCompanyIntelligence(contactId) {
+  const contact = await getContact(contactId);
+  if (!contact) return null;
+  let company = null;
+  if (contact.company_id) company = await getCompany(contact.company_id);
+  if (!company && contact.company) company = await findCompanyByName(contact.company);
+  const contactTags = await listContactTags(contactId);
+  if (!company) {
+    return { company: null, tags: [], sources: [], status: { analyzed: false }, contact_tags: contactTags, contact };
+  }
+  const intel = await getCompanyIntelligence(company.id);
+  return { ...intel, contact_tags: contactTags, contact };
+}
+
+// Contact tags mirror company tags (used for the Contact Role category).
+async function listContactTags(contactId) {
+  return q(`
+    SELECT ct.id, ct.tag_id, ct.source, ct.confidence, ct.verification_status,
+           ct.confirmed_by, ct.created_at, ct.last_verified_at,
+           t.category_key, t.value, t.name_en AS tag_name_en, t.name_cn AS tag_name_cn, t.sort_order AS tag_sort,
+           tc.name_en AS category_name_en, tc.name_cn AS category_name_cn, tc.sort_order AS category_sort
+    FROM contact_tags ct
+    JOIN tags t ON t.id = ct.tag_id
+    JOIN tag_categories tc ON tc.key = t.category_key
+    WHERE ct.contact_id = $1
+    ORDER BY tc.sort_order, t.sort_order
+  `, [contactId]);
+}
+
+async function setContactTagStatus(contactId, tagId, source, confirmedBy) {
+  return q1(`
+    INSERT INTO contact_tags (contact_id, tag_id, source, verification_status, confirmed_by, last_verified_at)
+    VALUES ($1, $2, $3, 'verified', $4, NOW())
+    ON CONFLICT (contact_id, tag_id) DO UPDATE SET
+      source = EXCLUDED.source,
+      verification_status = 'verified',
+      confirmed_by = EXCLUDED.confirmed_by,
+      last_verified_at = NOW(),
+      updated_at = NOW()
+    RETURNING *
+  `, [contactId, tagId, source, confirmedBy || null]);
+}
+
+async function addManualContactTag(contactId, categoryKey, value, confirmedBy) {
+  const tagId = await resolveTagId(categoryKey, value);
+  if (!tagId) return null;
+  return setContactTagStatus(contactId, tagId, 'manual', confirmedBy);
+}
+
+async function removeContactTag(contactId, tagId) {
+  await q(`DELETE FROM contact_tags WHERE contact_id = $1 AND tag_id = $2`, [contactId, tagId]);
 }
 
 // ===========================================================================
@@ -1598,6 +2302,307 @@ async function updateEmailHistory(id, fields) {
 // Settings
 // ===========================================================================
 
+// ===========================================================================
+// AI usage log — persistence, aggregation, savings estimate, budgets
+// ===========================================================================
+
+// Current Claude pricing (USD per 1M tokens). Seeded once; edit in the DB to
+// change prices going forward — historical event costs are preserved.
+const AI_PRICING_SEED = [
+  { provider: 'anthropic', model: 'claude-sonnet-4-6', in: 3.00, out: 15.00, cr: 0.30, cw: 3.75 },
+  { provider: 'anthropic', model: 'claude-opus-4-8', in: 5.00, out: 25.00, cr: 0.50, cw: 6.25 },
+  { provider: 'anthropic', model: 'claude-sonnet-5', in: 3.00, out: 15.00, cr: 0.30, cw: 3.75 },
+  { provider: 'anthropic', model: 'claude-haiku-4-5', in: 1.00, out: 5.00, cr: 0.10, cw: 1.25 },
+];
+async function seedAiModelPricing() {
+  for (const p of AI_PRICING_SEED) {
+    const existing = await q1(`SELECT id FROM ai_model_pricing WHERE provider = $1 AND model = $2 AND effective_end IS NULL`, [p.provider, p.model]);
+    if (existing) continue;
+    await q(`
+      INSERT INTO ai_model_pricing
+        (provider, model, input_price_per_m, output_price_per_m, cache_read_price_per_m, cache_write_price_per_m, effective_start)
+      VALUES ($1,$2,$3,$4,$5,$6, DATE '2025-01-01')
+    `, [p.provider, p.model, p.in, p.out, p.cr, p.cw]);
+  }
+}
+async function listActivePricing() {
+  return q(`
+    SELECT provider, model, input_price_per_m, output_price_per_m,
+           cache_read_price_per_m, cache_write_price_per_m, reasoning_price_per_m, currency
+    FROM ai_model_pricing WHERE effective_end IS NULL ORDER BY model
+  `);
+}
+
+async function recordAiUsage(evt) {
+  const total = (evt.input_tokens || 0) + (evt.output_tokens || 0);
+  await q(`
+    INSERT INTO ai_usage_events
+      (feature, sub_feature, outcome, request_type, model, provider,
+       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens,
+       cost_usd, currency, tokens_saved_input, tokens_saved_output, cost_saved_usd,
+       company_id, contact_id, thread_id, session_id, user_id, response_ms, status, error_message, request_id)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+    ON CONFLICT (request_id) DO NOTHING
+  `, [
+    evt.feature, evt.sub_feature || null, evt.outcome, evt.request_type || null, evt.model || null, evt.provider || 'anthropic',
+    evt.input_tokens || 0, evt.output_tokens || 0, evt.cache_read_tokens || 0, evt.cache_write_tokens || 0, evt.reasoning_tokens || 0, total,
+    evt.cost_usd || 0, evt.currency || 'USD', evt.tokens_saved_input || 0, evt.tokens_saved_output || 0, evt.cost_saved_usd || 0,
+    evt.company_id || null, evt.contact_id || null, evt.thread_id || null, evt.session_id || null, evt.user_id || null,
+    evt.response_ms || null, evt.status || 'success', evt.error_message || null, evt.request_id || null,
+  ]);
+}
+
+// period → SQL WHERE body (no params). Custom ranges use buildPeriodFilter.
+function periodWhere(period) {
+  switch (period) {
+    case 'today': return `created_at >= date_trunc('day', NOW())`;
+    case 'yesterday': return `created_at >= date_trunc('day', NOW()) - INTERVAL '1 day' AND created_at < date_trunc('day', NOW())`;
+    case '7d': return `created_at >= NOW() - INTERVAL '7 days'`;
+    case '30d': return `created_at >= NOW() - INTERVAL '30 days'`;
+    case 'month': return `created_at >= date_trunc('month', NOW())`;
+    case 'prev_month': return `created_at >= date_trunc('month', NOW()) - INTERVAL '1 month' AND created_at < date_trunc('month', NOW())`;
+    case 'year': return `created_at >= date_trunc('year', NOW())`;
+    default: return `TRUE`;
+  }
+}
+// Returns { sql, params } — custom range binds dates as params.
+function buildPeriodFilter(period, from, to) {
+  if (period === 'custom' && (from || to)) {
+    const parts = []; const params = [];
+    if (from) { params.push(from); parts.push(`created_at >= $${params.length}::date`); }
+    if (to) { params.push(to); parts.push(`created_at < ($${params.length}::date + INTERVAL '1 day')`); }
+    return { sql: parts.join(' AND ') || 'TRUE', params };
+  }
+  return { sql: periodWhere(period), params: [] };
+}
+
+async function aiUsageTotals(period = 'all') {
+  const row = await q1(`
+    SELECT
+      COUNT(*) FILTER (WHERE outcome IN ('db_reuse','cache_hit','ai_avoided')) AS reuses,
+      COUNT(*) FILTER (WHERE outcome NOT IN ('db_reuse','cache_hit','ai_avoided')) AS new_calls,
+      COALESCE(SUM(input_tokens),0) AS input_tokens,
+      COALESCE(SUM(output_tokens),0) AS output_tokens,
+      COALESCE(SUM(cost_usd),0) AS cost_usd,
+      COALESCE(SUM(tokens_saved_input),0) AS saved_input,
+      COALESCE(SUM(tokens_saved_output),0) AS saved_output,
+      COALESCE(SUM(cost_saved_usd),0) AS saved_cost_usd,
+      COUNT(*) FILTER (WHERE feature='company_research' AND outcome NOT IN ('db_reuse','cache_hit','ai_avoided')) AS company_analyses,
+      COUNT(*) FILTER (WHERE feature='contact_intel') AS contact_analyses,
+      COUNT(*) FILTER (WHERE feature='email_draft' AND outcome NOT IN ('db_reuse','cache_hit','ai_avoided')) AS drafts,
+      COUNT(*) FILTER (WHERE feature='product_match') AS product_matches,
+      COUNT(*) FILTER (WHERE feature='attachment_rec') AS attachment_recs
+    FROM ai_usage_events WHERE ${periodWhere(period)}
+  `);
+  const num = (x) => Number(x || 0);
+  return {
+    new_calls: num(row.new_calls), reuses: num(row.reuses),
+    input_tokens: num(row.input_tokens), output_tokens: num(row.output_tokens),
+    total_tokens: num(row.input_tokens) + num(row.output_tokens),
+    cost_usd: num(row.cost_usd),
+    saved_input: num(row.saved_input), saved_output: num(row.saved_output),
+    saved_total: num(row.saved_input) + num(row.saved_output),
+    saved_cost_usd: num(row.saved_cost_usd),
+    company_analyses: num(row.company_analyses), contact_analyses: num(row.contact_analyses),
+    drafts: num(row.drafts), product_matches: num(row.product_matches), attachment_recs: num(row.attachment_recs),
+  };
+}
+
+async function aiUsageByFeature(period = 'all') {
+  return q(`
+    SELECT feature,
+      COUNT(*) FILTER (WHERE outcome NOT IN ('db_reuse','cache_hit','ai_avoided')) AS new_calls,
+      COUNT(*) FILTER (WHERE outcome IN ('db_reuse','cache_hit','ai_avoided')) AS reuses,
+      COALESCE(SUM(input_tokens),0)::int AS input_tokens,
+      COALESCE(SUM(output_tokens),0)::int AS output_tokens,
+      COALESCE(SUM(cost_usd),0) AS cost_usd,
+      COALESCE(SUM(tokens_saved_input+tokens_saved_output),0)::int AS saved_total,
+      COALESCE(SUM(cost_saved_usd),0) AS saved_cost_usd
+    FROM ai_usage_events WHERE ${periodWhere(period)}
+    GROUP BY feature ORDER BY cost_usd DESC
+  `);
+}
+
+async function aiUsageByCompany(period = 'all', limit = 20) {
+  return q(`
+    SELECT e.company_id, c.name AS company_name,
+      COUNT(*) FILTER (WHERE e.outcome NOT IN ('db_reuse','cache_hit','ai_avoided')) AS new_calls,
+      COUNT(*) FILTER (WHERE e.outcome IN ('db_reuse','cache_hit','ai_avoided')) AS reuses,
+      COALESCE(SUM(e.input_tokens+e.output_tokens),0)::int AS total_tokens,
+      COALESCE(SUM(e.cost_usd),0) AS cost_usd,
+      COALESCE(SUM(e.tokens_saved_input+e.tokens_saved_output),0)::int AS saved_total,
+      COALESCE(SUM(e.cost_saved_usd),0) AS saved_cost_usd
+    FROM ai_usage_events e LEFT JOIN companies c ON c.id = e.company_id
+    WHERE ${periodWhere(period)} AND e.company_id IS NOT NULL
+    GROUP BY e.company_id, c.name ORDER BY cost_usd DESC LIMIT $1
+  `, [limit]);
+}
+
+// --- Rich reporting (filter = { sql, params } from buildPeriodFilter) --------
+const REUSE_SQL = `outcome IN ('db_reuse','cache_hit','ai_avoided')`;
+
+async function aiUsageKpis(filter) {
+  const row = await q1(`
+    SELECT
+      COUNT(*) AS requests,
+      COUNT(*) FILTER (WHERE ${REUSE_SQL}) AS reuses,
+      COUNT(*) FILTER (WHERE NOT (${REUSE_SQL})) AS new_calls,
+      COUNT(*) FILTER (WHERE status = 'error') AS failures,
+      COALESCE(SUM(input_tokens),0)::bigint AS input_tokens,
+      COALESCE(SUM(output_tokens),0)::bigint AS output_tokens,
+      COALESCE(SUM(input_tokens+output_tokens),0)::bigint AS total_tokens,
+      COALESCE(SUM(cost_usd),0) AS cost_usd,
+      COALESCE(SUM(tokens_saved_input),0)::bigint AS saved_input,
+      COALESCE(SUM(tokens_saved_output),0)::bigint AS saved_output,
+      COALESCE(SUM(tokens_saved_input+tokens_saved_output),0)::bigint AS saved_total,
+      COALESCE(SUM(cost_saved_usd),0) AS saved_cost_usd,
+      AVG(response_ms) FILTER (WHERE response_ms IS NOT NULL) AS avg_response_ms
+    FROM ai_usage_events WHERE ${filter.sql}
+  `, filter.params);
+  const n = (x) => Number(x || 0);
+  const requests = n(row.requests), newCalls = n(row.new_calls), reuses = n(row.reuses);
+  return {
+    requests, new_calls: newCalls, reuses, failures: n(row.failures),
+    input_tokens: n(row.input_tokens), output_tokens: n(row.output_tokens), total_tokens: n(row.total_tokens),
+    cost_usd: n(row.cost_usd),
+    saved_input: n(row.saved_input), saved_output: n(row.saved_output), saved_total: n(row.saved_total), saved_cost_usd: n(row.saved_cost_usd),
+    avg_response_ms: row.avg_response_ms != null ? Math.round(Number(row.avg_response_ms)) : null,
+    avg_cost_usd: newCalls ? n(row.cost_usd) / newCalls : 0,
+    reuse_rate: requests ? reuses / requests : 0,
+    failure_rate: requests ? n(row.failures) / requests : 0,
+  };
+}
+
+async function aiUsageTimeseries(filter, bucket = 'day') {
+  const trunc = bucket === 'month' ? 'month' : bucket === 'week' ? 'week' : 'day';
+  return q(`
+    SELECT date_trunc('${trunc}', created_at) AS bucket,
+      COALESCE(SUM(input_tokens),0)::bigint AS input_tokens,
+      COALESCE(SUM(output_tokens),0)::bigint AS output_tokens,
+      COALESCE(SUM(input_tokens+output_tokens),0)::bigint AS total_tokens,
+      COALESCE(SUM(cost_usd),0) AS cost_usd,
+      COALESCE(SUM(tokens_saved_input+tokens_saved_output),0)::bigint AS saved_total,
+      COALESCE(SUM(cost_saved_usd),0) AS saved_cost_usd,
+      COUNT(*) AS requests,
+      COUNT(*) FILTER (WHERE NOT (${REUSE_SQL})) AS new_calls,
+      COUNT(*) FILTER (WHERE ${REUSE_SQL}) AS reuses
+    FROM ai_usage_events WHERE ${filter.sql}
+    GROUP BY bucket ORDER BY bucket
+  `, filter.params);
+}
+
+async function aiUsageFeatureBreakdown(filter) {
+  return q(`
+    SELECT feature,
+      COUNT(*) FILTER (WHERE NOT (${REUSE_SQL})) AS new_calls,
+      COUNT(*) FILTER (WHERE ${REUSE_SQL}) AS reuses,
+      COUNT(*) AS requests,
+      COUNT(*) FILTER (WHERE status='error') AS failures,
+      COALESCE(SUM(input_tokens),0)::bigint AS input_tokens,
+      COALESCE(SUM(output_tokens),0)::bigint AS output_tokens,
+      COALESCE(SUM(input_tokens+output_tokens),0)::bigint AS total_tokens,
+      COALESCE(SUM(cost_usd),0) AS cost_usd,
+      COALESCE(SUM(tokens_saved_input+tokens_saved_output),0)::bigint AS saved_total,
+      COALESCE(SUM(cost_saved_usd),0) AS saved_cost_usd,
+      AVG(response_ms) FILTER (WHERE response_ms IS NOT NULL) AS avg_response_ms
+    FROM ai_usage_events WHERE ${filter.sql}
+    GROUP BY feature ORDER BY cost_usd DESC, total_tokens DESC
+  `, filter.params);
+}
+
+async function aiUsageByModel(filter) {
+  return q(`
+    SELECT provider, model,
+      COUNT(*) AS requests,
+      COALESCE(SUM(input_tokens+output_tokens),0)::bigint AS total_tokens,
+      COALESCE(SUM(cost_usd),0) AS cost_usd
+    FROM ai_usage_events WHERE ${filter.sql} AND model IS NOT NULL
+    GROUP BY provider, model ORDER BY cost_usd DESC
+  `, filter.params);
+}
+
+async function aiUsageByUser(filter) {
+  return q(`
+    SELECT COALESCE(user_id,'(unknown)') AS user_id,
+      COUNT(*) AS requests,
+      COALESCE(SUM(input_tokens+output_tokens),0)::bigint AS total_tokens,
+      COALESCE(SUM(cost_usd),0) AS cost_usd
+    FROM ai_usage_events WHERE ${filter.sql}
+    GROUP BY user_id ORDER BY cost_usd DESC LIMIT 20
+  `, filter.params);
+}
+
+// Paginated request-level audit log (no prompt/email content — metadata only).
+async function aiUsageEvents(filter, opts = {}) {
+  const params = [...filter.params];
+  let where = filter.sql;
+  if (opts.feature) { params.push(opts.feature); where += ` AND feature = $${params.length}`; }
+  if (opts.status) { params.push(opts.status); where += ` AND status = $${params.length}`; }
+  const countRow = await q1(`SELECT COUNT(*)::int AS n FROM ai_usage_events WHERE ${where}`, params);
+  const limit = Math.min(200, Math.max(1, opts.limit || 50));
+  const offset = Math.max(0, opts.offset || 0);
+  params.push(limit); const limIdx = params.length;
+  params.push(offset); const offIdx = params.length;
+  const rows = await q(`
+    SELECT e.id, e.created_at, e.feature, e.sub_feature, e.outcome, e.request_type, e.status,
+           e.model, e.provider, e.input_tokens, e.output_tokens, e.total_tokens, e.cost_usd,
+           e.response_ms, e.user_id, e.company_id, e.contact_id, e.error_message,
+           c.name AS company_name
+    FROM ai_usage_events e LEFT JOIN companies c ON c.id = e.company_id
+    WHERE ${where} ORDER BY e.created_at DESC LIMIT $${limIdx} OFFSET $${offIdx}
+  `, params);
+  return { total: countRow.n, rows, limit, offset };
+}
+
+// Estimate what a reuse SAVED: tokens of the most recent real call for the same
+// feature (company/contact-scoped when possible), falling back to per-feature
+// defaults. Returns { input, output }.
+const SAVED_DEFAULTS = {
+  company_research: { input: 4000, output: 1500 },
+  email_draft: { input: 1500, output: 450 },
+  contact_intel: { input: 0, output: 0 },
+  product_match: { input: 1200, output: 300 },
+  attachment_rec: { input: 800, output: 200 },
+  _default: { input: 1000, output: 300 },
+};
+async function estimateAiSaved(feature, ids = {}) {
+  const filters = [`feature = $1`, `outcome NOT IN ('db_reuse','cache_hit','ai_avoided')`, `(input_tokens > 0 OR output_tokens > 0)`];
+  const params = [feature];
+  if (ids.company_id) { params.push(ids.company_id); filters.push(`company_id = $${params.length}`); }
+  const row = await q1(`
+    SELECT input_tokens, output_tokens FROM ai_usage_events
+    WHERE ${filters.join(' AND ')} ORDER BY created_at DESC LIMIT 1
+  `, params);
+  if (row) return { input: Number(row.input_tokens), output: Number(row.output_tokens) };
+  return SAVED_DEFAULTS[feature] || SAVED_DEFAULTS._default;
+}
+
+// Budget/limit settings (stored in the settings table as JSON).
+const AI_BUDGET_DEFAULTS = {
+  daily_token_budget: 0,        // 0 = unlimited
+  monthly_token_budget: 0,      // 0 = unlimited
+  daily_cost_budget: 0,         // USD, 0 = unlimited
+  monthly_cost_budget: 0,       // USD, 0 = unlimited
+  per_user_cost_budget: 0,      // USD/day per user, 0 = unlimited
+  max_tokens_per_request: 0,    // 0 = use per-feature default
+  max_cost_per_request: 0,      // USD, 0 = unlimited
+  warn_threshold_pct: 80,
+  hard_limit: false,            // false = warn only; true = block when exceeded
+  auto_refresh_disabled: false,
+};
+async function getAiBudget() {
+  const raw = await getSetting('ai_budget');
+  let parsed = {};
+  if (raw) { try { parsed = JSON.parse(raw); } catch { parsed = {}; } }
+  return { ...AI_BUDGET_DEFAULTS, ...parsed };
+}
+async function setAiBudget(patch) {
+  const current = await getAiBudget();
+  const next = { ...current, ...patch };
+  await setSetting('ai_budget', JSON.stringify(next));
+  return next;
+}
+
 async function getSetting(key) {
   const row = await q1(`SELECT value FROM settings WHERE key = $1`, [key]);
   return row ? row.value : null;
@@ -1652,5 +2657,23 @@ module.exports = {
   listRecentEmailHistory, updateEmailHistory,
   findContactByEmail, findContactByEmailDomain, findCompanyByDomain, countNeedsReviewEmails,
   // settings
-  getSetting, setSetting
+  getSetting, setSetting,
+  // customer intelligence: tag taxonomy + SKQ product-capability matrix
+  getTaxonomy, listTagCategories, listTags,
+  upsertSkqModule, upsertSkqSystem, upsertSkqEquipment,
+  listSkqModules, listSkqSystems, listSkqEquipment,
+  // customer intelligence: company/contact tags
+  shouldReplaceWithSuggestion, PROTECTED_TAG_SOURCES,
+  listCompanyTags, applyCompanyTagSuggestions, setCompanyTagStatus,
+  addManualCompanyTag, removeCompanyTag,
+  listResearchSources, setCompanyResearch, markIntelligenceReviewed, getCompanyIntelligence,
+  missingCompanyCategories, getIntelReviewPeriodDays,
+  listContactTags, setContactTagStatus, addManualContactTag, removeContactTag,
+  getContactCompanyIntelligence, tagTier, matchSkqForTags,
+  mergeCompanyIntelligence, findDuplicateCompanies,
+  // AI usage log + budgets + reporting
+  recordAiUsage, aiUsageTotals, aiUsageByFeature, aiUsageByCompany,
+  estimateAiSaved, getAiBudget, setAiBudget,
+  seedAiModelPricing, listActivePricing, buildPeriodFilter,
+  aiUsageKpis, aiUsageTimeseries, aiUsageFeatureBreakdown, aiUsageByModel, aiUsageByUser, aiUsageEvents
 };

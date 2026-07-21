@@ -16,7 +16,7 @@ let _sender = { name: "", title: "", company: "" };
 
 /* ── Application shell: sidebar nav / view switching / collapse persistence ── */
 
-const APP_VIEW_LABELS = { search: "Search & Scan", crm: "CRM", settings: "Settings" };
+const APP_VIEW_LABELS = { search: "Search & Scan", crm: "CRM", intelligence: "Customer Intelligence", "ai-usage": "AI Usage", settings: "Settings" };
 
 function showView(name) {
   if (!APP_VIEW_LABELS[name]) return;
@@ -382,6 +382,10 @@ async function doSearch() {
     (d.messages || []).forEach(m => showMessage(m, "warn"));
     renderSearchSummary(d.summaries);
 
+    // Populate the inline Company Intelligence sub-tabs for the searched companies
+    // (DB-first: this only loads saved intelligence, it does not call the AI).
+    crmIntelFromSearch(company.split(",").map((s) => s.trim()).filter(Boolean));
+
     if (d.orgs && d.orgs.length > 0) {
       renderOrgFallback(d.orgs);
     } else if (_currentContacts.length === 0) {
@@ -664,6 +668,7 @@ async function openDraftModalForContact(contact, refreshFn, options = {}) {
     `${contact.title || ""} · ${contact.company || ""} · ${contact.department || ""}`;
   document.getElementById("modal-extra-instructions").value = "";
   openModal("email-modal");
+  loadModalIntel(contact); // saved company intelligence + tags used in generation (no AI)
   document.getElementById("modal-body").innerHTML = `<div style="text-align:center;padding:32px 0;"><span class="spinner"></span> Loading…</div>`;
   document.getElementById("draft-library-list").innerHTML = "";
   resetImportedEmailsPanel();
@@ -753,9 +758,12 @@ async function selectDraftCategory(mode, options = {}) {
 }
 
 async function requestDraft(contact, mode, extraInstructions, regenerate) {
+  const dedupKey = `draft:${contact.contact_id || contact.company}:${mode}:${regenerate ? "regen" : "gen"}`;
+  if (_aiInFlight.has(dedupKey)) return;        // dedup: ignore duplicate submits
+  _aiInFlight.add(dedupKey);
   document.getElementById("modal-body").innerHTML = `
     <div style="text-align:center;padding:32px 0;">
-      <span class="spinner"></span> Generating personalised email draft with Claude…
+      <span class="spinner"></span> ${regenerate ? "Regenerating" : "Generating"} email draft with Claude…
     </div>`;
   try {
     const r = await fetch("/api/draft-email", {
@@ -763,9 +771,18 @@ async function requestDraft(contact, mode, extraInstructions, regenerate) {
       body: JSON.stringify({
         contact, sender: _sender, contactId: contact.contact_id, companyKey: contact.company,
         mode, extraInstructions, regenerate: Boolean(regenerate),
+        includeTagIds: getModalIncludeTagIds(),
       }),
     });
     const d = await r.json();
+    if (!r.ok || d.error) {
+      document.getElementById("modal-body").innerHTML =
+        `<div class="msg-error">${escapeHtml(d.error || "Draft failed")}${d.details ? " — " + escapeHtml(d.details) : ""}</div>`;
+      refreshUsage();
+      return;
+    }
+    if (d.reused) showMessage(`Loaded saved draft — AI call avoided (~${fmtTokens(d.saved_input)} in / ${fmtTokens(d.saved_output)} out tokens saved).`, "info");
+    else if (d.tags_used) showMessage(`Draft generated using ${d.tags_used} confirmed company tag${d.tags_used === 1 ? "" : "s"}.`, "info");
     _modalComm = {
       id: d.id, contact_id: contact.contact_id, subject: d.subject, body: d.body,
       followup_text: d.followup, rationale: d.rationale, to_email: d.to_email || contact.email || "",
@@ -781,6 +798,8 @@ async function requestDraft(contact, mode, extraInstructions, regenerate) {
   } catch (e) {
     document.getElementById("modal-body").innerHTML =
       `<div class="msg-error">Network error: ${escapeHtml(e.message)}</div>`;
+  } finally {
+    _aiInFlight.delete(dedupKey);
   }
 }
 
@@ -1722,16 +1741,26 @@ function escapeHtml(str) {
 
 /* ── Usage bar ── */
 
+function fmtTokens(n) { return Number(n || 0).toLocaleString(); }
+
 async function refreshUsage() {
   try {
     const r = await fetch("/api/usage");
     const d = await r.json();
-    document.getElementById("u-apollo-people").textContent = d.apollo_people_calls;
-    document.getElementById("u-apollo-org").textContent = d.apollo_org_calls;
-    document.getElementById("u-claude-calls").textContent = d.claude_calls;
-    document.getElementById("u-claude-in").textContent = d.claude_input_tokens;
-    document.getElementById("u-claude-out").textContent = d.claude_output_tokens;
-    document.getElementById("u-cost").textContent = "$" + Number(d.claude_cost_usd).toFixed(6);
+    const ai = d.ai || {};
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    set("u-apollo-people", d.apollo_people_calls);
+    set("u-apollo-org", d.apollo_org_calls);
+    set("u-ai-company", ai.company_analyses || 0);
+    set("u-ai-contact", ai.contact_analyses || 0);
+    set("u-ai-product", ai.product_matches || 0);
+    set("u-claude-calls", ai.drafts || 0);
+    set("u-claude-in", fmtTokens(ai.input_tokens));
+    set("u-claude-out", fmtTokens(ai.output_tokens));
+    set("u-total", fmtTokens(ai.total_tokens));
+    set("u-cost", "$" + Number(ai.cost_usd || 0).toFixed(4));
+    set("u-saved-tokens", fmtTokens(ai.saved_total));
+    set("u-saved-cost", "$" + Number(ai.saved_cost_usd || 0).toFixed(2));
   } catch (e) { /* silent */ }
 }
 
@@ -1739,6 +1768,119 @@ document.getElementById("usage-reset-btn").addEventListener("click", async () =>
   await fetch("/api/usage/reset", { method: "POST" });
   refreshUsage();
 });
+document.getElementById("usage-details-btn").addEventListener("click", () => { showView("ai-usage"); loadAiUsage(); });
+document.getElementById("ai-usage-close").addEventListener("click", () => closeModal("ai-usage-modal"));
+document.getElementById("ai-usage-modal").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("ai-usage-modal")) closeModal("ai-usage-modal");
+});
+
+/* ── Detailed AI Usage & Budget modal ── */
+const AI_FEATURE_LABELS = {
+  company_research: "Company research", email_draft: "Email drafts", contact_intel: "Contact intelligence",
+  product_match: "Product matching", attachment_rec: "Attachment recs", email_classify: "Email classify", other: "Other",
+};
+
+async function openAiUsageModal() {
+  openModal("ai-usage-modal");
+  const body = document.getElementById("ai-usage-body");
+  body.innerHTML = '<div style="text-align:center;padding:24px 0;"><span class="spinner"></span> Loading…</div>';
+  try {
+    const r = await fetch("/api/ai-usage?period=all");
+    const d = await r.json();
+    if (!d.ok) { body.innerHTML = `<div class="msg-error">${escapeHtml(d.error || "Failed")}</div>`; return; }
+    renderAiUsage(d);
+  } catch (e) { body.innerHTML = `<div class="msg-error">${escapeHtml(e.message)}</div>`; }
+}
+
+function aiTotalsCard(title, t) {
+  return `<div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px 12px;">
+      <div style="font-size:0.72rem;color:#6b7280;text-transform:uppercase;letter-spacing:.03em;">${escapeHtml(title)}</div>
+      <div style="font-size:1.05rem;font-weight:700;color:#111827;margin-top:2px;">${fmtTokens(t.total_tokens)} <span style="font-size:0.72rem;font-weight:400;color:#9ca3af;">tokens</span></div>
+      <div style="font-size:0.74rem;color:#6b7280;">${fmtTokens(t.input_tokens)} in / ${fmtTokens(t.output_tokens)} out · $${Number(t.cost_usd).toFixed(2)}</div>
+      <div style="font-size:0.74rem;color:#059669;">Saved ${fmtTokens(t.saved_total)} ($${Number(t.saved_cost_usd).toFixed(2)})</div>
+    </div>`;
+}
+
+function renderAiUsage(d) {
+  const body = document.getElementById("ai-usage-body");
+  const s = d.session || {};
+  const bs = d.budget_status || {};
+  const b = d.budget || {};
+
+  let html = `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px;">
+      ${aiTotalsCard("Session", { total_tokens: s.total_tokens, input_tokens: s.input_tokens, output_tokens: s.output_tokens, cost_usd: s.cost_usd, saved_total: s.saved_total, saved_cost_usd: s.saved_cost_usd })}
+      ${aiTotalsCard("Today", d.today)}
+      ${aiTotalsCard("This month", d.month)}
+      ${aiTotalsCard("All time", d.all)}
+    </div>`;
+
+  // Budget status
+  if (b.daily_token_budget || b.monthly_token_budget) {
+    const bar = (pct, over, warn) => `<span style="color:${over ? '#dc2626' : warn ? '#c2410c' : '#059669'};font-weight:600;">${pct}%</span>`;
+    html += `<div style="font-size:0.78rem;color:#374151;margin-bottom:12px;">Budget used —
+        ${b.daily_token_budget ? `Daily: ${bar(bs.daily_pct, bs.daily_over, bs.daily_warn)} of ${fmtTokens(b.daily_token_budget)}` : ""}
+        ${b.daily_token_budget && b.monthly_token_budget ? " · " : ""}
+        ${b.monthly_token_budget ? `Monthly: ${bar(bs.monthly_pct, bs.monthly_over, bs.monthly_warn)} of ${fmtTokens(b.monthly_token_budget)}` : ""}
+      </div>`;
+  }
+
+  // By feature (all-time)
+  html += `<h3 style="font-size:0.86rem;margin:6px 0 6px;">By feature (all time)</h3>
+    <table class="intel-matrix-table" style="margin-bottom:14px;"><thead><tr>
+      <th>Feature</th><th>AI calls</th><th>Reuses</th><th>Tokens</th><th>Cost</th><th>Saved</th></tr></thead><tbody>`;
+  (d.by_feature || []).forEach((f) => {
+    html += `<tr><td>${escapeHtml(AI_FEATURE_LABELS[f.feature] || f.feature)}</td>
+      <td>${f.new_calls}</td><td>${f.reuses}</td>
+      <td>${fmtTokens((f.input_tokens || 0) + (f.output_tokens || 0))}</td>
+      <td>$${Number(f.cost_usd).toFixed(2)}</td>
+      <td style="color:#059669;">${fmtTokens(f.saved_total)} ($${Number(f.saved_cost_usd).toFixed(2)})</td></tr>`;
+  });
+  if (!(d.by_feature || []).length) html += `<tr><td colspan="6" style="color:#9ca3af;">No AI usage recorded yet.</td></tr>`;
+  html += `</tbody></table>`;
+
+  // By company (top spenders)
+  html += `<h3 style="font-size:0.86rem;margin:6px 0 6px;">Top companies by cost (all time)</h3>
+    <table class="intel-matrix-table" style="margin-bottom:14px;"><thead><tr>
+      <th>Company</th><th>AI calls</th><th>Reuses</th><th>Tokens</th><th>Cost</th><th>Saved</th></tr></thead><tbody>`;
+  (d.by_company || []).forEach((c) => {
+    html += `<tr><td>${escapeHtml(c.company_name || ("#" + c.company_id))}</td>
+      <td>${c.new_calls}</td><td>${c.reuses}</td><td>${fmtTokens(c.total_tokens)}</td>
+      <td>$${Number(c.cost_usd).toFixed(2)}</td>
+      <td style="color:#059669;">${fmtTokens(c.saved_total)} ($${Number(c.saved_cost_usd).toFixed(2)})</td></tr>`;
+  });
+  if (!(d.by_company || []).length) html += `<tr><td colspan="6" style="color:#9ca3af;">No per-company usage yet.</td></tr>`;
+  html += `</tbody></table>`;
+
+  // Budget config form
+  html += `<h3 style="font-size:0.86rem;margin:10px 0 6px;">Budgets & limits</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:0.8rem;">
+      <label>Daily token budget (0 = off)<input type="number" id="aib-daily" value="${b.daily_token_budget || 0}" style="width:100%;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;"></label>
+      <label>Monthly token budget (0 = off)<input type="number" id="aib-monthly" value="${b.monthly_token_budget || 0}" style="width:100%;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;"></label>
+      <label>Warning threshold (%)<input type="number" id="aib-warn" value="${b.warn_threshold_pct || 80}" style="width:100%;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;"></label>
+      <label>Max tokens per request (0 = default)<input type="number" id="aib-maxreq" value="${b.max_tokens_per_request || 0}" style="width:100%;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;"></label>
+      <label style="grid-column:1/3;"><input type="checkbox" id="aib-autooff" ${b.auto_refresh_disabled ? "checked" : ""}> Disable automatic AI refreshes (all AI runs require an explicit click)</label>
+    </div>
+    <button class="btn-sm btn-orange" id="aib-save" style="margin-top:10px;">Save budgets</button>`;
+
+  body.innerHTML = html;
+  document.getElementById("aib-save").addEventListener("click", saveAiBudget);
+}
+
+async function saveAiBudget() {
+  const payload = {
+    daily_token_budget: document.getElementById("aib-daily").value,
+    monthly_token_budget: document.getElementById("aib-monthly").value,
+    warn_threshold_pct: document.getElementById("aib-warn").value,
+    max_tokens_per_request: document.getElementById("aib-maxreq").value,
+    auto_refresh_disabled: document.getElementById("aib-autooff").checked,
+  };
+  try {
+    const r = await fetch("/api/ai-usage/budget", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    const d = await r.json();
+    if (d.ok) { showMessage("Budgets saved.", "info"); openAiUsageModal(); }
+    else showMessage(d.error || "Failed to save budgets", "error");
+  } catch (e) { showMessage("Save failed: " + e.message, "error"); }
+}
 
 /* =======================================================================
    Scan Business Card modal
@@ -2914,6 +3056,9 @@ document.getElementById("delete-confirm-ok").addEventListener("click", async () 
 initAppShell();
 loadSenderProfile();
 loadDraftModes();
+initIntelligenceView();
+initCrmIntel();
+initAiUsageDashboard();
 loadCrmContacts();
 loadBrowseSelectors();
 loadSearchTaxonomy();
@@ -3274,3 +3419,1092 @@ document.getElementById("ac-email").addEventListener("blur", async () => {
     await acCheckDuplicate(acGetPayload());
   }
 });
+
+/* =======================================================================
+   Customer Intelligence view — per-company tag review + AI research,
+   plus the SKQ capability matrix. Self-contained; talks to /api/taxonomy,
+   /api/companies/:id/intelligence|research|tags/*, and /api/skq/matrix.
+   ======================================================================= */
+
+let _intelTaxonomy = null;      // [{key,name_en,applies_to,tags:[{value,name_en}]}]
+let _intelCompanyId = null;
+let _intelActivePanelId = "intel-panel";
+let _intelMatrix = null;        // {modules, systems, equipment}
+const _aiInFlight = new Set();  // request dedup: prevents double-clicks / re-renders firing duplicate AI calls
+
+/* ── Bilingual tag display. Language pref: 'bilingual' (default) | 'en' | 'zh'.
+   The AI always receives the English `value`; these helpers are display only. ── */
+function intelLang() { try { return localStorage.getItem("intel_lang") || "bilingual"; } catch { return "bilingual"; } }
+function biLabel(en, cn) {
+  en = (en || "").trim(); cn = (cn || "").trim();
+  const lang = intelLang();
+  if (lang === "en") return en || cn;
+  if (lang === "zh") return cn || en;
+  if (!en) return cn; if (!cn) return en;
+  return `${en}（${cn}）`;
+}
+function catLabel(cat) { return biLabel(cat && cat.name_en, cat && cat.name_cn); }
+function savedTagLabel(t) { return biLabel(t.value || t.tag_name_en, t.tag_name_cn); }   // row from listCompanyTags/listContactTags
+function taxTagLabel(tg) { return biLabel(tg.value || tg.name_en, tg.name_cn); }          // row from the taxonomy
+function skqLabel(m) { return biLabel(m.name_en, m.name_cn); }
+
+// Re-render whatever intelligence surfaces are currently on screen after a
+// language change.
+function applyIntelLang() {
+  const mf = document.getElementById("intel-matrix-filter");
+  if (_intelMatrix) renderSkqMatrix(mf ? mf.value.trim().toLowerCase() : "");
+  if (_crmIntelActiveId) loadCompanyIntel(_crmIntelActiveId, "crm-intel-panel");
+  const topPanel = document.getElementById("intel-panel");
+  if (topPanel && topPanel.dataset.companyId) loadCompanyIntel(Number(topPanel.dataset.companyId), "intel-panel");
+  const emailModal = document.getElementById("email-modal");
+  if (emailModal && emailModal.classList.contains("open") && _modalContact) loadModalIntel(_modalContact);
+}
+
+const INTEL_SOURCE_LABELS = {
+  ai_suggested: "AI suggested",
+  user_confirmed: "Confirmed",
+  manual: "Manual",
+  needs_review: "Needs review",
+  rejected: "Rejected",
+};
+
+function initIntelligenceView() {
+  const langSel = document.getElementById("intel-lang-select");
+  if (langSel) {
+    langSel.value = intelLang();
+    langSel.addEventListener("change", () => {
+      try { localStorage.setItem("intel_lang", langSel.value); } catch (e) { /* ignore */ }
+      applyIntelLang();
+    });
+  }
+  document.querySelectorAll(".intel-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const which = tab.dataset.intelTab;
+      document.querySelectorAll(".intel-tab").forEach((t) => t.classList.toggle("active", t === tab));
+      document.querySelectorAll(".intel-tabpane").forEach((p) => {
+        p.style.display = p.dataset.intelPane === which ? "" : "none";
+      });
+      if (which === "matrix" && !_intelMatrix) loadSkqMatrix();
+      if (which === "duplicates") loadDuplicateCompanies();
+    });
+  });
+
+  const sel = document.getElementById("intel-company-select");
+  sel.addEventListener("change", (e) => {
+    const id = e.target.value;
+    if (id) loadCompanyIntel(Number(id));
+    else document.getElementById("intel-panel").innerHTML =
+      '<div style="color:#9ca3af;font-size:0.85rem;">Select a company to view and review its customer intelligence.</div>';
+  });
+  document.getElementById("intel-refresh-companies").addEventListener("click", loadIntelCompanies);
+
+  // Delegated handlers for the dynamically-rendered panel.
+  const panel = document.getElementById("intel-panel");
+  panel.addEventListener("click", onIntelPanelClick);
+  panel.addEventListener("change", onIntelPanelChange);
+
+  const mf = document.getElementById("intel-matrix-filter");
+  if (mf) mf.addEventListener("input", () => renderSkqMatrix(mf.value.trim().toLowerCase()));
+
+  // Lazy-load: only hit the API the first time the Intelligence view is opened
+  // (avoids error toasts on every page load before the DB is configured).
+  const navItem = document.querySelector('.app-nav-item[data-nav-view="intelligence"]');
+  if (navItem) navItem.addEventListener("click", intelEnsureLoaded);
+  let activeView = "search";
+  try { activeView = localStorage.getItem("app_active_view") || "search"; } catch (e) { /* ignore */ }
+  if (activeView === "intelligence") intelEnsureLoaded();
+}
+
+let _intelLoaded = false;
+function intelEnsureLoaded() {
+  if (_intelLoaded) return;
+  _intelLoaded = true;
+  loadIntelTaxonomy();
+  loadIntelCompanies();
+}
+
+async function loadIntelTaxonomy() {
+  if (_intelTaxonomy) return _intelTaxonomy;
+  try {
+    const r = await fetch("/api/taxonomy");
+    const d = await r.json();
+    if (d.ok) _intelTaxonomy = d.taxonomy;
+  } catch (e) { /* ignore — panel still renders present tags */ }
+  return _intelTaxonomy || [];
+}
+
+async function loadIntelCompanies() {
+  try {
+    const r = await fetch("/api/companies");
+    const d = await r.json();
+    const companies = d.companies || [];
+    const sel = document.getElementById("intel-company-select");
+    const cur = sel.value;
+    sel.innerHTML =
+      '<option value="">Select a company…</option>' +
+      companies.map((c) =>
+        `<option value="${c.id}">${escapeHtml(c.name)}${c.chinese_name ? " / " + escapeHtml(c.chinese_name) : ""}</option>`
+      ).join("");
+    if (cur) sel.value = cur;
+  } catch (e) {
+    showMessage("Failed to load companies: " + e.message, "error");
+  }
+}
+
+async function loadCompanyIntel(companyId, panelId = "intel-panel") {
+  _intelCompanyId = companyId;
+  _intelActivePanelId = panelId;
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+  panel.dataset.companyId = String(companyId);
+  panel.innerHTML = '<div style="color:#9ca3af;font-size:0.85rem;">Loading saved intelligence…</div>';
+  try {
+    await loadIntelTaxonomy();
+    // DB-first: this only reads saved data — it never triggers the AI.
+    const r = await fetch(`/api/companies/${companyId}/intelligence`);
+    const d = await r.json();
+    if (!d.ok) { panel.innerHTML = `<div class="msg-error">${escapeHtml(d.error || "Failed to load")}</div>`; return; }
+    renderCompanyIntel(d, panelId);
+  } catch (e) {
+    panel.innerHTML = `<div class="msg-error">Network error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function intelConfidencePct(conf) {
+  if (conf == null) return "";
+  return `<span class="ic-conf">${Math.round(conf * 100)}%</span>`;
+}
+
+function intelFmtDate(x) { return x ? new Date(x).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : ""; }
+
+function renderCompanyIntel(intel, panelId = "intel-panel") {
+  const c = intel.company || {};
+  const tags = intel.tags || [];
+  const sources = intel.sources || [];
+  const st = intel.status || {};
+  const companyCats = (_intelTaxonomy || []).filter((cat) => cat.applies_to === "company");
+
+  // group present tags by category_key
+  const byCat = {};
+  tags.forEach((t) => { (byCat[t.category_key] = byCat[t.category_key] || []).push(t); });
+  const missingCats = companyCats.filter((cat) => !(byCat[cat.key] || []).length);
+
+  // ── Status line (DB-first: shows what's saved and how fresh it is) ──
+  let statusBadge, statusStyle;
+  if (!st.analyzed) { statusBadge = "Not analyzed"; statusStyle = "background:#f3f4f6;color:#6b7280;"; }
+  else if (st.stale) { statusBadge = "Analysis stale"; statusStyle = "background:#fff7ed;color:#c2410c;"; }
+  else if (st.confirmed_count > 0) { statusBadge = "Saved · reviewed"; statusStyle = "background:#ecfdf5;color:#047857;"; }
+  else { statusBadge = "Saved · needs review"; statusStyle = "background:#fffbeb;color:#b45309;"; }
+
+  const analyzedLine = !st.analyzed
+    ? "Never analyzed by AI"
+    : st.analyzed_at
+      ? `Last analyzed ${intelFmtDate(st.analyzed_at)}${st.stale ? ` (older than ${st.review_period_days} days)` : ""}`
+      : "Previously analyzed (run Refresh to record the date)";
+  const reviewedLine = st.reviewed_at ? ` · Last reviewed ${intelFmtDate(st.reviewed_at)}` : "";
+
+  // Primary AI button: generate if never analyzed; otherwise a deliberate full refresh.
+  const primaryBtn = !st.analyzed
+    ? `<button class="btn-orange btn-sm" data-intel-action="research" data-mode="full">🔎 Generate AI Analysis</button>`
+    : `<button class="btn-orange btn-sm" data-intel-action="research" data-mode="full">🔄 Refresh AI Analysis</button>`;
+  const fillMissingBtn = (st.analyzed && missingCats.length)
+    ? `<button class="btn-ghost btn-sm" data-intel-action="research" data-mode="missing">✨ Fill ${missingCats.length} missing categor${missingCats.length === 1 ? "y" : "ies"}</button>`
+    : "";
+
+  let html = `
+    <div class="intel-section">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
+        <div>
+          <h3 style="margin-bottom:4px;">${escapeHtml(c.name || "")}${c.chinese_name ? ' <span style="font-weight:400;color:#6b7280;">' + escapeHtml(c.chinese_name) + "</span>" : ""}</h3>
+          <div style="font-size:0.78rem;color:#6b7280;">
+            ${c.industry ? escapeHtml(c.industry) + " · " : ""}
+            ${c.website ? `<a href="${escapeAttr(c.website)}" target="_blank" rel="noopener">${escapeHtml(c.website)}</a> · ` : ""}
+            ${st.tag_count || 0} tags · ${st.confirmed_count || 0} confirmed
+          </div>
+          <div style="font-size:0.74rem;color:#9ca3af;margin-top:3px;">${escapeHtml(analyzedLine)}${escapeHtml(reviewedLine)}</div>
+        </div>
+        <span style="font-size:0.72rem;font-weight:600;padding:3px 9px;border-radius:12px;white-space:nowrap;${statusStyle}">${statusBadge}</span>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+        ${primaryBtn}${fillMissingBtn}
+        <button class="btn-ghost btn-sm" data-intel-action="reviewed">✓ Mark Reviewed</button>
+      </div>
+      ${c.ai_research_summary
+        ? `<div style="margin-top:12px;"><div class="intel-cat-title">Business description (AI research)</div><div style="font-size:0.83rem;color:#374151;background:#f9fafb;border:1px solid #eef2f7;border-radius:6px;padding:10px 12px;">${escapeHtml(c.ai_research_summary)}</div></div>`
+        : ""}
+      <div class="intel-research-note" style="margin-top:8px;font-size:0.78rem;color:#9ca3af;"></div>
+    </div>`;
+
+  // ── Tags by category ──
+  html += `
+    <div class="intel-section">
+      <h3>Tags <span style="font-weight:400;font-size:0.75rem;color:#9ca3af;">— AI tags are used by default; confirm/reject to refine</span></h3>
+      <div class="intel-legend" style="margin-bottom:12px;">
+        <span><span class="dot" style="background:#fffbeb;border-color:#fcd34d;"></span>AI suggested</span>
+        <span><span class="dot" style="background:#ecfdf5;border-color:#6ee7b7;"></span>Confirmed</span>
+        <span><span class="dot" style="background:#eff6ff;border-color:#93c5fd;"></span>Manual</span>
+        <span><span class="dot" style="background:#fff7ed;border-color:#fdba74;"></span>Needs review</span>
+        <span><span class="dot" style="background:#f3f4f6;border-color:#d1d5db;"></span>Rejected</span>
+      </div>`;
+
+  companyCats.forEach((cat) => {
+    const present = byCat[cat.key] || [];
+    const presentValues = new Set(present.map((t) => t.value));
+    const chips = present.map((t) => {
+      const src = t.source || "ai_suggested";
+      return `<span class="intel-chip src-${src}" title="${escapeAttr(INTEL_SOURCE_LABELS[src] || src)}${t.confidence != null ? " · confidence " + Math.round(t.confidence * 100) + "%" : ""}${t.confirmed_by ? " · by " + t.confirmed_by : ""}">
+        ${escapeHtml(savedTagLabel(t))} ${intelConfidencePct(t.confidence)}
+        <button data-intel-action="confirm" data-tag-id="${t.tag_id}" title="Confirm">✓</button>
+        <button data-intel-action="reject" data-tag-id="${t.tag_id}" title="Reject">✕</button>
+        <button data-intel-action="remove" data-tag-id="${t.tag_id}" title="Remove">🗑</button>
+      </span>`;
+    }).join("");
+
+    const addable = (cat.tags || []).filter((tg) => !presentValues.has(tg.value));
+    const addSelect = addable.length
+      ? `<select class="intel-add" data-intel-add="${escapeAttr(cat.key)}">
+           <option value="">+ add…</option>
+           ${addable.map((tg) => `<option value="${escapeAttr(tg.value)}">${escapeHtml(taxTagLabel(tg))}</option>`).join("")}
+         </select>`
+      : "";
+
+    html += `
+      <div class="intel-cat">
+        <div class="intel-cat-title">${escapeHtml(catLabel(cat))}</div>
+        <div>${chips || '<span style="font-size:0.76rem;color:#cbd5e1;">none yet</span>'} ${addSelect}</div>
+      </div>`;
+  });
+  html += `</div>`;
+
+  // ── Recommended SKQ solutions / equipment / attachments (Phase 2) ──
+  html += `
+    <div class="intel-section">
+      <h3>Recommended SKQ Solutions & Equipment</h3>
+      <div style="font-size:0.8rem;color:#9ca3af;">Product/equipment matching is coming in Phase 2. Once tags here are confirmed, this will list matched SKQ modules, equipment, and recommended attachments — with the reason and confidence for each match — and those will feed contact targeting and email drafting.</div>
+    </div>`;
+
+  // ── Research sources ──
+  html += `
+    <div class="intel-section">
+      <h3>Research Sources</h3>
+      ${sources.length
+        ? '<ul style="margin:0;padding-left:18px;font-size:0.8rem;">' +
+            sources.map((s) => `<li><a href="${escapeAttr(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.title || s.url)}</a></li>`).join("") +
+          "</ul>"
+        : '<div style="font-size:0.8rem;color:#9ca3af;">No sources yet — run AI analysis to populate.</div>'}
+    </div>`;
+
+  const panel = document.getElementById(panelId);
+  if (panel) { panel.dataset.companyId = String(c.id || ""); panel.innerHTML = html; }
+}
+
+async function onIntelPanelClick(e) {
+  const btn = e.target.closest("[data-intel-action]");
+  if (!btn) return;
+  const panel = e.currentTarget;                 // the panel this handler is bound to
+  const panelId = panel.id;
+  const companyId = Number(panel.dataset.companyId);
+  if (!companyId) return;
+  const action = btn.dataset.intelAction;
+  const confirmedBy = (_sender && _sender.name) || undefined;
+  const note = () => panel.querySelector(".intel-research-note");
+
+  try {
+    if (action === "research") {
+      const mode = btn.dataset.mode === "full" ? "full" : "missing";
+      const key = `research:${companyId}:${mode}`;
+      if (_aiInFlight.has(key)) return;          // dedup: ignore repeat clicks
+      _aiInFlight.add(key);
+      const original = btn.textContent;
+      btn.disabled = true; btn.textContent = "Researching…";
+      const n = note();
+      if (n) n.textContent = "Researching with Claude web search — this can take 1–2 minutes. It keeps running server-side even if you navigate away; reopen the company to see results.";
+      try {
+        const r = await fetch(`/api/companies/${companyId}/research`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mode }),
+        });
+        const d = await r.json();
+        if (!d.ok) { showMessage("Research: " + (d.error || d.details || "failed"), "error"); btn.disabled = false; btn.textContent = original; return; }
+        renderCompanyIntel(d, panelId);
+        const res = d.research || {};
+        const n2 = note();
+        if (n2) {
+          if (res.skipped) n2.textContent = `Loaded from database — AI call avoided (0 tokens). Estimated saved: ${fmtTokens(res.saved_input)} in / ${fmtTokens(res.saved_output)} out. Use “Refresh AI Analysis” to re-run.`;
+          else {
+            const missing = (res.missing_info || []).length ? " Notes: " + res.missing_info.join("; ") : "";
+            const scope = res.mode === "missing" ? " (missing categories only)" : "";
+            n2.textContent = `New AI call — suggested ${res.suggested || 0} tag(s)${scope}, applied ${res.applied || 0}; ${res.skipped || 0} left untouched (protected/confirmed). Tokens: ${fmtTokens(res.input_tokens)} in / ${fmtTokens(res.output_tokens)} out.${missing}`;
+          }
+        }
+        refreshUsage();
+      } finally { _aiInFlight.delete(key); }
+      return;
+    }
+    if (action === "reviewed") {
+      await fetch(`/api/companies/${companyId}/reviewed`, { method: "POST" });
+      showMessage("Marked as reviewed.", "info");
+      loadCompanyIntel(companyId, panelId);
+      return;
+    }
+    const tagId = btn.dataset.tagId;
+    if (action === "remove") {
+      await fetch(`/api/companies/${companyId}/tags/${tagId}`, { method: "DELETE" });
+      loadCompanyIntel(companyId, panelId);
+      return;
+    }
+    if (action === "confirm" || action === "reject") {
+      const source = action === "confirm" ? "user_confirmed" : "rejected";
+      await fetch(`/api/companies/${companyId}/tags/status`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tagId: Number(tagId), source, confirmedBy }),
+      });
+      loadCompanyIntel(companyId, panelId);
+      return;
+    }
+  } catch (err) {
+    showMessage("Action failed: " + err.message, "error");
+  }
+}
+
+async function onIntelPanelChange(e) {
+  const sel = e.target.closest("[data-intel-add]");
+  if (!sel || !sel.value) return;
+  const panel = e.currentTarget;
+  const panelId = panel.id;
+  const companyId = Number(panel.dataset.companyId);
+  if (!companyId) return;
+  const categoryKey = sel.dataset.intelAdd;
+  const value = sel.value;
+  const confirmedBy = (_sender && _sender.name) || undefined;
+  try {
+    const r = await fetch(`/api/companies/${companyId}/tags/manual`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ categoryKey, value, confirmedBy }),
+    });
+    const d = await r.json();
+    if (!d.ok) { showMessage(d.error || "Failed to add tag", "error"); return; }
+    loadCompanyIntel(companyId, panelId);
+  } catch (err) {
+    showMessage("Add tag failed: " + err.message, "error");
+  }
+}
+
+/* ── SKQ capability matrix ── */
+
+async function loadSkqMatrix() {
+  const box = document.getElementById("intel-matrix");
+  box.innerHTML = '<div style="color:#9ca3af;font-size:0.85rem;">Loading matrix…</div>';
+  try {
+    const r = await fetch("/api/skq/matrix");
+    const d = await r.json();
+    if (!d.ok) { box.innerHTML = `<div class="msg-error">${escapeHtml(d.error || "Failed to load matrix")}</div>`; return; }
+    _intelMatrix = d;
+    const summary = document.getElementById("intel-matrix-summary");
+    if (summary) summary.textContent = `${d.modules.length} modules · ${d.systems.length} systems · ${d.equipment.length} equipment`;
+    renderSkqMatrix("");
+  } catch (e) {
+    box.innerHTML = `<div class="msg-error">Network error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// deterministic pastel hue per module for quick visual grouping
+function intelModuleHue(no) { return `hsl(${(Number(no) * 47) % 360}, 55%, 82%)`; }
+
+function renderSkqMatrix(filter) {
+  if (!_intelMatrix) return;
+  const box = document.getElementById("intel-matrix");
+  const term = (filter || "").toLowerCase();
+  const modulesById = {};
+  _intelMatrix.modules.forEach((m) => { modulesById[m.module_no] = m; });
+
+  const match = (e) => {
+    if (!term) return true;
+    return [e.name_en, e.name_cn, e.module_name_en, e.module_name_cn, e.system_name_en, e.department]
+      .filter(Boolean).some((s) => String(s).toLowerCase().includes(term));
+  };
+  const equipment = _intelMatrix.equipment.filter(match);
+
+  // group by module_no
+  const groups = {};
+  equipment.forEach((e) => { (groups[e.module_no] = groups[e.module_no] || []).push(e); });
+  const moduleNos = Object.keys(groups).map(Number).sort((a, b) => a - b);
+
+  if (!moduleNos.length) { box.innerHTML = '<div style="color:#9ca3af;font-size:0.85rem;">No equipment matches that filter.</div>'; return; }
+
+  let html = '<table class="intel-matrix-table"><thead><tr><th style="width:48px;">#</th><th>Equipment</th><th>System</th><th>Dept</th></tr></thead><tbody>';
+  moduleNos.forEach((no) => {
+    const m = modulesById[no] || {};
+    html += `<tr class="intel-mod-head"><td colspan="4">
+      <span class="intel-swatch" style="background:${intelModuleHue(no)};"></span>
+      ${no}. ${escapeHtml(skqLabel(m))}
+      ${m.color_name ? ` <span style="font-weight:400;color:#9ca3af;font-size:0.72rem;">(${escapeHtml(m.color_name)}${m.color_ral ? " " + escapeHtml(m.color_ral) : ""})</span>` : ""}
+    </td></tr>`;
+    groups[no].forEach((e) => {
+      html += `<tr>
+        <td style="color:#9ca3af;">${e.seq_no}</td>
+        <td>${escapeHtml(e.name_en || "")}${e.name_cn ? ` <span style="color:#9ca3af;">/ ${escapeHtml(e.name_cn)}</span>` : ""}</td>
+        <td style="color:#6b7280;">${e.system_no ? escapeHtml(e.system_name_en || "") : '<span style="color:#cbd5e1;">—</span>'}</td>
+        <td style="color:#6b7280;">${escapeHtml(e.department || "")}</td>
+      </tr>`;
+    });
+  });
+  html += "</tbody></table>";
+  box.innerHTML = html;
+}
+
+/* =======================================================================
+   Inline CRM "Company Intelligence" — per-company sub-tabs, shown below the
+   Search Companies area and above the contact filters. Reuses the same
+   renderCompanyIntel/onIntelPanel* logic, targeting the #crm-intel-panel.
+   DB-first: selecting/searching a company only LOADS saved intelligence;
+   the AI runs only when the user clicks Generate/Refresh/Fill.
+   ======================================================================= */
+
+let _crmIntelCompanies = []; // [{id, name}] — the open sub-tabs
+let _crmIntelActiveId = null;
+
+function initCrmIntel() {
+  const panel = document.getElementById("crm-intel-panel");
+  if (panel) {
+    panel.addEventListener("click", onIntelPanelClick);   // same handlers; keyed off panel.dataset.companyId
+    panel.addEventListener("change", onIntelPanelChange);
+  }
+  const subtabs = document.getElementById("crm-intel-subtabs");
+  if (subtabs) subtabs.addEventListener("click", onCrmIntelSubtabClick);
+  const add = document.getElementById("crm-intel-add");
+  if (add) add.addEventListener("change", () => {
+    const id = Number(add.value);
+    const opt = add.options[add.selectedIndex];
+    const name = opt ? opt.dataset.name : "";
+    add.value = "";
+    if (id) addCrmIntelCompany(id, name);
+  });
+  loadCrmIntelCompanyOptions();
+}
+
+async function loadCrmIntelCompanyOptions() {
+  try {
+    await loadIntelTaxonomy();
+    const r = await fetch("/api/companies");
+    const d = await r.json();
+    const add = document.getElementById("crm-intel-add");
+    if (!add) return;
+    add.innerHTML =
+      '<option value="">+ add company…</option>' +
+      (d.companies || []).map((c) =>
+        `<option value="${c.id}" data-name="${escapeAttr(c.name)}">${escapeHtml(c.name)}${c.chinese_name ? " / " + escapeHtml(c.chinese_name) : ""}</option>`
+      ).join("");
+  } catch (e) { /* ignore — search-driven flow still works */ }
+}
+
+function renderCrmIntelSubtabs() {
+  const bar = document.getElementById("crm-intel-subtabs");
+  const hint = document.getElementById("crm-intel-hint");
+  if (!bar) return;
+  if (!_crmIntelCompanies.length) { bar.innerHTML = ""; if (hint) hint.style.display = ""; return; }
+  if (hint) hint.style.display = "none";
+  bar.innerHTML = _crmIntelCompanies.map((co) =>
+    `<span class="intel-subtab ${co.id === _crmIntelActiveId ? "active" : ""}" data-co-id="${co.id}">
+       ${escapeHtml(co.name)}<span class="st-close" data-co-close="${co.id}" title="Remove tab">×</span>
+     </span>`).join("");
+}
+
+function addCrmIntelCompany(id, name) {
+  if (!_crmIntelCompanies.some((c) => c.id === id)) _crmIntelCompanies.push({ id, name: name || ("Company #" + id) });
+  selectCrmIntelCompany(id);
+}
+
+function selectCrmIntelCompany(id) {
+  _crmIntelActiveId = id;
+  renderCrmIntelSubtabs();
+  loadCompanyIntel(id, "crm-intel-panel");
+}
+
+function onCrmIntelSubtabClick(e) {
+  const close = e.target.closest("[data-co-close]");
+  if (close) {
+    e.stopPropagation();
+    const id = Number(close.dataset.coClose);
+    _crmIntelCompanies = _crmIntelCompanies.filter((c) => c.id !== id);
+    if (_crmIntelActiveId === id) {
+      _crmIntelActiveId = _crmIntelCompanies.length ? _crmIntelCompanies[0].id : null;
+      const panel = document.getElementById("crm-intel-panel");
+      if (_crmIntelActiveId) loadCompanyIntel(_crmIntelActiveId, "crm-intel-panel");
+      else if (panel) { panel.dataset.companyId = ""; panel.innerHTML = '<div style="color:#9ca3af;font-size:0.85rem;">No company selected.</div>'; }
+    }
+    renderCrmIntelSubtabs();
+    return;
+  }
+  const tab = e.target.closest("[data-co-id]");
+  if (tab) selectCrmIntelCompany(Number(tab.dataset.coId));
+}
+
+// After a company search completes, resolve each searched name to a saved
+// company id and open a sub-tab for it (loading saved intelligence, not AI).
+async function crmIntelFromSearch(companyNames) {
+  if (!companyNames || !companyNames.length) return;
+  try {
+    for (const name of companyNames) {
+      const r = await fetch("/api/companies?q=" + encodeURIComponent(name));
+      const d = await r.json();
+      const list = d.companies || [];
+      const exact = list.find((c) => (c.name || "").toLowerCase() === name.toLowerCase());
+      const co = exact || list[0];
+      if (co && !_crmIntelCompanies.some((c) => c.id === co.id)) _crmIntelCompanies.push({ id: co.id, name: co.name });
+    }
+    if (_crmIntelCompanies.length) {
+      if (!_crmIntelActiveId || !_crmIntelCompanies.some((c) => c.id === _crmIntelActiveId)) _crmIntelActiveId = _crmIntelCompanies[0].id;
+      renderCrmIntelSubtabs();
+      selectCrmIntelCompany(_crmIntelActiveId);
+    }
+    loadCrmIntelCompanyOptions();
+  } catch (e) { /* ignore */ }
+}
+
+/* =======================================================================
+   Draft Email modal ↔ Company Intelligence bridge. Loads the selected
+   contact's SAVED company tags (DB-first, no AI) and shows them in the
+   modal; the same confirmed tags are folded into the generation prompt
+   server-side. "View / Edit Tags" jumps to the inline CRM intel tab.
+   ======================================================================= */
+
+let _modalIntelCompany = null; // {id, name} for the View/Edit button
+
+async function loadModalIntel(contact) {
+  const wrap = document.getElementById("modal-intel");
+  const body = document.getElementById("modal-intel-body");
+  const badge = document.getElementById("modal-intel-badge");
+  _modalIntelCompany = null;
+  if (!wrap || !body) return;
+  if (badge) badge.textContent = "";
+
+  if (!contact || !contact.contact_id) { wrap.style.display = "none"; return; }  // ephemeral contact
+  wrap.style.display = "";
+  body.innerHTML = '<div style="font-size:0.8rem;color:#9ca3af;">Loading saved company intelligence…</div>';
+  try {
+    await loadIntelTaxonomy();
+    const r = await fetch(`/api/contacts/${contact.contact_id}/intelligence`);
+    const d = await r.json();
+    if (!d.ok) { wrap.style.display = "none"; return; }
+    _modalIntelCompany = d.company ? { id: d.company.id, name: d.company.name } : null;
+    renderModalIntel(d, contact);
+  } catch (e) {
+    body.innerHTML = `<div class="msg-error" style="font-size:0.8rem;">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// Mirror of db.tagTier — AI tags are usable by default, confidence-tiered.
+function clientTagTier(source, confidence) {
+  if (source === "user_confirmed") return { tier: "confirmed", label: "Confirmed", used: true };
+  if (source === "manual") return { tier: "manual", label: "Manual", used: true };
+  if (source === "rejected") return { tier: "rejected", label: "Rejected", used: false };
+  if (source === "needs_review") return { tier: "needs_review", label: "Needs review", used: false };
+  const c = confidence == null ? 0.8 : Number(confidence);
+  if (c >= 0.9) return { tier: "ai_confirmed", label: "Confirmed (AI)", used: true };
+  if (c >= 0.7) return { tier: "ai_suggested", label: "AI Suggested", used: true };
+  return { tier: "needs_review", label: "Needs review", used: false };
+}
+const TIER_CLASS = {
+  confirmed: "src-user_confirmed", manual: "src-manual", ai_confirmed: "src-user_confirmed",
+  ai_suggested: "src-ai_suggested", needs_review: "src-needs_review", rejected: "src-rejected",
+};
+
+let _modalIntelData = null;
+let _modalSelectedTagIds = new Set();
+
+function getModalIncludeTagIds() {
+  if (!_modalIntelData || !_modalIntelData.company) return undefined;
+  return [..._modalSelectedTagIds];
+}
+
+function tagCheckboxChip(t) {
+  const tr = clientTagTier(t.source, t.confidence);
+  if (tr.tier === "rejected") return "";
+  const checked = _modalSelectedTagIds.has(t.tag_id) ? "checked" : "";
+  const conf = t.confidence != null ? ` ${Math.round(t.confidence * 100)}%` : "";
+  return `<label class="intel-chip ${TIER_CLASS[tr.tier] || ""}" title="${escapeAttr(tr.label + conf)}">
+    <input type="checkbox" data-tag-id="${t.tag_id}" ${checked} style="margin:0 3px 0 0;vertical-align:middle;">
+    ${escapeHtml(savedTagLabel(t))} <span class="ic-conf">${escapeHtml(tr.label)}${conf}</span></label>`;
+}
+
+function updateModalIntelBadge() {
+  const badge = document.getElementById("modal-intel-badge");
+  if (!badge || !_modalIntelData) return;
+  const bd = (_modalIntelData.preview && _modalIntelData.preview.breakdown) || {};
+  const ai = (bd.ai_confirmed || 0) + (bd.ai_suggested || 0);
+  const total = _modalSelectedTagIds.size;
+  badge.textContent = `Using ${total} tag${total === 1 ? "" : "s"} — ${ai} AI · ${bd.confirmed || 0} confirmed · ${bd.manual || 0} manual`;
+}
+
+function renderModalIntel(d, contact) {
+  const body = document.getElementById("modal-intel-body");
+  const badge = document.getElementById("modal-intel-badge");
+  _modalIntelData = d;
+  const company = d.company;
+
+  if (!company) {
+    _modalSelectedTagIds = new Set();
+    if (badge) badge.textContent = "No company profile";
+    body.innerHTML = `<div style="font-size:0.82rem;color:#6b7280;">No saved company profile for <strong>${escapeHtml(contact.company || "this company")}</strong>. Use <strong>View / Edit Tags</strong> to run AI analysis — the tags are then used automatically in email generation (no confirmation needed).</div>`;
+    return;
+  }
+
+  const companyCats = (_intelTaxonomy || []).filter((c) => c.applies_to === "company");
+  const tags = d.tags || [];
+  const contactTags = d.contact_tags || [];
+  const allTags = [...tags, ...contactTags];
+  // Default selection = every non-rejected tag that is "used" by tier (AI ≥70% incl.)
+  _modalSelectedTagIds = new Set(allTags.filter((t) => clientTagTier(t.source, t.confidence).used).map((t) => t.tag_id));
+
+  const byCat = {};
+  tags.forEach((t) => { (byCat[t.category_key] = byCat[t.category_key] || []).push(t); });
+
+  let html = `<div style="font-size:0.76rem;color:#6b7280;margin-bottom:8px;">AI-generated tags are used by default. Uncheck any to exclude it from this email; confirm/edit in <strong>View / Edit Tags</strong>.</div>`;
+
+  companyCats.forEach((cat) => {
+    const present = (byCat[cat.key] || []).filter((t) => clientTagTier(t.source, t.confidence).tier !== "rejected");
+    if (!present.length) return;
+    html += `<div class="intel-cat"><div class="intel-cat-title">${escapeHtml(catLabel(cat))}</div><div>${present.map(tagCheckboxChip).join("")}</div></div>`;
+  });
+
+  const roleChips = contactTags.filter((t) => clientTagTier(t.source, t.confidence).tier !== "rejected").map(tagCheckboxChip).join("");
+  html += `<div class="intel-cat"><div class="intel-cat-title">Contact Role &amp; Department</div><div>
+      ${roleChips}
+      ${contact.department ? `<span class="intel-chip" style="background:#f8fafc;">${escapeHtml(contact.department)}</span>` : ""}
+      ${!roleChips && !contact.department ? '<span style="font-size:0.76rem;color:#cbd5e1;">none</span>' : ""}
+    </div></div>`;
+
+  // Real, deterministic SKQ grounding (auto-matched to tags, sent to the prompt)
+  const skq = (d.preview && d.preview.skq) || [];
+  html += `<div class="intel-cat"><div class="intel-cat-title">Recommended SKQ Capabilities <span style="font-weight:400;color:#9ca3af;">(auto-matched, sent to the prompt)</span></div>
+      <div>${skq.length ? skq.map((m) => `<span class="intel-chip" style="background:#eef2ff;border-color:#c7d2fe;">${escapeHtml(skqLabel(m))}</span>`).join("") : '<span style="font-size:0.76rem;color:#cbd5e1;">no direct SKQ match for these tags yet</span>'}</div>
+      <div style="font-size:0.74rem;color:#9ca3af;margin-top:4px;">Attachments are recommended in Phase 2, never auto-attached.</div></div>`;
+
+  const st = d.status || {};
+  const analyzed = st.analyzed_at ? `Last analyzed ${intelFmtDate(st.analyzed_at)}` : (st.analyzed ? "Previously analyzed" : "Not analyzed yet");
+  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:8px;flex-wrap:wrap;">
+      <span style="font-size:0.72rem;color:#9ca3af;">${escapeHtml(analyzed)} · ${st.tag_count || tags.length} company tags</span>
+      <button class="btn-sm btn-ghost" id="modal-intel-inspect" type="button">🔍 Prompt Inspector</button>
+    </div>`;
+
+  body.innerHTML = html;
+  updateModalIntelBadge();
+}
+
+/* ── Prompt Inspector (dev): preview the exact assembled prompt, 0 tokens ── */
+async function openPromptInspector() {
+  if (!_modalContact) return;
+  openModal("prompt-inspector-modal");
+  const body = document.getElementById("prompt-inspector-body");
+  body.innerHTML = '<div style="text-align:center;padding:24px 0;"><span class="spinner"></span> Building…</div>';
+  try {
+    const r = await fetch("/api/draft-email/inspect", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contact: _modalContact, sender: _sender, contactId: _modalContact.contact_id,
+        mode: _modalSelectedMode, extraInstructions: document.getElementById("modal-extra-instructions").value.trim(),
+        includeTagIds: getModalIncludeTagIds(),
+      }),
+    });
+    const d = await r.json();
+    if (!d.ok) { body.innerHTML = `<div class="msg-error">${escapeHtml(d.error || "Failed")}</div>`; return; }
+    renderPromptInspector(d);
+  } catch (e) { body.innerHTML = `<div class="msg-error">${escapeHtml(e.message)}</div>`; }
+}
+
+function renderPromptInspector(d) {
+  const body = document.getElementById("prompt-inspector-body");
+  const sec = (title, content) => `<div style="margin-bottom:10px;"><div class="intel-cat-title">${escapeHtml(title)}</div>
+      <div style="font-size:0.8rem;color:#374151;white-space:pre-wrap;background:#f9fafb;border:1px solid #eef2f7;border-radius:6px;padding:8px 10px;">${content ? escapeHtml(content) : '<span style="color:#9ca3af;">(none)</span>'}</div></div>`;
+  let html = `<div style="font-size:0.78rem;color:#6b7280;margin-bottom:10px;">Mode: <strong>${escapeHtml(d.mode)}</strong> · Tags used: <strong>${d.tags_used}</strong> · SKQ modules: <strong>${(d.skq_modules || []).length}</strong> · ${escapeHtml(d.prior_interactions || "no prior interactions")}</div>`;
+  html += sec("Company intelligence used (customer profile)", d.customer_profile);
+  html += sec("SKQ capabilities used", d.skq_capabilities);
+  if (d.company_notes) html += sec("Company notes", d.company_notes);
+  if (d.event_name) html += sec("Event", d.event_name);
+  if (d.extra_instructions) html += sec("Your extra instructions", d.extra_instructions);
+  html += `<div class="intel-cat-title" style="margin-top:6px;">Final prompt sent to Claude</div>
+      <pre style="font-size:0.74rem;white-space:pre-wrap;background:#0b1021;color:#d1d5db;border-radius:6px;padding:12px;max-height:340px;overflow:auto;">${escapeHtml(d.prompt || "")}</pre>`;
+  body.innerHTML = html;
+}
+
+// Header toggles the body; "View / Edit Tags" jumps to the CRM intel tab.
+(function wireModalIntel() {
+  const header = document.getElementById("modal-intel-header");
+  const body = document.getElementById("modal-intel-body");
+  const caret = document.getElementById("modal-intel-caret");
+  if (header && body) {
+    header.addEventListener("click", (e) => {
+      if (e.target.closest("#modal-intel-viewedit")) return; // button handled below
+      const open = body.style.display !== "none";
+      body.style.display = open ? "none" : "";
+      if (caret) caret.textContent = open ? "▸" : "▾";
+    });
+  }
+  const viewEdit = document.getElementById("modal-intel-viewedit");
+  if (viewEdit) {
+    viewEdit.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (!_modalIntelCompany) { showMessage("No saved company for this contact yet.", "warn"); return; }
+      const co = _modalIntelCompany;
+      if (typeof closeEmailModal === "function") closeEmailModal();
+      showView("crm");
+      addCrmIntelCompany(co.id, co.name);
+      document.getElementById("crm-intel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }
+  // Tag include/exclude checkboxes (Customize) + Prompt Inspector button.
+  if (body) {
+    body.addEventListener("change", (e) => {
+      const cb = e.target.closest("input[type=checkbox][data-tag-id]");
+      if (!cb) return;
+      const id = Number(cb.dataset.tagId);
+      if (cb.checked) _modalSelectedTagIds.add(id); else _modalSelectedTagIds.delete(id);
+      updateModalIntelBadge();
+    });
+    body.addEventListener("click", (e) => {
+      if (e.target.closest("#modal-intel-inspect")) openPromptInspector();
+    });
+  }
+})();
+
+document.getElementById("prompt-inspector-close").addEventListener("click", () => closeModal("prompt-inspector-modal"));
+document.getElementById("prompt-inspector-modal").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("prompt-inspector-modal")) closeModal("prompt-inspector-modal");
+});
+
+/* =======================================================================
+   AI Usage dashboard (left-nav "AI Usage"). KPIs + inline SVG charts +
+   feature/model/company breakdowns + paginated request audit log + CSV
+   export + budget config. All data from the persistent ai_usage_events.
+   ======================================================================= */
+
+let _aiuLoaded = false;
+let _aiuData = null;
+let _aiuEventsPage = 0;
+let _aiuFeatureFilter = "";
+const AIU_FEATURE_LABELS = {
+  company_research: "Company Intelligence", email_draft: "Email Drafting", contact_intel: "Contact Intelligence",
+  product_match: "Product Matching", attachment_rec: "Attachment Recs", email_classify: "Email Classification", other: "Other",
+};
+
+function initAiUsageDashboard() {
+  const nav = document.querySelector('.app-nav-item[data-nav-view="ai-usage"]');
+  if (nav) nav.addEventListener("click", () => loadAiUsage());
+  const period = document.getElementById("aiu-period");
+  if (period) period.addEventListener("change", () => {
+    const custom = period.value === "custom";
+    document.getElementById("aiu-from").style.display = custom ? "" : "none";
+    document.getElementById("aiu-to").style.display = custom ? "" : "none";
+    if (!custom) loadAiUsage();
+  });
+  document.getElementById("aiu-refresh") && document.getElementById("aiu-refresh").addEventListener("click", () => loadAiUsage());
+  const exp = document.getElementById("aiu-export");
+  if (exp) exp.addEventListener("click", (e) => { e.preventDefault(); window.open("/api/ai-usage/export.csv?" + aiuQuery(), "_blank"); });
+  // Footer AI/Claude labels open the dashboard.
+  document.querySelectorAll("#usage-bar .u-label").forEach((el) => {
+    if (el.textContent === "AI" || el.textContent === "Claude") {
+      el.style.cursor = "pointer"; el.title = "Open AI Usage dashboard";
+      el.addEventListener("click", () => { showView("ai-usage"); loadAiUsage(); });
+    }
+  });
+  let active = "search"; try { active = localStorage.getItem("app_active_view") || "search"; } catch (e) { /* ignore */ }
+  if (active === "ai-usage") loadAiUsage();
+}
+
+function aiuQuery() {
+  const period = document.getElementById("aiu-period").value;
+  const p = new URLSearchParams({ period });
+  if (period === "custom") {
+    const f = document.getElementById("aiu-from").value, t = document.getElementById("aiu-to").value;
+    if (f) p.set("from", f); if (t) p.set("to", t);
+  }
+  if (_aiuFeatureFilter) p.set("feature", _aiuFeatureFilter);
+  return p.toString();
+}
+
+async function loadAiUsage() {
+  _aiuLoaded = true;
+  const body = document.getElementById("aiu-body");
+  body.innerHTML = '<div style="text-align:center;padding:32px 0;"><span class="spinner"></span> Loading…</div>';
+  try {
+    const r = await fetch("/api/ai-usage?" + aiuQuery());
+    const d = await r.json();
+    if (!d.ok) { body.innerHTML = `<div class="msg-error">${escapeHtml(d.error || "Failed")}</div>`; return; }
+    _aiuData = d;
+    renderAiUsageDashboard(d);
+    _aiuEventsPage = 0;
+    loadAiUsageEvents();
+  } catch (e) { body.innerHTML = `<div class="msg-error">${escapeHtml(e.message)}</div>`; }
+}
+
+function aiuBucketLabel(x) {
+  const dt = new Date(x);
+  return isNaN(dt) ? "" : dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+function svgBars(series, key, color, fmt) {
+  if (!series || !series.length) return '<div style="color:#9ca3af;font-size:0.78rem;padding:20px 0;">No data in range</div>';
+  const vals = series.map((s) => Number(s[key]) || 0);
+  const max = Math.max(1, ...vals);
+  const h = 96, gap = 3, bw = Math.max(4, Math.min(40, Math.floor(560 / series.length) - gap));
+  const w = series.length * (bw + gap);
+  const bars = series.map((s, i) => {
+    const v = Number(s[key]) || 0;
+    const bh = Math.round((v / max) * (h - 16));
+    const x = i * (bw + gap);
+    return `<rect x="${x}" y="${h - bh - 12}" width="${bw}" height="${bh}" rx="1.5" fill="${color}"><title>${escapeAttr(aiuBucketLabel(s.bucket) + " · " + (fmt ? fmt(v) : v))}</title></rect>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${Math.max(w, 60)} ${h}" preserveAspectRatio="none" style="width:100%;height:96px;">${bars}</svg>`;
+}
+function aiuKpiCard(label, value, sub) {
+  return `<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;background:#fff;">
+      <div style="font-size:0.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.03em;">${escapeHtml(label)}</div>
+      <div style="font-size:1.15rem;font-weight:700;color:#111827;margin-top:3px;">${value}</div>
+      ${sub ? `<div style="font-size:0.72rem;color:#9ca3af;margin-top:1px;">${sub}</div>` : ""}</div>`;
+}
+function usd(x) { return "$" + Number(x || 0).toFixed(2); }
+function usd4(x) { return "$" + Number(x || 0).toFixed(4); }
+
+function renderAiUsageDashboard(d) {
+  const k = d.kpis || {};
+  const b = d.budget || {};
+  const bs = d.budget_status || {};
+
+  let html = "";
+
+  // KPI cards
+  html += `<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px;">
+    ${aiuKpiCard("Total tokens", fmtTokens(k.total_tokens), `${fmtTokens(k.input_tokens)} in / ${fmtTokens(k.output_tokens)} out`)}
+    ${aiuKpiCard("Total AI cost", usd(k.cost_usd), `${k.new_calls || 0} billable calls`)}
+    ${aiuKpiCard("Tokens saved", fmtTokens(k.saved_total), usd(k.saved_cost_usd) + " saved")}
+    ${aiuKpiCard("AI requests", fmtTokens(k.requests), `${k.new_calls || 0} new · ${k.reuses || 0} reuse`)}
+    ${aiuKpiCard("Reuse rate", Math.round((k.reuse_rate || 0) * 100) + "%", "DB/cache-first")}
+    ${aiuKpiCard("Avg cost / call", usd4(k.avg_cost_usd), "per new AI call")}
+    ${aiuKpiCard("Avg latency", k.avg_response_ms != null ? k.avg_response_ms + " ms" : "—", "AI response time")}
+    ${aiuKpiCard("Failures", fmtTokens(k.failures), Math.round((k.failure_rate || 0) * 100) + "% fail rate")}
+    ${aiuKpiCard("Input tokens", fmtTokens(k.input_tokens), "")}
+    ${aiuKpiCard("Output tokens", fmtTokens(k.output_tokens), "")}
+  </div>`;
+
+  // Budget status bar
+  if (b.daily_cost_budget || b.monthly_cost_budget || b.daily_token_budget || b.monthly_token_budget) {
+    const chip = (label, pct) => {
+      const over = pct >= 100, warn = pct >= (bs.warn_threshold_pct || 80);
+      const col = over ? "#dc2626" : warn ? "#c2410c" : "#059669";
+      return `<span style="font-size:0.78rem;color:#374151;margin-right:16px;">${label}: <b style="color:${col};">${pct}%</b></span>`;
+    };
+    html += `<div style="border:1px solid #eef2f7;background:#f9fafb;border-radius:8px;padding:8px 12px;margin-bottom:16px;">
+      ${b.daily_cost_budget ? chip("Daily cost", bs.daily_cost_pct) : ""}
+      ${b.monthly_cost_budget ? chip("Monthly cost", bs.monthly_cost_pct) : ""}
+      ${b.daily_token_budget ? chip("Daily tokens", bs.daily_token_pct) : ""}
+      ${b.monthly_token_budget ? chip("Monthly tokens", bs.monthly_token_pct) : ""}
+      <span style="font-size:0.72rem;color:#9ca3af;">${b.hard_limit ? "Hard limit ON (blocks at 100%)" : "Warn-only (never blocks)"}</span>
+    </div>`;
+  }
+
+  // Charts
+  const ch = (title, svg) => `<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;">
+      <div style="font-size:0.78rem;font-weight:600;color:#374151;margin-bottom:8px;">${escapeHtml(title)}</div>${svg}</div>`;
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+    ${ch("Total tokens over time", svgBars(d.timeseries, "total_tokens", "#2563eb", fmtTokens))}
+    ${ch("AI cost over time", svgBars(d.timeseries, "cost_usd", "#7c3aed", (v) => usd(v)))}
+    ${ch("Requests over time (new vs reuse)", svgBars(d.timeseries, "requests", "#0891b2", fmtTokens))}
+    ${ch("Tokens saved over time", svgBars(d.timeseries, "saved_total", "#059669", fmtTokens))}
+  </div>`;
+
+  // Feature breakdown (click to drill into audit)
+  html += `<h3 style="font-size:0.9rem;margin:6px 0 6px;">By feature <span style="font-weight:400;font-size:0.74rem;color:#9ca3af;">(click a row to filter the request log)</span></h3>
+    <div style="overflow-x:auto;"><table class="intel-matrix-table" style="min-width:720px;margin-bottom:16px;"><thead><tr>
+      <th>Feature</th><th>Requests</th><th>In</th><th>Out</th><th>Total</th><th>Cost</th><th>Saved</th><th>Avg latency</th><th>Fail%</th></tr></thead><tbody>`;
+  (d.by_feature || []).forEach((f) => {
+    const fail = f.requests ? Math.round((f.failures / f.requests) * 100) : 0;
+    html += `<tr style="cursor:pointer;" data-aiu-feature="${escapeAttr(f.feature)}">
+      <td><strong>${escapeHtml(AIU_FEATURE_LABELS[f.feature] || f.feature)}</strong></td>
+      <td>${f.requests}</td><td>${fmtTokens(f.input_tokens)}</td><td>${fmtTokens(f.output_tokens)}</td>
+      <td>${fmtTokens(f.total_tokens)}</td><td>${usd(f.cost_usd)}</td>
+      <td style="color:#059669;">${fmtTokens(f.saved_total)} (${usd(f.saved_cost_usd)})</td>
+      <td>${f.avg_response_ms != null ? Math.round(f.avg_response_ms) + " ms" : "—"}</td><td>${fail}%</td></tr>`;
+  });
+  if (!(d.by_feature || []).length) html += `<tr><td colspan="9" style="color:#9ca3af;">No AI usage in range.</td></tr>`;
+  html += `</tbody></table></div>`;
+
+  // By model + by company side by side
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+    <div><h3 style="font-size:0.9rem;margin:0 0 6px;">By model</h3><table class="intel-matrix-table"><thead><tr><th>Model</th><th>Requests</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>
+      ${(d.by_model || []).map((m) => `<tr><td>${escapeHtml(m.model)}</td><td>${m.requests}</td><td>${fmtTokens(m.total_tokens)}</td><td>${usd(m.cost_usd)}</td></tr>`).join("") || '<tr><td colspan="4" style="color:#9ca3af;">—</td></tr>'}
+    </tbody></table></div>
+    <div><h3 style="font-size:0.9rem;margin:0 0 6px;">Top companies</h3><table class="intel-matrix-table"><thead><tr><th>Company</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>
+      ${(d.by_company || []).map((c) => `<tr><td>${escapeHtml(c.company_name || ("#" + c.company_id))}</td><td>${c.new_calls}</td><td>${fmtTokens(c.total_tokens)}</td><td>${usd(c.cost_usd)}</td></tr>`).join("") || '<tr><td colspan="4" style="color:#9ca3af;">—</td></tr>'}
+    </tbody></table></div>
+  </div>`;
+
+  // Request audit log container
+  html += `<h3 style="font-size:0.9rem;margin:6px 0 6px;display:flex;justify-content:space-between;align-items:center;">
+      <span>Request log ${_aiuFeatureFilter ? `— <span style="color:#2563eb;">${escapeHtml(AIU_FEATURE_LABELS[_aiuFeatureFilter] || _aiuFeatureFilter)}</span> <a href="#" id="aiu-clear-feature" style="font-size:0.74rem;">(clear)</a>` : ""}</span>
+      <span style="font-size:0.74rem;font-weight:400;color:#9ca3af;">no prompts or email content shown</span>
+    </h3>
+    <div id="aiu-audit"><div style="color:#9ca3af;font-size:0.8rem;">Loading requests…</div></div>`;
+
+  // Budget config
+  html += `<h3 style="font-size:0.9rem;margin:16px 0 6px;">Budgets &amp; limits</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;font-size:0.8rem;">
+      <label>Daily cost budget (USD)<input type="number" step="0.01" id="aib-daily-cost" value="${b.daily_cost_budget || 0}" class="aib-inp"></label>
+      <label>Monthly cost budget (USD)<input type="number" step="0.01" id="aib-monthly-cost" value="${b.monthly_cost_budget || 0}" class="aib-inp"></label>
+      <label>Per-user/day cost (USD)<input type="number" step="0.01" id="aib-user-cost" value="${b.per_user_cost_budget || 0}" class="aib-inp"></label>
+      <label>Daily token budget<input type="number" id="aib-daily" value="${b.daily_token_budget || 0}" class="aib-inp"></label>
+      <label>Monthly token budget<input type="number" id="aib-monthly" value="${b.monthly_token_budget || 0}" class="aib-inp"></label>
+      <label>Warn threshold (%)<input type="number" id="aib-warn" value="${b.warn_threshold_pct || 80}" class="aib-inp"></label>
+      <label>Max tokens / request<input type="number" id="aib-maxreq" value="${b.max_tokens_per_request || 0}" class="aib-inp"></label>
+      <label>Max cost / request (USD)<input type="number" step="0.01" id="aib-maxcost" value="${b.max_cost_per_request || 0}" class="aib-inp"></label>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:18px;"><input type="checkbox" id="aib-hard" ${b.hard_limit ? "checked" : ""}> Hard limit (block at 100%)</label>
+    </div>
+    <label style="display:block;font-size:0.8rem;margin-top:8px;"><input type="checkbox" id="aib-autooff" ${b.auto_refresh_disabled ? "checked" : ""}> Disable automatic AI refreshes</label>
+    <button class="btn-sm btn-orange" id="aib-save" style="margin-top:10px;">Save budgets</button>
+    <div style="font-size:0.72rem;color:#9ca3af;margin-top:6px;">0 = unlimited. Warn-only unless "Hard limit" is enabled.</div>`;
+
+  const body = document.getElementById("aiu-body");
+  body.innerHTML = html;
+  document.querySelector('style#aib-style') || (function () {
+    const st = document.createElement("style"); st.id = "aib-style";
+    st.textContent = ".aib-inp{width:100%;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;} #aiu-body label{display:block;color:#6b7280;}";
+    document.head.appendChild(st);
+  })();
+
+  // wire feature drilldown
+  document.querySelectorAll("[data-aiu-feature]").forEach((row) => {
+    row.addEventListener("click", () => { _aiuFeatureFilter = row.dataset.aiuFeature; _aiuEventsPage = 0; renderAiUsageDashboard(_aiuData); loadAiUsageEvents(); });
+  });
+  const clr = document.getElementById("aiu-clear-feature");
+  if (clr) clr.addEventListener("click", (e) => { e.preventDefault(); _aiuFeatureFilter = ""; _aiuEventsPage = 0; renderAiUsageDashboard(_aiuData); loadAiUsageEvents(); });
+  document.getElementById("aib-save").addEventListener("click", saveAiBudgetDashboard);
+}
+
+async function loadAiUsageEvents() {
+  const box = document.getElementById("aiu-audit");
+  if (!box) return;
+  const limit = 25;
+  const params = new URLSearchParams({ period: document.getElementById("aiu-period").value, limit, offset: _aiuEventsPage * limit });
+  if (document.getElementById("aiu-period").value === "custom") {
+    const f = document.getElementById("aiu-from").value, t = document.getElementById("aiu-to").value;
+    if (f) params.set("from", f); if (t) params.set("to", t);
+  }
+  if (_aiuFeatureFilter) params.set("feature", _aiuFeatureFilter);
+  try {
+    const r = await fetch("/api/ai-usage/events?" + params.toString());
+    const d = await r.json();
+    if (!d.ok) { box.innerHTML = `<div class="msg-error">${escapeHtml(d.error || "Failed")}</div>`; return; }
+    let html = `<div style="overflow-x:auto;"><table class="intel-matrix-table" style="min-width:820px;"><thead><tr>
+      <th>Time</th><th>Feature</th><th>Type</th><th>Status</th><th>Model</th><th>In</th><th>Out</th><th>Total</th><th>Cost</th><th>ms</th><th>User</th><th>Company</th></tr></thead><tbody>`;
+    (d.rows || []).forEach((e) => {
+      const statusColor = e.status === "error" ? "#dc2626" : "#059669";
+      html += `<tr>
+        <td style="white-space:nowrap;">${escapeHtml(new Date(e.created_at).toLocaleString())}</td>
+        <td>${escapeHtml(AIU_FEATURE_LABELS[e.feature] || e.feature)}${e.sub_feature ? ` <span style="color:#9ca3af;">/${escapeHtml(e.sub_feature)}</span>` : ""}</td>
+        <td>${escapeHtml(e.request_type || e.outcome || "")}</td>
+        <td style="color:${statusColor};">${escapeHtml(e.status || "")}</td>
+        <td>${escapeHtml(e.model || "—")}</td>
+        <td>${fmtTokens(e.input_tokens)}</td><td>${fmtTokens(e.output_tokens)}</td><td>${fmtTokens(e.total_tokens)}</td>
+        <td>${usd4(e.cost_usd)}</td><td>${e.response_ms != null ? e.response_ms : "—"}</td>
+        <td>${escapeHtml(e.user_id || "—")}</td><td>${escapeHtml(e.company_name || (e.company_id ? "#" + e.company_id : "—"))}</td></tr>`;
+    });
+    if (!(d.rows || []).length) html += `<tr><td colspan="12" style="color:#9ca3af;">No requests.</td></tr>`;
+    html += `</tbody></table></div>`;
+    const pages = Math.ceil((d.total || 0) / limit);
+    html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-size:0.78rem;color:#6b7280;">
+      <span>${d.total || 0} requests</span>
+      <span>
+        <button class="btn-sm btn-ghost" id="aiu-prev" ${_aiuEventsPage <= 0 ? "disabled" : ""}>‹ Prev</button>
+        Page ${_aiuEventsPage + 1} / ${Math.max(1, pages)}
+        <button class="btn-sm btn-ghost" id="aiu-next" ${_aiuEventsPage >= pages - 1 ? "disabled" : ""}>Next ›</button>
+      </span></div>`;
+    box.innerHTML = html;
+    const prev = document.getElementById("aiu-prev"), next = document.getElementById("aiu-next");
+    if (prev) prev.addEventListener("click", () => { if (_aiuEventsPage > 0) { _aiuEventsPage--; loadAiUsageEvents(); } });
+    if (next) next.addEventListener("click", () => { _aiuEventsPage++; loadAiUsageEvents(); });
+  } catch (e) { box.innerHTML = `<div class="msg-error">${escapeHtml(e.message)}</div>`; }
+}
+
+async function saveAiBudgetDashboard() {
+  const num = (id) => document.getElementById(id).value;
+  const payload = {
+    daily_cost_budget: num("aib-daily-cost"), monthly_cost_budget: num("aib-monthly-cost"), per_user_cost_budget: num("aib-user-cost"),
+    daily_token_budget: num("aib-daily"), monthly_token_budget: num("aib-monthly"),
+    warn_threshold_pct: num("aib-warn"), max_tokens_per_request: num("aib-maxreq"), max_cost_per_request: num("aib-maxcost"),
+    hard_limit: document.getElementById("aib-hard").checked,
+    auto_refresh_disabled: document.getElementById("aib-autooff").checked,
+  };
+  try {
+    const r = await fetch("/api/ai-usage/budget", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    const d = await r.json();
+    if (d.ok) { showMessage("Budgets saved.", "info"); loadAiUsage(); }
+    else showMessage(d.error || "Failed to save", "error");
+  } catch (e) { showMessage("Save failed: " + e.message, "error"); }
+}
+
+/* ── Duplicate-company consolidation (Intelligence → Duplicate companies tab).
+   Moves intelligence onto the row that has the contacts, so one company keeps
+   one profile shared by all its contacts. ── */
+async function loadDuplicateCompanies() {
+  const box = document.getElementById("intel-duplicates");
+  if (!box) return;
+  box.innerHTML = '<div style="color:#9ca3af;font-size:0.85rem;">Loading…</div>';
+  try {
+    const r = await fetch("/api/companies/duplicates");
+    const d = await r.json();
+    if (!d.ok) { box.innerHTML = `<div class="msg-error">${escapeHtml(d.error || "Failed")}</div>`; return; }
+    renderDuplicateCompanies(d.duplicates || []);
+  } catch (e) { box.innerHTML = `<div class="msg-error">${escapeHtml(e.message)}</div>`; }
+}
+
+function renderDuplicateCompanies(rows) {
+  const box = document.getElementById("intel-duplicates");
+  const groups = {};
+  rows.forEach((r) => { (groups[r.name_key] = groups[r.name_key] || []).push(r); });
+  const keys = Object.keys(groups).filter((k) => groups[k].length > 1);
+  if (!keys.length) {
+    box.innerHTML = '<div style="color:#059669;font-size:0.85rem;">No duplicate companies — every company has a single row. 🎉</div>';
+    return;
+  }
+  let html = "";
+  keys.forEach((k) => {
+    const g = groups[k].slice().sort((a, b) => b.contact_count - a.contact_count || b.tag_count - a.tag_count);
+    const target = g[0];
+    html += `<div class="intel-section"><h3 style="margin-bottom:6px;">${escapeHtml(target.name)} <span style="font-weight:400;color:#9ca3af;font-size:0.75rem;">— ${g.length} rows share this name</span></h3>
+      <table class="intel-matrix-table" style="margin-bottom:8px;"><thead><tr><th>Row</th><th>Tags</th><th>Contacts</th><th></th></tr></thead><tbody>`;
+    g.forEach((r) => {
+      const isTarget = r.id === target.id;
+      html += `<tr><td>#${r.id} ${escapeHtml(r.name)}${isTarget ? ' <span style="color:#2563eb;font-weight:600;">← keep (has contacts)</span>' : ''}</td>
+        <td>${r.tag_count}</td><td>${r.contact_count}</td>
+        <td>${isTarget ? '' : `<button class="btn-sm btn-ghost" data-merge-from="${r.id}" data-merge-to="${target.id}">Merge → #${target.id}</button>`}</td></tr>`;
+    });
+    html += `</tbody></table>
+      <button class="btn-sm btn-orange" data-consolidate="${escapeAttr(k)}">Consolidate all into #${target.id}</button></div>`;
+  });
+  box.innerHTML = html;
+
+  box.querySelectorAll("[data-merge-from]").forEach((b) =>
+    b.addEventListener("click", () => mergeDupCompany(Number(b.dataset.mergeFrom), Number(b.dataset.mergeTo))));
+  box.querySelectorAll("[data-consolidate]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const g = groups[b.dataset.consolidate].slice().sort((a, c) => c.contact_count - a.contact_count || c.tag_count - a.tag_count);
+      const target = g[0];
+      let moved = 0;
+      for (const r of g.slice(1)) { const d = await doMergeCompany(r.id, target.id); moved += (d.moved_tags || 0); }
+      showMessage(`Consolidated into #${target.id} (${moved} tag(s) moved).`, "info");
+      loadDuplicateCompanies();
+    }));
+}
+
+async function doMergeCompany(from, to) {
+  const r = await fetch(`/api/companies/${to}/merge-intelligence`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ from }),
+  });
+  return r.json();
+}
+async function mergeDupCompany(from, to) {
+  try {
+    const d = await doMergeCompany(from, to);
+    if (d.ok) { showMessage(`Merged ${d.moved_tags || 0} tag(s) into #${to}.`, "info"); loadDuplicateCompanies(); }
+    else showMessage(d.error || "Merge failed", "error");
+  } catch (e) { showMessage("Merge failed: " + e.message, "error"); }
+}

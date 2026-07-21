@@ -643,6 +643,39 @@
       font-size: 0.72rem; cursor: pointer; transition: background 0.15s;
     }
     #usage-bar .u-reset:hover { background: #243d5c; color: #fff; }
+
+    /* ── Customer Intelligence view ── */
+    .intel-tabs { display:flex; gap:6px; border-bottom:1px solid #e5e7eb; margin-bottom:16px; }
+    .intel-tab { background:none; border:none; padding:8px 14px; font-size:0.9rem; color:#6b7280; cursor:pointer; border-bottom:2px solid transparent; }
+    .intel-tab.active { color:#2563eb; border-bottom-color:#2563eb; font-weight:600; }
+    .intel-section { border:1px solid #e5e7eb; border-radius:8px; padding:14px 16px; margin-bottom:14px; }
+    .intel-section h3 { font-size:0.9rem; margin:0 0 10px; color:#111827; }
+    .intel-cat { margin-bottom:12px; }
+    .intel-cat-title { font-size:0.78rem; font-weight:600; color:#374151; margin-bottom:6px; }
+    .intel-chip { display:inline-flex; align-items:center; gap:6px; padding:3px 8px; border-radius:14px; font-size:0.78rem; margin:0 6px 6px 0; border:1px solid #d1d5db; background:#fff; }
+    .intel-chip .ic-conf { font-size:0.68rem; color:#9ca3af; }
+    .intel-chip button { border:none; background:none; cursor:pointer; font-size:0.74rem; color:#6b7280; padding:0 1px; line-height:1; }
+    .intel-chip button:hover { color:#111827; }
+    .intel-chip.src-user_confirmed { background:#ecfdf5; border-color:#6ee7b7; }
+    .intel-chip.src-manual { background:#eff6ff; border-color:#93c5fd; }
+    .intel-chip.src-ai_suggested { background:#fffbeb; border-color:#fcd34d; }
+    .intel-chip.src-needs_review { background:#fff7ed; border-color:#fdba74; }
+    .intel-chip.src-rejected { background:#f3f4f6; border-color:#d1d5db; color:#9ca3af; text-decoration:line-through; }
+    .intel-legend span { font-size:0.72rem; margin-right:14px; color:#6b7280; }
+    .intel-legend .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; vertical-align:middle; border:1px solid #d1d5db; }
+    .intel-add { font-size:0.74rem; padding:3px 6px; border:1px dashed #cbd5e1; border-radius:6px; background:#fff; color:#475569; }
+    .intel-matrix-table { width:100%; border-collapse:collapse; }
+    .intel-matrix-table th, .intel-matrix-table td { font-size:0.78rem; text-align:left; padding:6px 8px; border-bottom:1px solid #f0f0f0; }
+    .intel-matrix-table th { color:#6b7280; font-weight:600; }
+    .intel-mod-head td { background:#f9fafb; font-weight:600; color:#111827; }
+    .intel-swatch { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:middle; border:1px solid rgba(0,0,0,0.15); }
+    /* inline CRM Company Intelligence sub-tabs */
+    .intel-subtabs { display:flex; gap:4px; flex-wrap:wrap; margin:10px 0 0; }
+    .intel-subtab { display:inline-flex; align-items:center; gap:8px; padding:5px 12px; border:1px solid #d1d5db; border-bottom:none; border-radius:8px 8px 0 0; background:#f3f4f6; cursor:pointer; font-size:0.82rem; color:#374151; }
+    .intel-subtab.active { background:#fff; color:#2563eb; font-weight:600; border-color:#2563eb; position:relative; top:1px; }
+    .intel-subtab .st-close { color:#9ca3af; font-size:0.95rem; line-height:1; }
+    .intel-subtab .st-close:hover { color:#ef4444; }
+    #crm-intel-panel { border:1px solid #e5e7eb; border-radius:0 8px 8px 8px; padding:14px; background:#fdfdfd; }
   </style>
 </head>
 <body>
@@ -659,6 +692,12 @@
       </div>
       <div class="app-nav-item" data-nav-view="crm" title="CRM">
         <span class="app-nav-icon">🗂️</span><span class="app-nav-label">CRM</span>
+      </div>
+      <div class="app-nav-item" data-nav-view="intelligence" title="Customer Intelligence">
+        <span class="app-nav-icon">🧭</span><span class="app-nav-label">Intelligence</span>
+      </div>
+      <div class="app-nav-item" data-nav-view="ai-usage" title="AI Usage & Cost">
+        <span class="app-nav-icon">📊</span><span class="app-nav-label">AI Usage</span>
       </div>
       <div class="app-nav-item" data-nav-view="settings" title="Settings">
         <span class="app-nav-icon">⚙️</span><span class="app-nav-label">Settings</span>
@@ -705,6 +744,16 @@
         <label for="sender-company">Your Company</label>
         <input type="text" id="sender-company" placeholder="e.g. Acme Energy Solutions" />
       </div>
+    </div>
+
+    <div class="card-title" style="margin-top:20px;">Display language <span style="font-weight:400;font-size:0.82rem;color:#9ca3af">显示语言 — how tags are shown throughout Company Intelligence</span></div>
+    <div>
+      <select id="intel-lang-select" style="padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff;min-width:260px;">
+        <option value="bilingual">Bilingual 双语 — English（中文）</option>
+        <option value="en">English only</option>
+        <option value="zh">中文 only</option>
+      </select>
+      <div style="font-size:0.78rem;color:#9ca3af;margin-top:6px;">The AI always receives the English tag names for consistency; this only changes what you see.</div>
     </div>
   </div>
 
@@ -797,6 +846,21 @@
           <div class="search-dept-label">Target Departments <span style="color:#9ca3af;font-weight:400;">(optional — leave blank for the default executive + specialist set)</span></div>
           <div id="search-dept-checkboxes" class="search-checkbox-grid"></div>
         </div>
+      </div>
+
+      <!-- ── Company Intelligence: per searched/selected company, below search & above filters ── -->
+      <div id="crm-intel" class="card-sub" style="margin-bottom:16px;">
+        <div class="card-sub-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <span>Company Intelligence</span>
+          <span style="display:flex;align-items:center;gap:8px;">
+            <select id="crm-intel-add" class="intel-add" title="Add a company to review">
+              <option value="">+ add company…</option>
+            </select>
+            <span id="crm-intel-hint" style="font-size:0.72rem;color:#9ca3af;font-weight:400;">Search or add a company to review its profile</span>
+          </span>
+        </div>
+        <div id="crm-intel-subtabs" class="intel-subtabs"></div>
+        <div id="crm-intel-panel"><div style="color:#9ca3af;font-size:0.85rem;">No company selected. Search a company above, or use “+ add company”, then review and confirm its tags here before working the contacts.</div></div>
       </div>
 
       <div class="crm-flex-wrap">
@@ -919,6 +983,70 @@
 
       </div><!-- /crm-flex-wrap -->
     </div>
+  </div>
+
+  <!-- ── Customer Intelligence view ── -->
+  <div class="card view-hidden" data-view="intelligence">
+    <div class="card-title">Customer Intelligence</div>
+    <div class="intel-tabs">
+      <button type="button" class="intel-tab active" data-intel-tab="companies">Companies</button>
+      <button type="button" class="intel-tab" data-intel-tab="matrix">SKQ Capability Matrix</button>
+      <button type="button" class="intel-tab" data-intel-tab="duplicates">Duplicate companies</button>
+    </div>
+
+    <div class="intel-tabpane" data-intel-pane="companies">
+      <div class="search-row" style="margin-bottom:14px;max-width:560px;">
+        <div class="input-wrap" style="flex:1;">
+          <label for="intel-company-select">Company</label>
+          <select id="intel-company-select" style="width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff;">
+            <option value="">Select a company…</option>
+          </select>
+        </div>
+        <button class="btn-ghost" id="intel-refresh-companies" style="white-space:nowrap;">Refresh list</button>
+      </div>
+      <div id="intel-panel">
+        <div style="color:#9ca3af;font-size:0.85rem;">Select a company to view and review its customer intelligence.</div>
+      </div>
+    </div>
+
+    <div class="intel-tabpane" data-intel-pane="matrix" style="display:none;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
+        <input type="text" id="intel-matrix-filter" placeholder="Filter equipment / module / system…" style="padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;width:320px;max-width:100%;" />
+        <span id="intel-matrix-summary" style="font-size:0.78rem;color:#6b7280;"></span>
+      </div>
+      <div id="intel-matrix"><div style="color:#9ca3af;font-size:0.85rem;">Loading matrix…</div></div>
+    </div>
+
+    <div class="intel-tabpane" data-intel-pane="duplicates" style="display:none;">
+      <div style="font-size:0.82rem;color:#6b7280;margin-bottom:10px;">
+        Company rows that share a normalized name (usually Apollo duplicates). Consolidate so intelligence lives on the row that has the contacts — <strong>one company → one intelligence → many contacts</strong>.
+      </div>
+      <div id="intel-duplicates"><div style="color:#9ca3af;font-size:0.85rem;">Loading…</div></div>
+    </div>
+  </div>
+
+  <!-- ── AI Usage dashboard view ── -->
+  <div class="card view-hidden" data-view="ai-usage">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+      <span>AI Usage &amp; Cost</span>
+      <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <select id="aiu-period" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;background:#fff;">
+          <option value="today">Today</option>
+          <option value="7d">Last 7 days</option>
+          <option value="30d">Last 30 days</option>
+          <option value="month">This month</option>
+          <option value="prev_month">Previous month</option>
+          <option value="year">This year</option>
+          <option value="all" selected>All time</option>
+          <option value="custom">Custom…</option>
+        </select>
+        <input type="date" id="aiu-from" style="display:none;padding:5px;border:1px solid #d1d5db;border-radius:6px;" />
+        <input type="date" id="aiu-to" style="display:none;padding:5px;border:1px solid #d1d5db;border-radius:6px;" />
+        <button class="btn-sm btn-ghost" id="aiu-refresh">Refresh</button>
+        <a class="btn-sm btn-ghost" id="aiu-export" href="#">Export CSV</a>
+      </span>
+    </div>
+    <div id="aiu-body"><div style="text-align:center;padding:32px 0;"><span class="spinner"></span> Loading…</div></div>
   </div>
 
   <!-- ── Bulk delete confirmation modal ── -->
@@ -1173,9 +1301,17 @@
 <!-- ── Fixed usage bar ── -->
 <div id="usage-bar">
   <span><span class="u-label">Apollo</span>
-    <span id="u-apollo-people">0</span> people searches
+    <span id="u-apollo-people">0</span> people
     <span class="u-sep">·</span>
-    <span id="u-apollo-org">0</span> org searches
+    <span id="u-apollo-org">0</span> org
+  </span>
+  <span class="u-sep">|</span>
+  <span><span class="u-label">AI</span>
+    <span id="u-ai-company">0</span> company
+    <span class="u-sep">·</span>
+    <span id="u-ai-contact">0</span> contact
+    <span class="u-sep">·</span>
+    <span id="u-ai-product">0</span> matches
   </span>
   <span class="u-sep">|</span>
   <span><span class="u-label">Claude</span>
@@ -1183,11 +1319,34 @@
     <span class="u-sep">·</span>
     <span id="u-claude-in">0</span> in
     <span class="u-sep">/</span>
-    <span id="u-claude-out">0</span> out tokens
+    <span id="u-claude-out">0</span> out
     <span class="u-sep">·</span>
-    Est. cost: <span class="u-cost" id="u-cost">$0.000000</span>
+    Total: <span id="u-total">0</span>
+    <span class="u-sep">·</span>
+    <span class="u-cost" id="u-cost">$0.000000</span>
+    <span class="u-sep">·</span>
+    <span style="color:#34d399;">Saved: <span id="u-saved-tokens">0</span> (<span id="u-saved-cost">$0.00</span>)</span>
   </span>
-  <button class="u-reset" id="usage-reset-btn">Reset counters</button>
+  <button class="u-reset" id="usage-details-btn" title="Detailed AI usage & budgets">Details</button>
+  <button class="u-reset" id="usage-reset-btn">Reset session</button>
+</div>
+
+<!-- ── Prompt Inspector modal (dev) ── -->
+<div class="modal-overlay" id="prompt-inspector-modal">
+  <div class="modal" style="max-width:820px;">
+    <button class="modal-close" id="prompt-inspector-close" title="Close">×</button>
+    <h2>Prompt Inspector <span style="font-weight:400;font-size:0.78rem;color:#9ca3af;">— what the AI will actually receive (0 tokens)</span></h2>
+    <div id="prompt-inspector-body"><div style="text-align:center;padding:24px 0;"><span class="spinner"></span> Building…</div></div>
+  </div>
+</div>
+
+<!-- ── AI Usage detail modal ── -->
+<div class="modal-overlay" id="ai-usage-modal">
+  <div class="modal" style="max-width:760px;">
+    <button class="modal-close" id="ai-usage-close" title="Close">×</button>
+    <h2>AI Usage &amp; Cost</h2>
+    <div id="ai-usage-body"><div style="text-align:center;padding:24px 0;"><span class="spinner"></span> Loading…</div></div>
+  </div>
 </div>
 
 <!-- ── Email draft modal ── -->
@@ -1196,6 +1355,21 @@
     <button class="modal-close" id="email-modal-close" title="Close">×</button>
     <h2 id="modal-title">Drafting email…</h2>
     <div class="contact-info" id="modal-contact-info"></div>
+
+    <!-- ── Company Intelligence & Tags (saved tags used in generation) ── -->
+    <div id="modal-intel" style="border-top:1px solid #e0e4ea;border-bottom:1px solid #e0e4ea;padding:10px 0;">
+      <div id="modal-intel-header" style="display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;flex-wrap:wrap;">
+        <span style="font-weight:600;font-size:0.86rem;color:#374151;">
+          Company Intelligence &amp; Tags
+          <span id="modal-intel-badge" style="font-weight:600;color:#2563eb;font-size:0.76rem;margin-left:6px;"></span>
+        </span>
+        <span style="display:flex;gap:8px;align-items:center;">
+          <button class="btn-sm btn-ghost" id="modal-intel-viewedit" type="button">View / Edit Tags</button>
+          <span id="modal-intel-caret" style="color:#9ca3af;">▾</span>
+        </span>
+      </div>
+      <div id="modal-intel-body" style="margin-top:10px;"></div>
+    </div>
 
     <div class="draft-section" id="draft-library-section" style="border-top:1px solid #e0e4ea;border-bottom:1px solid #e0e4ea;padding:12px 0;">
       <div class="draft-label">Drafts for this Contact</div>

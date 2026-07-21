@@ -12,7 +12,24 @@ function isConfigured() {
   return isClaudeConfigured();
 }
 
-function buildPrompt(contact, sender) {
+// Confirmed customer profile (from saved company/contact tags) — appended to
+// every prompt when present. Empty string when there are no tags, so the
+// original prompts are byte-for-byte unchanged for un-tagged contacts.
+function customerProfileBlock(context = {}) {
+  if (!context || (!context.customerProfile && !context.skqCapabilities)) return '';
+  let s = '\n\n';
+  if (context.customerProfile) s += `${context.customerProfile}\n`;
+  if (context.skqCapabilities) s += `\n${context.skqCapabilities}\n`;
+  s += (
+    `\nTailor this email to the customer profile above: emphasize ONLY the SKQ capabilities that fit ` +
+    `this customer, connect them to the contact's role and the customer's priorities, and do NOT mention ` +
+    `unrelated products or cell formats. If relevant SKQ materials would help, you may offer to share them, ` +
+    `but do not invent specifics or attach anything.\n`
+  );
+  return s;
+}
+
+function buildPrompt(contact, sender, context = {}) {
   const name = contact.name || 'there';
   const title = contact.title || 'leader';
   const company = contact.company || 'your company';
@@ -58,7 +75,7 @@ function buildPrompt(contact, sender) {
     `- Department: ${dept}\n` +
     `${emailNote}` +
     `${linkedin ? `- LinkedIn: ${linkedin}\n` : ''}` +
-    `${senderBlock}\n\n` +
+    `${senderBlock}${customerProfileBlock(context)}\n\n` +
     `Now write the outreach email. Requirements:\n` +
     `1. First person, from the sender's voice\n` +
     `2. Open with a specific, relevant observation about the recipient's role or company (not a generic compliment)\n` +
@@ -201,7 +218,7 @@ function buildContextBlocks(contact, sender, context) {
 function buildPromptForMode(mode, contact, sender, context = {}) {
   // Default / unset / unrecognized mode -> exact original behavior, untouched.
   if (!mode || mode === 'cold_outreach' || !MODE_REQUIREMENTS[mode]) {
-    return buildPrompt(contact, sender);
+    return buildPrompt(contact, sender, context);
   }
 
   const { name, title, company, dept, linkedin, emailNote, senderBlock, contextBlock, signOffLine } = buildContextBlocks(contact, sender, context);
@@ -218,7 +235,7 @@ function buildPromptForMode(mode, contact, sender, context = {}) {
     `${emailNote}` +
     `${linkedin ? `- LinkedIn: ${linkedin}\n` : ''}` +
     `${senderBlock}` +
-    `${contextBlock}\n\n` +
+    `${contextBlock}${customerProfileBlock(context)}\n\n` +
     `Now write the email. Requirements:\n${reqList}\n` +
     `${requirements.length + 1}. ${signOffLine}\n` +
     `\nAlso provide:\n` +
@@ -321,9 +338,9 @@ async function draftEmail(contact, sender, mode, context) {
     const data = await res.json();
     const rawText = (data.content && data.content[0] && data.content[0].text) || '';
     const apiUsage = data.usage || {};
-    recordClaudeUsage(apiUsage);
     const draft = parseDraftResponse(rawText);
-    return { ...draft, claude_configured: true, _usage: apiUsage };
+    // Usage is recorded by the server route (which has feature/company/contact context).
+    return { ...draft, claude_configured: true, _usage: { ...apiUsage, model: CLAUDE_MODEL } };
   } catch (err) {
     return {
       subject: '', body: `Network error calling Claude: ${err.message}`,
@@ -381,7 +398,7 @@ async function categorizeEmail(subject, body, fromName, fromEmail) {
       return { category, rationale: 'Keyword fallback (Claude API error).', claude_configured: true };
     }
     const data = await res.json();
-    recordClaudeUsage(data.usage || {});
+    recordClaudeUsage(data.usage || {}, { feature: 'email_classify', model: CLAUDE_MODEL });
     const raw = (data.content && data.content[0] && data.content[0].text) || '';
     try {
       const parsed = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || raw);
@@ -397,4 +414,4 @@ async function categorizeEmail(subject, body, fromName, fromEmail) {
   }
 }
 
-module.exports = { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES };
+module.exports = { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES, buildPromptForMode };

@@ -46,14 +46,57 @@ const {
 } = require('./apollo');
 const { doCompanySearch, CRM_FIELDS } = require('./leads');
 const { DEPARTMENT_TAXONOMY, SENIORITY_TAXONOMY } = require('./contactClassify');
-const { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES } = require('./claude');
+const { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES, buildPromptForMode } = require('./claude');
 const { contactsToCsv, contactsToXml, contactsToXlsx, safeFilename } = require('./export');
 const { parseCompanyFile } = require('./companyImport');
 const { normalizeFileToImages } = require('./cardBatch');
-const { getUsage, resetUsage } = require('./usage');
+const { getUsage, resetUsage, recordAiEvent, setPersist, setPricingTable } = require('./usage');
+const {
+  recordAiUsage, aiUsageTotals, aiUsageByFeature, aiUsageByCompany, estimateAiSaved,
+  getAiBudget, setAiBudget, listActivePricing, buildPeriodFilter,
+  aiUsageKpis, aiUsageTimeseries, aiUsageFeatureBreakdown, aiUsageByModel, aiUsageByUser, aiUsageEvents,
+  getTaxonomy, getCompanyIntelligence, listCompanyTags, applyCompanyTagSuggestions,
+  setCompanyTagStatus, addManualCompanyTag, removeCompanyTag,
+  setCompanyResearch, markIntelligenceReviewed, missingCompanyCategories,
+  listContactTags, setContactTagStatus, addManualContactTag, removeContactTag,
+  getContactCompanyIntelligence, tagTier, matchSkqForTags,
+  mergeCompanyIntelligence, findDuplicateCompanies,
+  listSkqModules, listSkqSystems, listSkqEquipment
+} = require('./db');
+const { researchCompanyTags } = require('./research');
 
 const app = express();
 const PORT = config.PORT;
+
+// Persist every AI usage event (recorded via usage.recordAiEvent) to the DB.
+setPersist(recordAiUsage);
+
+// Budget guard: block a new AI call when the daily or monthly token budget is
+// already exceeded. Returns null when allowed, or an { error } object to send.
+async function checkAiBudget() {
+  try {
+    const budget = await getAiBudget();
+    // Warn-only unless the admin explicitly enabled a hard limit — never
+    // interrupt critical work by default.
+    if (!budget.hard_limit) return null;
+    const anyLimit = budget.daily_token_budget || budget.monthly_token_budget || budget.daily_cost_budget || budget.monthly_cost_budget;
+    if (!anyLimit) return null;
+    const [today, month] = await Promise.all([aiUsageTotals('today'), aiUsageTotals('month')]);
+    if (budget.daily_token_budget && today.total_tokens >= budget.daily_token_budget) {
+      return { error: 'Daily AI token budget reached (hard limit)', scope: 'daily_tokens', used: today.total_tokens, budget: budget.daily_token_budget };
+    }
+    if (budget.monthly_token_budget && month.total_tokens >= budget.monthly_token_budget) {
+      return { error: 'Monthly AI token budget reached (hard limit)', scope: 'monthly_tokens', used: month.total_tokens, budget: budget.monthly_token_budget };
+    }
+    if (budget.daily_cost_budget && today.cost_usd >= budget.daily_cost_budget) {
+      return { error: 'Daily AI cost budget reached (hard limit)', scope: 'daily_cost', used: today.cost_usd, budget: budget.daily_cost_budget };
+    }
+    if (budget.monthly_cost_budget && month.cost_usd >= budget.monthly_cost_budget) {
+      return { error: 'Monthly AI cost budget reached (hard limit)', scope: 'monthly_cost', used: month.cost_usd, budget: budget.monthly_cost_budget };
+    }
+    return null;
+  } catch { return null; }
+}
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 40 * 1024 * 1024 } });
 
 // -----------------------------------------------------------------------
@@ -70,6 +113,11 @@ function timingSafeStringEqual(a, b) {
   }
   return crypto.timingSafeEqual(bufA, bufB);
 }
+
+// A stable id for this server process (the "session" the footer shows).
+const SERVER_SESSION_ID = crypto.randomUUID();
+// Who/what to attribute AI usage to on a given request.
+function reqUser(req) { return (req && req.appUser) || config.APP_USERNAME || 'local'; }
 
 app.use((req, res, next) => {
   const expectedUser = config.APP_USERNAME;
@@ -95,6 +143,7 @@ app.use((req, res, next) => {
     res.set('WWW-Authenticate', 'Basic realm="Lead Finder"');
     return res.status(401).send('Login required.');
   }
+  req.appUser = user; // attribute AI usage to the logged-in user
   next();
 });
 
@@ -1517,6 +1566,98 @@ app.get('/api/search-taxonomy', (req, res) => {
   });
 });
 
+// Build a rich "Customer Profile" narrative from saved company + contact tags.
+// AI-generated tags are USED BY DEFAULT (confidence-tiered via db.tagTier);
+// confirmation only refines. includeTagIds (optional) overrides the default
+// selection for a specific draft (the "Customize" flow). Returns the narrative
+// text plus a breakdown + the product values used for SKQ grounding.
+function buildCustomerProfile(company, companyTags, contactTags, taxonomy, includeTagIds) {
+  const useSet = Array.isArray(includeTagIds) ? new Set(includeTagIds.map(Number)) : null;
+  const pick = (t) => {
+    if (t.source === 'rejected') return false;
+    if (useSet) return useSet.has(Number(t.tag_id));
+    return tagTier(t.source, t.confidence).used;
+  };
+  const allTags = [...(companyTags || []), ...(contactTags || [])];
+  const used = allTags.filter(pick);
+
+  const breakdown = { ai_confirmed: 0, ai_suggested: 0, confirmed: 0, manual: 0, needs_review: 0, rejected: 0 };
+  allTags.forEach((t) => { const tr = tagTier(t.source, t.confidence).tier; if (breakdown[tr] != null) breakdown[tr] += 1; });
+
+  if (!used.length) return { text: '', count: 0, breakdown, productValues: [] };
+
+  const order = (taxonomy || []).map((c) => c.key);
+  const names = Object.fromEntries((taxonomy || []).map((c) => [c.key, c.name_en]));
+  const byCat = {};
+  used.forEach((t) => { (byCat[t.category_key] = byCat[t.category_key] || []).push(t.value); });
+
+  const firstSentence = (company.ai_research_summary || '').split(/(?<=[.。])\s/)[0];
+  const desc = firstSentence || `${company.name} operates in ${company.industry || 'battery manufacturing'}.`;
+  const bullets = order.filter((k) => byCat[k]).map((k) => `- ${names[k] || k}: ${byCat[k].join(', ')}`);
+  const text =
+    `Customer Profile\n` +
+    `${company.name}${company.chinese_name ? ' (' + company.chinese_name + ')' : ''} — ${desc}\n` +
+    `Current focus (from saved company intelligence):\n${bullets.join('\n')}`;
+
+  const productValues = []
+    .concat(byCat['product_scope'] || [])
+    .concat(byCat['cell_format'] || [])
+    .concat(byCat['energy_storage_app'] || [])
+    .concat(byCat['power_battery_app'] || []);
+  return { text, count: used.length, breakdown, productValues };
+}
+
+// Assemble the full draft context (customer profile + SKQ grounding + company
+// notes/event) from saved data. DB-only, no AI. Shared by /api/draft-email and
+// the Prompt Inspector so what you preview is exactly what gets sent.
+async function buildDraftContext(contact, mode, extraInstructions, resolvedContactId, includeTagIds) {
+  const context = {};
+  let tagsUsed = 0;
+  let breakdown = null;
+  let skqModules = [];
+  if (extraInstructions) context.extraInstructions = extraInstructions;
+
+  // Resolve the company the SAME way the modal does — by the contact's
+  // company_id first (reliable), then by name. Avoids matching a duplicate
+  // company that shares a similar name but has no tags.
+  let companyRow = null;
+  if (resolvedContactId) {
+    const contactRow = await getContact(Number(resolvedContactId));
+    if (contactRow && contactRow.company_id) companyRow = await getCompany(contactRow.company_id);
+  }
+  if (!companyRow) companyRow = await findCompanyByName(contact.company || '');
+  if (companyRow) {
+    const [intel, taxonomy, contactTags] = await Promise.all([
+      getCompanyIntelligence(companyRow.id),
+      getTaxonomy(),
+      resolvedContactId ? listContactTags(Number(resolvedContactId)) : Promise.resolve([]),
+    ]);
+    const profile = buildCustomerProfile(companyRow, intel ? intel.tags : [], contactTags, taxonomy, includeTagIds);
+    if (profile.count) {
+      context.customerProfile = profile.text;
+      tagsUsed = profile.count;
+      breakdown = profile.breakdown;
+      // Deterministic product grounding — retrieve matching SKQ modules from DB.
+      skqModules = await matchSkqForTags(profile.productValues);
+      if (skqModules.length) {
+        context.skqCapabilities =
+          `Relevant SKQ capabilities (from SKQ's module catalog — include only those that fit this email):\n` +
+          skqModules.map((m) => `- ${m.name_en}${m.name_cn ? ' / ' + m.name_cn : ''}`).join('\n');
+      }
+    }
+    if (mode && mode !== 'cold_outreach') {
+      const notesParts = [companyRow.notes, companyRow.background, companyRow.opportunity].filter(Boolean);
+      if (notesParts.length) context.companyNotes = notesParts.join(' | ');
+      if (companyRow.event_id) {
+        const events = await listEvents();
+        const event = events.find((e) => e.id === companyRow.event_id);
+        if (event) context.eventName = event.name;
+      }
+    }
+  }
+  return { context, tagsUsed, breakdown, skqModules, companyId: companyRow ? companyRow.id : null };
+}
+
 app.post('/api/draft-email', async (req, res) => {
   try {
     const { contact, sender, contactId, companyKey, mode, extraInstructions, regenerate } = req.body;
@@ -1533,33 +1674,51 @@ app.post('/api/draft-email', async (req, res) => {
     if (resolvedContactId && !regenerate) {
       const existing = await checkEquivalentDraft(Number(resolvedContactId), resolvedMode, resolvedInstructions);
       if (existing) {
+        // Reused a saved draft — no AI call. Record the tokens saved.
+        const saved = await estimateAiSaved('email_draft', {});
+        recordAiEvent({
+          feature: 'email_draft', sub_feature: resolvedMode, outcome: 'db_reuse',
+          contact_id: Number(resolvedContactId),
+          tokens_saved_input: saved.input, tokens_saved_output: saved.output,
+          user_id: reqUser(req), session_id: SERVER_SESSION_ID,
+        });
         return res.json({
           id: existing.id, subject: existing.subject || '', body: existing.body || '',
           followup: existing.followup_text || '', rationale: existing.rationale || '',
           to_email: existing.to_email || '', cc: existing.cc || '', bcc: existing.bcc || '',
           notes: existing.notes || '', status: existing.status, source: existing.source,
           created_at: existing.created_at, updated_at: existing.updated_at,
-          claude_configured: true, reused: true
+          claude_configured: true, reused: true,
+          saved_input: saved.input, saved_output: saved.output,
         });
       }
     }
 
-    let context = {};
-    if (mode && mode !== 'cold_outreach') {
-      const companyRow = await findCompanyByName(contact.company || '');
-      if (companyRow) {
-        const notesParts = [companyRow.notes, companyRow.background, companyRow.opportunity].filter(Boolean);
-        context.companyNotes = notesParts.join(' | ');
-        if (companyRow.event_id) {
-          const events = await listEvents();
-          const event = events.find((e) => e.id === companyRow.event_id);
-          if (event) context.eventName = event.name;
-        }
-      }
-      if (extraInstructions) context.extraInstructions = extraInstructions;
-    }
+    // Assemble the draft context from saved intelligence (AI tags used by
+    // default, confidence-tiered) + deterministic SKQ grounding. No AI here.
+    const built = await buildDraftContext(contact, mode, extraInstructions, resolvedContactId, req.body.includeTagIds);
+    const context = built.context;
+    const tagsUsed = built.tagsUsed;
 
+    // About to spend tokens — enforce the budget.
+    const blocked = await checkAiBudget();
+    if (blocked) return res.status(429).json(blocked);
+
+    const _t0 = Date.now();
     const draft = await draftEmail(contact, sender, mode, context);
+    const _ms = Date.now() - _t0;
+
+    // Record the real AI draft call.
+    const du = draft._usage || {};
+    recordAiEvent({
+      feature: 'email_draft', sub_feature: resolvedMode,
+      outcome: regenerate ? 'user_regeneration' : 'new_ai_call',
+      model: du.model, company_id: built.companyId,
+      contact_id: resolvedContactId ? Number(resolvedContactId) : null,
+      input_tokens: du.input_tokens || 0, output_tokens: du.output_tokens || 0,
+      response_ms: _ms, status: 'success', user_id: reqUser(req),
+      session_id: SERVER_SESSION_ID, request_id: crypto.randomUUID(),
+    });
 
     let commRow = null;
     if (resolvedContactId) {
@@ -1574,7 +1733,8 @@ app.post('/api/draft-email', async (req, res) => {
     }
 
     res.json({
-      ...draft, reused: false,
+      ...draft, reused: false, tags_used: tagsUsed,
+      tag_breakdown: built.breakdown, skq_modules: (built.skqModules || []).map((m) => m.name_en),
       id: commRow ? commRow.id : null,
       to_email: commRow ? commRow.to_email : '', cc: commRow ? commRow.cc : '', bcc: commRow ? commRow.bcc : '',
       notes: commRow ? commRow.notes : '', status: commRow ? commRow.status : 'draft', source: commRow ? commRow.source : '',
@@ -1586,12 +1746,308 @@ app.post('/api/draft-email', async (req, res) => {
   }
 });
 
+// Prompt Inspector (dev): assemble the exact draft context + final prompt from
+// saved intelligence WITHOUT calling the LLM (0 tokens). Lets you verify the
+// saved company intelligence actually reaches the prompt.
+app.post('/api/draft-email/inspect', async (req, res) => {
+  try {
+    const { contact, sender, contactId, mode, extraInstructions, includeTagIds } = req.body || {};
+    if (!contact) return res.status(400).json({ error: 'No contact provided' });
+    const resolvedContactId = contactId || contact.contact_id;
+    const resolvedMode = mode || 'cold_outreach';
+    const built = await buildDraftContext(contact, resolvedMode, extraInstructions || '', resolvedContactId, includeTagIds);
+    let priorSummary = null;
+    if (resolvedContactId) {
+      try {
+        const timeline = await listTimelineForContact(Number(resolvedContactId));
+        priorSummary = `${(timeline || []).length} prior interaction(s) on record`;
+      } catch { priorSummary = null; }
+    }
+    const prompt = buildPromptForMode(resolvedMode, contact, sender || {}, built.context);
+    res.json({
+      ok: true,
+      mode: resolvedMode,
+      tags_used: built.tagsUsed,
+      breakdown: built.breakdown,
+      customer_profile: built.context.customerProfile || null,
+      skq_capabilities: built.context.skqCapabilities || null,
+      skq_modules: (built.skqModules || []).map((m) => m.name_en),
+      company_notes: built.context.companyNotes || null,
+      event_name: built.context.eventName || null,
+      extra_instructions: built.context.extraInstructions || null,
+      prior_interactions: priorSummary,
+      prompt,
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to build prompt preview', details: err.message });
+  }
+});
+
 // GET /api/contacts/:id/drafts
 app.get('/api/contacts/:id/drafts', async (req, res) => {
   try {
     res.json({ ok: true, drafts: await listEmailDraftsForContact(Number(req.params.id)) });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load draft history' });
+  }
+});
+
+// =========================================================================
+// Customer Intelligence: taxonomy, company/contact tags, AI research, SKQ matrix
+// =========================================================================
+
+const TAG_STATUS_SOURCES = ['user_confirmed', 'rejected', 'manual', 'needs_review'];
+
+// Full curated taxonomy (categories + tags) for the tag-picker UI.
+app.get('/api/taxonomy', async (req, res) => {
+  try {
+    res.json({ ok: true, taxonomy: await getTaxonomy() });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load taxonomy', details: err.message });
+  }
+});
+
+// Duplicate company rows (same name_key) with tag/contact counts, so you can
+// spot cases where intelligence and contacts are split across duplicates.
+app.get('/api/companies/duplicates', async (req, res) => {
+  try { res.json({ ok: true, duplicates: await findDuplicateCompanies() }); }
+  catch (err) { res.status(500).json({ error: 'Failed to load duplicates', details: err.message }); }
+});
+
+// Consolidate intelligence from a duplicate into this company: the contact-
+// bearing row keeps its contacts and gains the tags/summary.
+app.post('/api/companies/:id/merge-intelligence', async (req, res) => {
+  try {
+    const from = Number((req.body || {}).from);
+    if (!from) return res.status(400).json({ error: 'from company id is required' });
+    const result = await mergeCompanyIntelligence(from, Number(req.params.id));
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to merge intelligence', details: err.message });
+  }
+});
+
+// SKQ product-capability matrix (15 modules / 10 systems / 93 equipment).
+app.get('/api/skq/matrix', async (req, res) => {
+  try {
+    const [modules, systems, equipment] = await Promise.all([
+      listSkqModules(), listSkqSystems(), listSkqEquipment()
+    ]);
+    res.json({ ok: true, modules, systems, equipment });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load SKQ matrix', details: err.message });
+  }
+});
+
+// Everything the Customer Intelligence panel shows for one company.
+app.get('/api/companies/:id/intelligence', async (req, res) => {
+  try {
+    const intel = await getCompanyIntelligence(Number(req.params.id));
+    if (!intel) return res.status(404).json({ error: 'Company not found' });
+    res.json({ ok: true, ...intel });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load intelligence', details: err.message });
+  }
+});
+
+// Run AI web research → store the summary + sources, and apply the suggested
+// tags WITHOUT overwriting any human-reviewed tag. DB-first: this endpoint is
+// only meant to be hit on an explicit user action. mode:
+//   'full'    — re-analyze every company category (the "Refresh AI Analysis" button)
+//   'missing' — only categories with no tags yet (default; saves tokens, preserves summary)
+// If mode is 'missing' and nothing is missing, no AI call is made.
+app.post('/api/companies/:id/research', async (req, res) => {
+  try {
+    const companyId = Number(req.params.id);
+    const company = await getCompany(companyId);
+    if (!company) return res.status(404).json({ error: 'Company not found' });
+
+    const mode = (req.body && req.body.mode) === 'full' ? 'full' : 'missing';
+    const taxonomy = await getTaxonomy();
+
+    let onlyCategories = null;
+    if (mode === 'missing') {
+      onlyCategories = await missingCompanyCategories(companyId, taxonomy);
+      if (onlyCategories.length === 0) {
+        // Nothing to fill — stay DB-first, don't spend tokens. Record the saving.
+        const saved = await estimateAiSaved('company_research', { company_id: companyId });
+        recordAiEvent({
+          feature: 'company_research', sub_feature: 'reuse', outcome: 'ai_avoided', company_id: companyId,
+          tokens_saved_input: saved.input, tokens_saved_output: saved.output,
+          user_id: reqUser(req), session_id: SERVER_SESSION_ID,
+        });
+        const intel = await getCompanyIntelligence(companyId);
+        return res.json({
+          ok: true, ...intel,
+          research: { skipped: true, reason: 'all_categories_present', mode, suggested: 0, applied: 0,
+            saved_input: saved.input, saved_output: saved.output }
+        });
+      }
+    }
+
+    // About to spend tokens — enforce the budget.
+    const blocked = await checkAiBudget();
+    if (blocked) return res.status(429).json(blocked);
+
+    const _rt0 = Date.now();
+    const result = await researchCompanyTags(company, taxonomy, { onlyCategories });
+    const _rms = Date.now() - _rt0;
+    if (result.error) {
+      recordAiEvent({
+        feature: 'company_research', sub_feature: onlyCategories ? 'missing_categories' : 'full',
+        outcome: 'new_ai_call', status: 'error', error_message: (result.missing_info || []).join('; '),
+        company_id: companyId, response_ms: _rms, user_id: reqUser(req),
+        session_id: SERVER_SESSION_ID, request_id: crypto.randomUUID(),
+      });
+      return res.status(502).json({ error: 'AI research failed', details: (result.missing_info || []).join('; ') });
+    }
+    // Record the real AI call.
+    const u = result.usage || {};
+    const outcome = onlyCategories ? 'partial_refresh'
+      : ((company.ai_analyzed_at || company.ai_research_summary) ? 'user_regeneration' : 'new_ai_call');
+    recordAiEvent({
+      feature: 'company_research', sub_feature: onlyCategories ? 'missing_categories' : 'full',
+      outcome, model: u.model, company_id: companyId,
+      input_tokens: u.input_tokens || 0, output_tokens: u.output_tokens || 0,
+      response_ms: _rms, status: 'success', user_id: reqUser(req),
+      session_id: SERVER_SESSION_ID, request_id: crypto.randomUUID(),
+    });
+
+    const applyResult = await applyCompanyTagSuggestions(companyId, result.tags);
+    // On a partial (missing-only) run, keep the existing full summary/sources.
+    const keepExisting = mode === 'missing' && company.ai_research_summary;
+    await setCompanyResearch(companyId, keepExisting ? null : result.summary, keepExisting ? [] : result.sources);
+
+    const intel = await getCompanyIntelligence(companyId);
+    res.json({
+      ok: true, ...intel,
+      research: {
+        mode, outcome, categories: onlyCategories, summary: result.summary, missing_info: result.missing_info,
+        suggested: result.tags.length, ...applyResult,
+        input_tokens: u.input_tokens || 0, output_tokens: u.output_tokens || 0,
+        claude_configured: result.claude_configured
+      }
+    });
+  } catch (err) {
+    console.error('Company research error:', err);
+    res.status(500).json({ error: 'Failed to research company', details: err.message });
+  }
+});
+
+// Human decision on a company tag: confirm / reject / manual / needs_review.
+app.post('/api/companies/:id/tags/status', async (req, res) => {
+  try {
+    const { tagId, source, confirmedBy } = req.body || {};
+    if (!tagId || !TAG_STATUS_SOURCES.includes(source)) {
+      return res.status(400).json({ error: 'tagId and a valid source are required' });
+    }
+    const row = await setCompanyTagStatus(Number(req.params.id), Number(tagId), source, confirmedBy || null);
+    res.json({ ok: true, tag: row });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update tag', details: err.message });
+  }
+});
+
+// Manually add a company tag by category + value (stored as source='manual').
+app.post('/api/companies/:id/tags/manual', async (req, res) => {
+  try {
+    const { categoryKey, value, confirmedBy } = req.body || {};
+    if (!categoryKey || !value) return res.status(400).json({ error: 'categoryKey and value are required' });
+    const row = await addManualCompanyTag(Number(req.params.id), categoryKey, value, confirmedBy || null);
+    if (!row) return res.status(400).json({ error: 'Unknown tag for that category/value' });
+    res.json({ ok: true, tag: row });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to add tag', details: err.message });
+  }
+});
+
+app.delete('/api/companies/:id/tags/:tagId', async (req, res) => {
+  try {
+    await removeCompanyTag(Number(req.params.id), Number(req.params.tagId));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to remove tag', details: err.message });
+  }
+});
+
+// Stamp the company's intelligence as human-reviewed (Last Reviewed date).
+app.post('/api/companies/:id/reviewed', async (req, res) => {
+  try {
+    await markIntelligenceReviewed(Number(req.params.id));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to mark reviewed', details: err.message });
+  }
+});
+
+// Bridge: a contact's company intelligence + the contact's own tags — read by
+// the Draft Email modal. DB-first, never triggers AI.
+app.get('/api/contacts/:id/intelligence', async (req, res) => {
+  try {
+    const intel = await getContactCompanyIntelligence(Number(req.params.id));
+    if (!intel) return res.status(404).json({ error: 'Contact not found' });
+    // Loading a contact's saved intelligence is a DB reuse (0 tokens) — counted
+    // so the footer can show "contact analyses" without any AI spend.
+    recordAiEvent({
+      feature: 'contact_intel', outcome: 'db_reuse',
+      contact_id: Number(req.params.id), company_id: intel.company ? intel.company.id : null,
+      user_id: reqUser(req), session_id: SERVER_SESSION_ID,
+    });
+    // Preview exactly what the draft prompt will use (default tag selection +
+    // deterministic SKQ grounding), so the modal can show "Using N tags" + SKQ.
+    let preview = { count: 0, breakdown: null, skq: [] };
+    if (intel.company) {
+      const taxonomy = await getTaxonomy();
+      const p = buildCustomerProfile(intel.company, intel.tags, intel.contact_tags, taxonomy, null);
+      const skq = p.count ? await matchSkqForTags(p.productValues) : [];
+      preview = { count: p.count, breakdown: p.breakdown, skq: skq.map((m) => ({ name_en: m.name_en, name_cn: m.name_cn })) };
+    }
+    res.json({ ok: true, ...intel, preview });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load contact intelligence', details: err.message });
+  }
+});
+
+// Contact tags (Contact Role category).
+app.get('/api/contacts/:id/tags', async (req, res) => {
+  try {
+    res.json({ ok: true, tags: await listContactTags(Number(req.params.id)) });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load contact tags', details: err.message });
+  }
+});
+
+app.post('/api/contacts/:id/tags/status', async (req, res) => {
+  try {
+    const { tagId, source, confirmedBy } = req.body || {};
+    if (!tagId || !TAG_STATUS_SOURCES.includes(source)) {
+      return res.status(400).json({ error: 'tagId and a valid source are required' });
+    }
+    const row = await setContactTagStatus(Number(req.params.id), Number(tagId), source, confirmedBy || null);
+    res.json({ ok: true, tag: row });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update contact tag', details: err.message });
+  }
+});
+
+app.post('/api/contacts/:id/tags/manual', async (req, res) => {
+  try {
+    const { categoryKey, value, confirmedBy } = req.body || {};
+    if (!categoryKey || !value) return res.status(400).json({ error: 'categoryKey and value are required' });
+    const row = await addManualContactTag(Number(req.params.id), categoryKey, value, confirmedBy || null);
+    if (!row) return res.status(400).json({ error: 'Unknown tag for that category/value' });
+    res.json({ ok: true, tag: row });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to add contact tag', details: err.message });
+  }
+});
+
+app.delete('/api/contacts/:id/tags/:tagId', async (req, res) => {
+  try {
+    await removeContactTag(Number(req.params.id), Number(req.params.tagId));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to remove contact tag', details: err.message });
   }
 });
 
@@ -1629,6 +2085,111 @@ app.get('/api/usage', (req, res) => {
 app.post('/api/usage/reset', (req, res) => {
   resetUsage();
   res.json({ ok: true });
+});
+
+// Full AI Usage dashboard payload: KPIs + time series + breakdowns (feature /
+// model / company / user) + budget status, for a date range.
+//   ?period=today|yesterday|7d|30d|month|prev_month|year|all|custom [&from=&to=][&bucket=day|week|month]
+app.get('/api/ai-usage', async (req, res) => {
+  try {
+    const period = req.query.period || 'all';
+    const filter = buildPeriodFilter(period, req.query.from, req.query.to);
+    const bucket = req.query.bucket || ((period === 'year' || period === 'all') ? 'month' : 'day');
+    const [kpis, timeseries, byFeature, byModel, byCompany, byUser, budget, todayK, monthK] = await Promise.all([
+      aiUsageKpis(filter),
+      aiUsageTimeseries(filter, bucket),
+      aiUsageFeatureBreakdown(filter),
+      aiUsageByModel(filter),
+      aiUsageByCompany(period === 'custom' ? 'all' : period, 15),
+      aiUsageByUser(filter),
+      getAiBudget(),
+      aiUsageKpis(buildPeriodFilter('today')),
+      aiUsageKpis(buildPeriodFilter('month')),
+    ]);
+    const warn = budget.warn_threshold_pct || 80;
+    const pct = (used, cap) => (cap ? Math.round((used / cap) * 100) : 0);
+    res.json({
+      ok: true, period, bucket,
+      session: getUsage().ai,
+      kpis, timeseries,
+      by_feature: byFeature, by_model: byModel, by_company: byCompany, by_user: byUser,
+      budget,
+      budget_status: {
+        warn_threshold_pct: warn,
+        daily_token_pct: pct(todayK.total_tokens, budget.daily_token_budget),
+        monthly_token_pct: pct(monthK.total_tokens, budget.monthly_token_budget),
+        daily_cost_pct: pct(todayK.cost_usd, budget.daily_cost_budget),
+        monthly_cost_pct: pct(monthK.cost_usd, budget.monthly_cost_budget),
+        today_cost: todayK.cost_usd, month_cost: monthK.cost_usd,
+        today_tokens: todayK.total_tokens, month_tokens: monthK.total_tokens,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load AI usage', details: err.message });
+  }
+});
+
+// Paginated request-level audit log (metadata only — no prompts/email content).
+app.get('/api/ai-usage/events', async (req, res) => {
+  try {
+    const filter = buildPeriodFilter(req.query.period || 'all', req.query.from, req.query.to);
+    const out = await aiUsageEvents(filter, {
+      feature: req.query.feature || null,
+      status: req.query.status || null,
+      limit: parseInt(req.query.limit, 10) || 50,
+      offset: parseInt(req.query.offset, 10) || 0,
+    });
+    res.json({ ok: true, ...out });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load usage events', details: err.message });
+  }
+});
+
+// CSV export of the audit log (respects the same filters).
+app.get('/api/ai-usage/export.csv', async (req, res) => {
+  try {
+    const filter = buildPeriodFilter(req.query.period || 'all', req.query.from, req.query.to);
+    const out = await aiUsageEvents(filter, {
+      feature: req.query.feature || null, status: req.query.status || null, limit: 200, offset: 0,
+    });
+    const cols = ['created_at', 'feature', 'sub_feature', 'request_type', 'status', 'model', 'provider',
+      'input_tokens', 'output_tokens', 'total_tokens', 'cost_usd', 'response_ms', 'user_id', 'company_name', 'contact_id'];
+    const esc = (v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const lines = [cols.join(',')].concat(out.rows.map((r) => cols.map((c) => esc(r[c])).join(',')));
+    res.set('Content-Type', 'text/csv');
+    res.set('Content-Disposition', 'attachment; filename="ai-usage.csv"');
+    res.send(lines.join('\n'));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to export', details: err.message });
+  }
+});
+
+app.get('/api/ai-usage/pricing', async (req, res) => {
+  try { res.json({ ok: true, pricing: await listActivePricing() }); }
+  catch (err) { res.status(500).json({ error: 'Failed to load pricing', details: err.message }); }
+});
+
+app.get('/api/ai-usage/budget', async (req, res) => {
+  try { res.json({ ok: true, budget: await getAiBudget() }); }
+  catch (err) { res.status(500).json({ error: 'Failed to load budget', details: err.message }); }
+});
+
+app.post('/api/ai-usage/budget', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const patch = {};
+    for (const k of ['daily_token_budget', 'monthly_token_budget', 'max_tokens_per_request', 'warn_threshold_pct']) {
+      if (b[k] != null) patch[k] = Math.max(0, parseInt(b[k], 10) || 0);
+    }
+    for (const k of ['daily_cost_budget', 'monthly_cost_budget', 'per_user_cost_budget', 'max_cost_per_request']) {
+      if (b[k] != null) patch[k] = Math.max(0, parseFloat(b[k]) || 0);
+    }
+    if (b.auto_refresh_disabled != null) patch.auto_refresh_disabled = Boolean(b.auto_refresh_disabled);
+    if (b.hard_limit != null) patch.hard_limit = Boolean(b.hard_limit);
+    res.json({ ok: true, budget: await setAiBudget(patch) });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save budget', details: err.message });
+  }
 });
 
 // =========================================================================
@@ -1714,7 +2275,9 @@ app.post('/api/export-xlsx', async (req, res) => {
 // =========================================================================
 
 initDb()
-  .then(() => {
+  .then(async () => {
+    // Load model pricing from the DB so cost is computed from ai_model_pricing.
+    try { setPricingTable(await listActivePricing()); } catch (e) { console.error('pricing load failed:', e.message); }
     initOcrWorker();
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Lead Finder (+ card scanner) running at http://0.0.0.0:${PORT}`);
