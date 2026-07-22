@@ -47,7 +47,7 @@ const {
 } = require('./apollo');
 const { doCompanySearch, CRM_FIELDS } = require('./leads');
 const { DEPARTMENT_TAXONOMY, SENIORITY_TAXONOMY } = require('./contactClassify');
-const { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES, buildPromptForMode } = require('./claude');
+const { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES, buildPromptForMode, CLAUDE_MODEL } = require('./claude');
 const { contactsToCsv, contactsToXml, contactsToXlsx, safeFilename } = require('./export');
 const { parseCompanyFile } = require('./companyImport');
 const { normalizeFileToImages } = require('./cardBatch');
@@ -1455,13 +1455,15 @@ async function resolveSender(userId) {
   const cfg = await getEmailOrgConfig();
   const acct = await getEmailUserAccount(userId);
   const secret = await getEmailUserSecret(userId);
+  const profileName = await senderProfileName();
   const isOAuth = OAUTH_PROVIDER_TYPES.includes(cfg.provider_type);
   const enabled = Boolean(cfg.integration_enabled);
   const canSend = isOAuth
     ? enabled && Boolean(cfg.oauth_connected)
     : enabled && Boolean(acct && acct.connection_status === 'connected');
   const senderEmail = isOAuth ? cfg.oauth_email : (acct && acct.sender_email);
-  const senderName = isOAuth ? cfg.oauth_display_name : (acct && acct.sender_name);
+  // Display name: configured account name first, then profile name, else none.
+  const senderName = ((isOAuth ? cfg.oauth_display_name : (acct && acct.sender_name)) || '').trim() || profileName || '';
   return { cfg, acct, secret, isOAuth, canSend, senderEmail, senderName };
 }
 
@@ -1494,7 +1496,9 @@ app.post('/api/communications/:id/send', async (req, res) => {
     const atts = await getAttachmentsWithDataForCommunication(id);
     const attachments = atts.map((a) => ({ filename: a.original_filename, content: a.file_data, contentType: a.mime_type || undefined }));
 
-    const engine = providers.createEngine({ orgConfig: s.cfg, account: s.acct, secret: s.secret });
+    // Use the resolved display name (account name → profile name → none).
+    const acctForSend = { ...s.acct, sender_name: s.senderName || '' };
+    const engine = providers.createEngine({ orgConfig: s.cfg, account: acctForSend, secret: s.secret });
     const result = await engine.sendEmail({
       to, cc: comm.cc || undefined, bcc: comm.bcc || undefined,
       subject: comm.subject || '(no subject)', text: comm.body || '', attachments,
@@ -1673,20 +1677,90 @@ app.get('/api/search-taxonomy', (req, res) => {
   });
 });
 
-// Build a rich "Customer Profile" narrative from saved company + contact tags.
-// AI-generated tags are USED BY DEFAULT (confidence-tiered via db.tagTier);
-// confirmation only refines. includeTagIds (optional) overrides the default
-// selection for a specific draft (the "Customize" flow). Returns the narrative
-// text plus a breakdown + the product values used for SKQ grounding.
-function buildCustomerProfile(company, companyTags, contactTags, taxonomy, includeTagIds) {
+// ── Configurable tag prioritization ────────────────────────────────────────
+// Admins tune how saved tags are selected for drafting without touching code.
+// Defaults preserve the previous behavior exactly (min 0.70 = the old tier
+// threshold; no max cap; no preference boost).
+const TECHNICAL_CATEGORIES = ['cell_format', 'product_scope'];
+const BUSINESS_CATEGORIES = ['segment', 'energy_storage_app', 'power_battery_app', 'contact_role', 'customer_priority'];
+const DEFAULT_TAG_CONFIG = { max_tags: 0, min_relevance: 0.7, always_include: [], prefer_technical: false, prefer_business: false };
+async function getTagPriorityConfig() {
+  try {
+    const raw = await getSetting('tag_priority_config');
+    if (!raw) return { ...DEFAULT_TAG_CONFIG };
+    const c = JSON.parse(raw);
+    return {
+      max_tags: Number(c.max_tags) || 0,
+      min_relevance: (c.min_relevance != null && !isNaN(Number(c.min_relevance))) ? Number(c.min_relevance) : 0.7,
+      always_include: Array.isArray(c.always_include) ? c.always_include : [],
+      prefer_technical: Boolean(c.prefer_technical),
+      prefer_business: Boolean(c.prefer_business),
+    };
+  } catch { return { ...DEFAULT_TAG_CONFIG }; }
+}
+
+// Single source of truth for which saved tags become part of the prompt. Both
+// the prompt builder AND the Prompt Analytics inspector use this, so the
+// analysis always matches what's actually sent.
+function selectTags(companyTags, contactTags, includeTagIds, config) {
+  const cfg = { ...DEFAULT_TAG_CONFIG, ...(config || {}) };
   const useSet = Array.isArray(includeTagIds) ? new Set(includeTagIds.map(Number)) : null;
-  const pick = (t) => {
-    if (t.source === 'rejected') return false;
-    if (useSet) return useSet.has(Number(t.tag_id));
-    return tagTier(t.source, t.confidence).used;
-  };
+  const alwaysSet = new Set((cfg.always_include || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean));
+
+  // Unique by value (company + contact may overlap); keep the higher-confidence one.
+  const byVal = new Map();
+  for (const t of [...(companyTags || []), ...(contactTags || [])]) {
+    const k = String(t.value || '').toLowerCase();
+    const prev = byVal.get(k);
+    const score = (t.confidence != null) ? Number(t.confidence) : (t.source === 'rejected' ? 0 : 1.0);
+    if (!prev || score > prev._score) byVal.set(k, { ...t, _score: score });
+  }
+  const uniq = [...byVal.values()].map((t) => {
+    const tier = tagTier(t.source, t.confidence);
+    const isTech = TECHNICAL_CATEGORIES.includes(t.category_key);
+    const isBiz = BUSINESS_CATEGORIES.includes(t.category_key);
+    const isAlways = alwaysSet.has(String(t.value || '').toLowerCase());
+    const eff = t._score + (cfg.prefer_technical && isTech ? 0.2 : 0) + (cfg.prefer_business && isBiz ? 0.2 : 0);
+    return {
+      tag_id: t.tag_id, value: t.value, name_en: t.name_en || t.value, name_cn: t.name_cn || '',
+      category_key: t.category_key || '', source: t.source, tier: tier.tier, score: (t.confidence != null ? Number(t.confidence) : null),
+      _eff: eff, _isAlways: isAlways,
+    };
+  });
+
+  // Stage 1 — eligibility.
+  const eligible = [];
+  uniq.forEach((t) => {
+    if (t.source === 'rejected') { t.used = false; t.reason = 'Rejected during tag review'; return; }
+    if (useSet) { // per-email manual override wins over config
+      if (useSet.has(Number(t.tag_id))) eligible.push(t);
+      else { t.used = false; t.reason = 'Manually excluded for this email'; }
+      return;
+    }
+    if (t._isAlways) { eligible.push(t); return; } // forced in regardless of score
+    const sc = t.score != null ? t.score : 1.0;
+    if (sc < cfg.min_relevance) { t.used = false; t.reason = `Below minimum relevance (${sc.toFixed(2)} < ${cfg.min_relevance.toFixed(2)})`; return; }
+    eligible.push(t);
+  });
+
+  // Stage 2 — rank (always-include first, then by effective score).
+  eligible.sort((a, b) => (Number(b._isAlways) - Number(a._isAlways)) || (b._eff - a._eff));
+
+  // Stage 3 — cap at max_tags (0 = no cap). Always-include are ranked first so survive.
+  eligible.forEach((t, i) => {
+    if (cfg.max_tags > 0 && i >= cfg.max_tags && !t._isAlways) { t.used = false; t.reason = `Capped at maximum ${cfg.max_tags} tags (ranked #${i + 1})`; }
+    else { t.used = true; t.reason = ''; }
+  });
+
+  const decisions = uniq.sort((a, b) => (b._eff - a._eff));
+  return { decisions, used: decisions.filter((t) => t.used) };
+}
+
+// Build a rich "Customer Profile" narrative from the selected tags. Selection is
+// delegated to selectTags() so the prompt and the inspector never disagree.
+function buildCustomerProfile(company, companyTags, contactTags, taxonomy, includeTagIds, config) {
   const allTags = [...(companyTags || []), ...(contactTags || [])];
-  const used = allTags.filter(pick);
+  const { used } = selectTags(companyTags, contactTags, includeTagIds, config);
 
   const breakdown = { ai_confirmed: 0, ai_suggested: 0, confirmed: 0, manual: 0, needs_review: 0, rejected: 0 };
   allTags.forEach((t) => { const tr = tagTier(t.source, t.confidence).tier; if (breakdown[tr] != null) breakdown[tr] += 1; });
@@ -1724,6 +1798,7 @@ async function buildDraftContext(contact, mode, extraInstructions, resolvedConta
   let skqModules = [];
   let rawCompanyTags = [];
   let rawContactTags = [];
+  const tagConfig = await getTagPriorityConfig();
   if (extraInstructions) context.extraInstructions = extraInstructions;
 
   // Resolve the company the SAME way the modal does — by the contact's
@@ -1743,7 +1818,7 @@ async function buildDraftContext(contact, mode, extraInstructions, resolvedConta
     ]);
     rawCompanyTags = intel ? intel.tags : [];
     rawContactTags = contactTags || [];
-    const profile = buildCustomerProfile(companyRow, intel ? intel.tags : [], contactTags, taxonomy, includeTagIds);
+    const profile = buildCustomerProfile(companyRow, intel ? intel.tags : [], contactTags, taxonomy, includeTagIds, tagConfig);
     if (profile.count) {
       context.customerProfile = profile.text;
       tagsUsed = profile.count;
@@ -1767,42 +1842,24 @@ async function buildDraftContext(contact, mode, extraInstructions, resolvedConta
     }
   }
   return { context, tagsUsed, breakdown, skqModules, companyId: companyRow ? companyRow.id : null,
-    companyTags: rawCompanyTags, contactTags: rawContactTags, includeTagIds };
+    companyTags: rawCompanyTags, contactTags: rawContactTags, includeTagIds, tagConfig };
 }
 
 // ── Prompt Analytics helpers (0 tokens; pure DB + string analysis) ──────────
 const APPROX_CHARS_PER_TOKEN = 4;
 const estimateTokens = (s) => Math.max(0, Math.round((s || '').length / APPROX_CHARS_PER_TOKEN));
 
-// Classify every available tag as used or ignored, with a score and a reason —
-// mirrors buildCustomerProfile's pick() so the analysis matches what's sent.
-function analyzeTagUsage(companyTags, contactTags, includeTagIds) {
-  const useSet = Array.isArray(includeTagIds) ? new Set(includeTagIds.map(Number)) : null;
-  const all = [...(companyTags || []), ...(contactTags || [])];
-  const tags = all.map((t) => {
-    const tier = tagTier(t.source, t.confidence);
-    const score = (t.confidence != null) ? Number(t.confidence) : null;
-    let used = false; let reason = '';
-    if (t.source === 'rejected') { used = false; reason = 'Rejected during tag review'; }
-    else if (useSet && !useSet.has(Number(t.tag_id))) { used = false; reason = 'Manually excluded for this email'; }
-    else if (tier.used) { used = true; reason = ''; }
-    else { used = false; reason = tier.tier === 'needs_review' ? `Below confidence threshold (${score != null ? score.toFixed(2) : 'n/a'} < 0.70 — needs review)` : 'Not eligible at current confidence tier'; }
-    return {
-      tag_id: t.tag_id, value: t.value, name_en: t.name_en || t.value, name_cn: t.name_cn || '',
-      category_key: t.category_key || '', source: t.source, tier: tier.tier, score, used, reason,
-    };
-  });
-  // De-dupe by value (company + contact can overlap), keep the "used" / higher score.
-  const byVal = new Map();
-  for (const t of tags) {
-    const k = (t.value || '').toLowerCase();
-    const prev = byVal.get(k);
-    if (!prev || (t.used && !prev.used) || ((t.score || 0) > (prev.score || 0))) byVal.set(k, t);
-  }
-  const deduped = [...byVal.values()].sort((a, b) => (b.score || 0) - (a.score || 0));
-  const used = deduped.filter((t) => t.used);
-  const ignored = deduped.filter((t) => !t.used);
-  return { total: deduped.length, used_count: used.length, ignored_count: ignored.length, tags: deduped };
+// Classify every available tag as used or ignored (score + reason), using the
+// SAME selectTags() the prompt builder uses, so analytics == what's sent.
+function analyzeTagUsage(companyTags, contactTags, includeTagIds, config) {
+  const { decisions } = selectTags(companyTags, contactTags, includeTagIds, config);
+  const tags = decisions.map((t) => ({
+    tag_id: t.tag_id, value: t.value, name_en: t.name_en, name_cn: t.name_cn,
+    category_key: t.category_key, source: t.source, tier: t.tier, score: t.score,
+    used: Boolean(t.used), reason: t.reason || '',
+  }));
+  const used = tags.filter((t) => t.used);
+  return { total: tags.length, used_count: used.length, ignored_count: tags.length - used.length, tags };
 }
 
 // Split the ACTUAL assembled prompt into labeled sections by anchor markers, so
@@ -1951,7 +2008,7 @@ app.post('/api/draft-email/inspect', async (req, res) => {
 
     // ── Prompt Analytics ──────────────────────────────────────────────────
     const sections = sectionizePrompt(prompt);
-    const tagAnalysis = analyzeTagUsage(built.companyTags, built.contactTags, built.includeTagIds);
+    const tagAnalysis = analyzeTagUsage(built.companyTags, built.contactTags, built.includeTagIds, built.tagConfig);
     // For each USED tag, note which prompt sections contain its text.
     tagAnalysis.tags.forEach((t) => {
       if (!t.used) { t.where = []; return; }
@@ -1984,9 +2041,13 @@ app.post('/api/draft-email/inspect', async (req, res) => {
       prior_interactions: priorSummary,
       prompt,
       // analytics
+      model: CLAUDE_MODEL,
+      contact_role: (contact && contact.title) || '',
+      contact_department: (contact && contact.department) || '',
       sections,
       tag_analysis: tagAnalysis,
       token_summary: tokenSummary,
+      tag_config: built.tagConfig,
       why,
     });
   } catch (err) {
@@ -2217,6 +2278,30 @@ app.get('/api/contacts/:id/intelligence', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to load contact intelligence', details: err.message });
   }
+});
+
+// Configurable tag prioritization — how saved tags are selected for drafting.
+app.get('/api/tag-priority', async (req, res) => {
+  try { res.json({ ok: true, config: await getTagPriorityConfig(), is_admin: isAdmin(req) }); }
+  catch (err) { res.status(500).json({ error: 'Failed', details: err.message }); }
+});
+app.post('/api/tag-priority', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    const b = req.body || {};
+    const clamp = (n, lo, hi, d) => { const v = Number(n); return isNaN(v) ? d : Math.min(hi, Math.max(lo, v)); };
+    const cfg = {
+      max_tags: Math.max(0, Math.round(clamp(b.max_tags, 0, 100, 0))),
+      min_relevance: clamp(b.min_relevance, 0, 1, 0.7),
+      always_include: Array.isArray(b.always_include)
+        ? b.always_include.map((s) => String(s).trim()).filter(Boolean).slice(0, 50)
+        : String(b.always_include || '').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 50),
+      prefer_technical: Boolean(b.prefer_technical),
+      prefer_business: Boolean(b.prefer_business),
+    };
+    await setSetting('tag_priority_config', JSON.stringify(cfg));
+    res.json({ ok: true, config: cfg });
+  } catch (err) { res.status(500).json({ error: 'Failed to save', details: err.message }); }
 });
 
 // Contact tags (Contact Role category).
@@ -2524,22 +2609,31 @@ app.post('/api/email/org-config/disable', (req, res) => setIntegration(req, res,
 //   • SMTP/IMAP providers (NetEase Enterprise Mail / Custom): the org SMTP+IMAP
 //     must be verified AND each user must connect their own @domain mailbox.
 const OAUTH_PROVIDER_TYPES = ['microsoft365', 'google'];
+// The sender's display name comes from the configured email account first, then
+// the user profile — never a hardcoded placeholder. Empty ⇒ show email only.
+async function senderProfileName() {
+  try { const raw = await getSetting('sender_profile'); return raw ? (JSON.parse(raw).name || '') : ''; }
+  catch { return ''; }
+}
 app.get('/api/email/status', async (req, res) => {
   try {
     const cfg = await getEmailOrgConfig();
     const acct = await getEmailUserAccount(reqUser(req));
+    const profileName = await senderProfileName();
     const enabled = Boolean(cfg && cfg.integration_enabled);
     const isOAuth = OAUTH_PROVIDER_TYPES.includes(cfg.provider_type);
     let canSend, email, name;
     if (isOAuth) {
       canSend = enabled && Boolean(cfg.oauth_connected);
-      email = cfg.oauth_email || ''; name = cfg.oauth_display_name || '';
+      email = cfg.oauth_email || '';
+      name = (cfg.oauth_display_name || '').trim() || profileName || '';
     } else {
       // SMTP providers: a successful per-user mailbox auth test is the real proof
       // of send capability (stronger than the org-level reachability probe).
       const userConnected = Boolean(acct && acct.connection_status === 'connected');
       canSend = enabled && userConnected;
-      email = (acct && acct.sender_email) || ''; name = (acct && acct.sender_name) || '';
+      email = (acct && acct.sender_email) || '';
+      name = ((acct && acct.sender_name) || '').trim() || profileName || '';
     }
     res.json({
       ok: true, ready: canSend, can_send: canSend,

@@ -68,16 +68,20 @@ function initAppShell() {
   });
 }
 
-// The connected mailbox address (from /api/email/status); "" until connected.
+// Connected mailbox identity (from /api/email/status); "" until connected.
 let _connectedEmail = "";
+let _connectedName = "";
+// The resolved sender display: connected account name → profile name → "".
+function senderDisplayName() { return (_connectedName || (_sender && _sender.name) || "").trim(); }
 function updateUserMenuFromSender() {
-  const name = (_sender && _sender.name) || "";
-  // From identity = profile name + connected mailbox, e.g. "Meiling He <info@rosalytics.com>".
+  const name = senderDisplayName();
+  // Identity = display name + connected mailbox, e.g. "Linglu Xie <info@rosalytics.com>".
+  // No name configured ⇒ show the email alone (never a placeholder name).
   const label = name
     ? (_connectedEmail ? `${name} <${_connectedEmail}>` : name)
     : (_connectedEmail || "Your Profile");
   document.getElementById("app-user-menu-name").textContent = label;
-  document.getElementById("app-user-avatar").textContent = name ? name.trim()[0].toUpperCase() : "U";
+  document.getElementById("app-user-avatar").textContent = name ? name.trim()[0].toUpperCase() : (_connectedEmail ? _connectedEmail[0].toUpperCase() : "U");
 }
 
 /* ── Modal open/close: single helper for every .modal-overlay, replacing
@@ -870,10 +874,14 @@ function renderDraftEditor(comm, contact) {
   const note = comm.claude_configured === false
     ? `<div class="draft-note">⚠ Claude key not set — this is a template stub. Add a Claude key in the Config section for AI-generated drafts.</div>`
     : "";
-  const fromName = (_sender && _sender.name) || "";
+  // Sender identity: connected account name → profile name → email only. Never
+  // a placeholder. If no mailbox is connected, say so.
+  const fromName = senderDisplayName();
   const fromLine = _connectedEmail
-    ? `${escapeHtml(fromName)} <span class="compose-from-email">&lt;${escapeHtml(_connectedEmail)}&gt;</span>`
-    : `${escapeHtml(fromName || "You")} <span class="compose-from-warn">— mailbox not connected</span>`;
+    ? (fromName
+        ? `${escapeHtml(fromName)} <span class="compose-from-email">&lt;${escapeHtml(_connectedEmail)}&gt;</span>`
+        : `<span class="compose-from-email">${escapeHtml(_connectedEmail)}</span>`)
+    : `<span class="compose-from-warn">Mailbox not connected — set it up in Settings</span>`;
 
   document.getElementById("modal-body").innerHTML = `
     ${note}
@@ -1059,7 +1067,9 @@ async function sendDraftTest() {
 function openDraftPreview() {
   const v = collectDraftFieldValues();
   const to = v.to_email || "(no recipient)";
-  const from = _connectedEmail ? `${(_sender && _sender.name) || ""} <${_connectedEmail}>` : ((_sender && _sender.name) || "You");
+  const from = _connectedEmail
+    ? (senderDisplayName() ? `${senderDisplayName()} <${_connectedEmail}>` : _connectedEmail)
+    : "(mailbox not connected)";
   const bodyHtml = escapeHtml(v.body || "").replace(/\n/g, "<br>");
   const el = document.getElementById("draft-preview-body");
   if (!el) return;
@@ -1072,6 +1082,8 @@ function openDraftPreview() {
       <hr>
       <div class="preview-message">${bodyHtml || "<em>(empty body)</em>"}</div>
     </div>`;
+  const modal = document.getElementById("draft-preview-modal");
+  if (modal && modal.parentElement !== document.body) document.body.appendChild(modal);
   openModal("draft-preview-modal");
 }
 
@@ -1096,7 +1108,9 @@ async function sendDraftEmail() {
   const v = collectDraftFieldValues();
   if (!v.to_email) return showMessage("Add a recipient before sending.", "error");
   // Confirmation dialog.
-  const from = _connectedEmail ? `${(_sender && _sender.name) || ""} <${_connectedEmail}>` : "(mailbox not connected)";
+  const from = _connectedEmail
+    ? (senderDisplayName() ? `${senderDisplayName()} <${_connectedEmail}>` : _connectedEmail)
+    : "(mailbox not connected)";
   if (!confirm(`Send this email now?\n\nFrom: ${from}\nTo: ${v.to_email}\nSubject: ${v.subject || "(no subject)"}`)) return;
   const btn = document.getElementById("ab-send"); const orig = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
@@ -3256,6 +3270,7 @@ initIntelligenceView();
 initCrmIntel();
 initAiUsageDashboard();
 initEmailSettings();
+initTagPriority();
 loadCrmContacts();
 loadBrowseSelectors();
 loadSearchTaxonomy();
@@ -4287,30 +4302,55 @@ function renderModalIntel(d, contact) {
 
   body.innerHTML = html;
   updateModalIntelBadge();
+  // Guaranteed direct wiring for the Prompt Inspector button (the body is
+  // re-rendered on every open, so wire it here rather than relying on delegation).
+  const inspectBtn = document.getElementById("modal-intel-inspect");
+  if (inspectBtn) inspectBtn.addEventListener("click", openPromptInspector);
 }
 
-/* ── Prompt Inspector (dev): preview the exact assembled prompt, 0 tokens ── */
+/* ── Prompt Analytics: the exact assembled prompt + tag/token analysis (0 tokens) ── */
 async function openPromptInspector() {
-  if (!_modalContact) return;
-  openModal("prompt-inspector-modal");
+  console.log("Prompt Inspector clicked");   // debug: confirm the click fires
+  // Portal-safety: hoist to <body> so it escapes any stacking context and (with
+  // its higher z-index) renders ABOVE the draft modal instead of behind it.
+  const modal = document.getElementById("prompt-inspector-modal");
+  if (modal && modal.parentElement !== document.body) document.body.appendChild(modal);
+  openModal("prompt-inspector-modal");     // always show feedback, even on error
   const body = document.getElementById("prompt-inspector-body");
+  if (!body) return;
+  if (!_modalContact) {
+    body.innerHTML = `<div class="msg-error">Open a contact's draft first, then click Prompt Inspector.</div>`;
+    return;
+  }
   body.innerHTML = '<div style="text-align:center;padding:24px 0;"><span class="spinner"></span> Building…</div>';
   try {
     const r = await fetch("/api/draft-email/inspect", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({
         contact: _modalContact, sender: _sender, contactId: _modalContact.contact_id,
-        mode: _modalSelectedMode, extraInstructions: document.getElementById("modal-extra-instructions").value.trim(),
+        mode: _modalSelectedMode,
+        extraInstructions: (document.getElementById("modal-extra-instructions") || {}).value?.trim() || "",
         includeTagIds: getModalIncludeTagIds(),
       }),
     });
-    const d = await r.json();
-    if (!d.ok) { body.innerHTML = `<div class="msg-error">${escapeHtml(d.error || "Failed")}</div>`; return; }
+    let d = null;
+    try { d = await r.json(); } catch (_) { d = null; }
+    if (!r.ok || !d || !d.ok) {
+      const msg = (d && (d.details || d.error)) || `Server returned HTTP ${r.status}`;
+      body.innerHTML = `<div class="msg-error">Couldn't build the prompt: ${escapeHtml(msg)}</div>`;
+      return;
+    }
     renderPromptInspector(d);
-  } catch (e) { body.innerHTML = `<div class="msg-error">${escapeHtml(e.message)}</div>`; }
+  } catch (e) {
+    body.innerHTML = `<div class="msg-error">Couldn't reach the server to build the prompt: ${escapeHtml(e.message)}</div>`;
+  }
 }
 
 let _lastInspect = null;
+// Used-tag names within a given taxonomy category (for the context breakdown).
+function taByCat(ta, catKey) {
+  return (ta.tags || []).filter((t) => t.used && t.category_key === catKey).map((t) => t.name_en || t.value).join(", ");
+}
 function renderPromptInspector(d) {
   _lastInspect = d;
   const body = document.getElementById("prompt-inspector-body");
@@ -4319,12 +4359,32 @@ function renderPromptInspector(d) {
 
   // 1) Summary
   let html = `<div class="pi-summary">
-    <span><b>Mode</b> ${escapeHtml(d.mode)}</span>
+    <span><b>Model</b> ${escapeHtml(d.model || "—")}</span>
+    <span><b>Category</b> ${escapeHtml(d.mode)}</span>
     <span><b>Tags</b> ${ta.used_count} used · ${ta.ignored_count} ignored · ${ta.total} total</span>
     <span><b>SKQ</b> ${(d.skq_modules || []).length} module(s)</span>
-    <span><b>~Tokens</b> ${tok.total}</span>
-    <span>${escapeHtml(d.prior_interactions || "no prior interactions")}</span>
+    <span><b>~Prompt tokens</b> ${tok.total}</span>
   </div>`;
+
+  // 1b) Context provided to the model + Model & tokens
+  const ctxRow = (k, v) => `<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`;
+  html += `<div class="pi-card"><div class="pi-h">Context provided to the model</div><table class="pi-ctx">
+    ${ctxRow("Selected draft category", escapeHtml(d.mode || "—"))}
+    ${ctxRow("Contact role", escapeHtml(d.contact_role || "—"))}
+    ${ctxRow("Department", escapeHtml(d.contact_department || "—"))}
+    ${ctxRow("Product-scope tags", escapeHtml(taByCat(ta, "product_scope") || "(none)"))}
+    ${ctxRow("Customer-priority tags", escapeHtml(taByCat(ta, "customer_priority") || "(none)"))}
+    ${ctxRow("Recommended SKQ capabilities", (d.skq_modules || []).length ? escapeHtml(d.skq_modules.join(", ")) : "(none matched)")}
+    ${ctxRow("Additional instructions", escapeHtml(d.extra_instructions || "(none)"))}
+    ${ctxRow("Email-thread context", escapeHtml(d.prior_interactions || "no prior interactions"))}
+    ${ctxRow("Attachments", `<span id="pi-attach">checking…</span>`)}
+  </table></div>`;
+  html += `<div class="pi-card"><div class="pi-h">Model &amp; tokens</div><table class="pi-ctx">
+    ${ctxRow("Model", escapeHtml(d.model || "—"))}
+    ${ctxRow("Prompt tokens (est.)", String(tok.total))}
+    ${ctxRow("Completion tokens", "measured on real generation (0-token preview)")}
+    ${ctxRow("Total (est.)", String(tok.total))}
+  </table><div class="pi-sub">Token counts are estimates (~4 chars/token); actual usage is recorded in the AI Usage dashboard when a draft is really generated.</div></div>`;
 
   // 2) Why these context sources were used
   if ((d.why || []).length) {
@@ -4333,7 +4393,15 @@ function renderPromptInspector(d) {
   }
 
   // 3) Company tags: ranked, used vs ignored with reasons (click a used tag to highlight)
-  html += `<div class="pi-card"><div class="pi-h">Company Tags <span class="pi-sub">— ${ta.used_count} used, ${ta.ignored_count} ignored of ${ta.total}. Click a used tag to highlight it in the prompt.</span></div>`;
+  const cfg = d.tag_config || {};
+  const cfgBits = [];
+  if (cfg.max_tags) cfgBits.push(`max ${cfg.max_tags}`);
+  if (cfg.min_relevance != null) cfgBits.push(`min relevance ${Number(cfg.min_relevance).toFixed(2)}`);
+  if ((cfg.always_include || []).length) cfgBits.push(`always: ${cfg.always_include.join(", ")}`);
+  if (cfg.prefer_technical) cfgBits.push("prefer technical");
+  if (cfg.prefer_business) cfgBits.push("prefer business");
+  const cfgNote = cfgBits.length ? `<div class="pi-sub" style="margin-bottom:6px;">Active rules: ${escapeHtml(cfgBits.join(" · "))} — configure in Settings → Tag Prioritization.</div>` : "";
+  html += `<div class="pi-card"><div class="pi-h">Company Tags <span class="pi-sub">— ${ta.used_count} used, ${ta.ignored_count} ignored of ${ta.total}. Click a used tag to highlight it in the prompt.</span></div>${cfgNote}`;
   if (!ta.tags.length) {
     html += `<div class="pi-empty">No saved tags for this company yet.</div>`;
   } else {
@@ -4368,6 +4436,19 @@ function renderPromptInspector(d) {
     <pre class="pi-final" id="pi-final-prompt">${escapeHtml(d.prompt || "")}</pre>`;
 
   body.innerHTML = html;
+
+  // Attachment metadata comes from the current draft (if one is open/saved).
+  const attEl = document.getElementById("pi-attach");
+  if (attEl) {
+    if (_modalComm && _modalComm.id) {
+      fetch(`/api/communications/${_modalComm.id}/attachments`).then((r) => r.json()).then((a) => {
+        const list = (a && a.attachments) || [];
+        attEl.textContent = list.length ? list.map((x) => `${x.original_filename} (${Math.round((x.file_size || 0) / 1024)} KB)`).join(", ") : "(none)";
+      }).catch(() => { attEl.textContent = "(none)"; });
+    } else {
+      attEl.textContent = "(generate/save the draft first)";
+    }
+  }
 
   // Click a used tag → highlight its occurrences in the final prompt.
   body.querySelectorAll("tr.pi-used").forEach((tr) => tr.addEventListener("click", () => highlightTagInPrompt(tr.dataset.val)));
@@ -4422,9 +4503,7 @@ function highlightTagInPrompt(value) {
       if (cb.checked) _modalSelectedTagIds.add(id); else _modalSelectedTagIds.delete(id);
       updateModalIntelBadge();
     });
-    body.addEventListener("click", (e) => {
-      if (e.target.closest("#modal-intel-inspect")) openPromptInspector();
-    });
+    // The Prompt Inspector button is wired directly in renderModalIntel (guaranteed).
   }
 })();
 
@@ -4812,6 +4891,40 @@ function emResult(id, r) {
   e.textContent = msg;
 }
 const isOAuthProvider = (p) => providerType(p) === "oauth";
+
+// ── Tag Prioritization config (admin) ──────────────────────────────────────
+async function initTagPriority() {
+  const card = document.getElementById("tag-priority-card");
+  if (!card) return;
+  let d;
+  try { d = await (await fetch("/api/tag-priority")).json(); } catch (e) { return; }
+  card.style.display = d.is_admin ? "" : "none";
+  if (!d.is_admin) return;
+  const c = d.config || {};
+  emSet("tp-max", c.max_tags != null ? c.max_tags : 0);
+  emSet("tp-min", (c.min_relevance != null ? c.min_relevance : 0.7));
+  emSet("tp-always", (c.always_include || []).join(", "));
+  emSetChk("tp-tech", c.prefer_technical);
+  emSetChk("tp-biz", c.prefer_business);
+  const btn = document.getElementById("tp-save");
+  if (btn && !btn._wired) {
+    btn._wired = true;
+    btn.addEventListener("click", saveTagPriority);
+  }
+}
+async function saveTagPriority() {
+  const body = {
+    max_tags: Number(emVal("tp-max")) || 0,
+    min_relevance: Number(emVal("tp-min")),
+    always_include: emVal("tp-always").split(",").map((s) => s.trim()).filter(Boolean),
+    prefer_technical: emChk("tp-tech"),
+    prefer_business: emChk("tp-biz"),
+  };
+  try {
+    const d = await (await fetch("/api/tag-priority", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+    emResult("tp-result", d.ok ? { ok: true, message: "Saved. Applies to the next draft." } : d);
+  } catch (e) { emResult("tp-result", { error: e.message }); }
+}
 
 async function initEmailSettings() {
   try {
@@ -5279,8 +5392,9 @@ async function loadEmailSendStatus() {
   if (!el) return;
   try {
     const d = await (await fetch("/api/email/status")).json();
-    // Keep the "From" identity in sync with the connected mailbox.
+    // Keep the "From" identity in sync with the connected mailbox (single source).
     _connectedEmail = (d.ok && d.can_send && d.email) ? d.email : "";
+    _connectedName = (d.ok && d.can_send && d.display_name) ? d.display_name : "";
     try { updateUserMenuFromSender(); } catch (e) { /* ignore */ }
     if (d.ok && !d.can_send) {
       // Not configured yet — drafting still works, sending is disabled. Offer a

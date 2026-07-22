@@ -497,6 +497,9 @@
       animation: modal-fade-in 0.12s ease;
     }
     .modal-overlay.open { display: flex; }
+    /* Secondary modals opened from WITHIN the draft modal must stack above it.
+       (They sit earlier in the DOM, so an equal z-index would render them behind.) */
+    #prompt-inspector-modal, #draft-preview-modal { z-index: 1600; }
     @keyframes modal-fade-in { from { opacity: 0; } to { opacity: 1; } }
     .modal {
       background: var(--color-surface); border-radius: var(--radius-lg);
@@ -778,6 +781,10 @@
     .pi-pre { font-size:0.74rem; white-space:pre-wrap; background:#f9fafb; margin:0; padding:10px; border-top:1px solid #eef2f7; max-height:220px; overflow:auto; }
     .pi-final { font-size:0.74rem; white-space:pre-wrap; background:#0b1021; color:#d1d5db; border-radius:6px; padding:12px; max-height:340px; overflow:auto; }
     mark.pi-mark { background:#fde047; color:#111827; border-radius:2px; padding:0 1px; }
+    table.pi-ctx { width:100%; border-collapse:collapse; font-size:0.82rem; }
+    table.pi-ctx td { padding:4px 8px; border-bottom:1px solid #f3f4f6; vertical-align:top; }
+    table.pi-ctx td:first-child { color:#6b7280; width:200px; white-space:nowrap; }
+    table.pi-ctx td:last-child { color:#111827; }
   </style>
 </head>
 <body>
@@ -836,7 +843,7 @@
     <div class="sender-grid">
       <div>
         <label for="sender-name">Your Name</label>
-        <input type="text" id="sender-name" placeholder="e.g. Sarah Chen" />
+        <input type="text" id="sender-name" placeholder="Your name" />
       </div>
       <div>
         <label for="sender-title">Your Title</label>
@@ -857,6 +864,21 @@
       </select>
       <div style="font-size:0.78rem;color:#9ca3af;margin-top:6px;">The AI always receives the English tag names for consistency; this only changes what you see.</div>
     </div>
+  </div>
+
+  <!-- ══ Tag Prioritization (admin) — how saved tags are selected for drafting ══ -->
+  <div class="card view-hidden" data-view="settings" id="tag-priority-card" style="display:none;">
+    <div class="card-title">Tag Prioritization <span style="font-weight:400;font-size:0.82rem;color:#9ca3af">— tune how saved company tags feed email drafting, no code changes</span></div>
+    <div class="em-grid">
+      <div class="em-field"><label>Maximum tags <span style="color:#9ca3af;">(0 = no limit)</span></label><input type="number" id="tp-max" min="0" step="1" value="0"></div>
+      <div class="em-field"><label>Minimum relevance <span style="color:#9ca3af;">(0–1)</span></label><input type="number" id="tp-min" min="0" max="1" step="0.05" value="0.70"></div>
+      <div class="em-field"><label>Always include <span style="color:#9ca3af;">(comma-separated tag names)</span></label><input type="text" id="tp-always" placeholder="Battery, Automation, Module Assembly"></div>
+      <div class="em-field check"><input type="checkbox" id="tp-tech"> <label style="margin:0;">Prefer technical tags (product scope, cell format)</label></div>
+      <div class="em-field check"><input type="checkbox" id="tp-biz"> <label style="margin:0;">Prefer business tags (segment, applications, priorities)</label></div>
+    </div>
+    <div class="em-actions"><button class="btn-sm btn-orange" id="tp-save">Save</button></div>
+    <div class="em-result" id="tp-result"></div>
+    <div style="font-size:0.74rem;color:#9ca3af;margin-top:6px;">Applies to the next draft. See the effect live in <strong>Prompt Analytics</strong> — tags show “Used”, “Capped at maximum N”, or “Below minimum relevance”.</div>
   </div>
 
   <!-- ══ Email: Organization Configuration (admin/IT only) ══ -->
@@ -970,7 +992,7 @@
       <details class="em-advanced" id="em-acct-advanced" style="margin-top:10px;">
         <summary>⚙️ Advanced — sender name, reply-to, username, auth method</summary>
         <div class="em-grid">
-          <div class="em-field"><label>Sender name</label><input type="text" id="em-acct-name" placeholder="e.g. Sarah Chen" /></div>
+          <div class="em-field"><label>Sender name</label><input type="text" id="em-acct-name" placeholder="Your name (optional)" /></div>
           <div class="em-field"><label>Reply-to address</label><input type="email" id="em-acct-replyto" placeholder="(optional)" /></div>
           <div class="em-field"><label>Mailbox username</label><input type="text" id="em-acct-username" placeholder="(defaults to your email)" /></div>
           <div class="em-field"><label>Authentication method</label>
@@ -1150,7 +1172,7 @@
                 <option value="closed">Closed</option>
               </select>
             </div>
-            <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Salesperson</label><input type="text" id="crm-filter-owner" placeholder="e.g. Sarah Chen" style="font-size:12px;padding:6px 8px;" /></div>
+            <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Salesperson</label><input type="text" id="crm-filter-owner" placeholder="Salesperson name" style="font-size:12px;padding:6px 8px;" /></div>
             <div>
               <label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Department <span id="crm-sel-dept-clearall" class="crm-sel-clearall">Clear all</span></label>
               <div class="crm-sel-wrap">
@@ -1815,7 +1837,7 @@
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
         <div><label style="display:block;font-size:0.78rem;color:#555;margin-bottom:3px;">Meeting date</label><input type="date" id="ctx-date" /></div>
-        <div><label style="display:block;font-size:0.78rem;color:#555;margin-bottom:3px;">Assigned salesperson</label><input type="text" id="ctx-salesperson" placeholder="e.g. Sarah Chen" /></div>
+        <div><label style="display:block;font-size:0.78rem;color:#555;margin-bottom:3px;">Assigned salesperson</label><input type="text" id="ctx-salesperson" placeholder="Salesperson name" /></div>
       </div>
     </div>
 

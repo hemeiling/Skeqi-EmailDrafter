@@ -414,4 +414,4 @@ async function categorizeEmail(subject, body, fromName, fromEmail) {
   }
 }
 
-module.exports = { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES, buildPromptForMode };
+module.exports = { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES, buildPromptForMode, CLAUDE_MODEL };
