@@ -752,6 +752,32 @@
     .preview-line { display:flex; gap:10px; font-size:0.84rem; padding:2px 0; }
     .preview-line > span { flex:0 0 60px; color:#9ca3af; }
     .preview-message { font-size:0.9rem; line-height:1.55; color:#111827; margin-top:6px; }
+    /* ── Prompt Analytics ── */
+    .pi-summary { display:flex; flex-wrap:wrap; gap:14px; font-size:0.78rem; color:#374151; background:#f9fafb; border:1px solid #eef2f7; border-radius:8px; padding:8px 12px; margin-bottom:12px; }
+    .pi-summary b { color:#6b7280; font-weight:600; margin-right:3px; }
+    .pi-card { border:1px solid #e5e7eb; border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+    .pi-h { font-weight:700; font-size:0.86rem; color:#111827; margin-bottom:8px; }
+    .pi-sub { font-weight:400; color:#9ca3af; font-size:0.76rem; }
+    .pi-why { margin:0; padding-left:18px; font-size:0.82rem; color:#374151; line-height:1.6; }
+    .pi-empty { font-size:0.82rem; color:#9ca3af; }
+    table.pi-tags { width:100%; border-collapse:collapse; font-size:0.82rem; }
+    table.pi-tags th { text-align:left; color:#6b7280; font-weight:600; padding:5px 8px; border-bottom:1px solid #e5e7eb; }
+    table.pi-tags td { padding:5px 8px; border-bottom:1px solid #f3f4f6; }
+    tr.pi-used { cursor:pointer; } tr.pi-used:hover td { background:#f0fdf4; }
+    tr.pi-ignored td { color:#6b7280; }
+    .pi-score { font-variant-numeric:tabular-nums; font-weight:600; color:#111827; }
+    .pi-cn { color:#9ca3af; font-size:0.76rem; }
+    .pi-tag-ok { color:#047857; } .pi-tag-no { color:#b45309; }
+    .pi-bar-row { display:flex; align-items:center; gap:10px; font-size:0.78rem; padding:2px 0; }
+    .pi-bar-label { flex:0 0 180px; color:#374151; }
+    .pi-bar { flex:1; height:8px; background:#f1f5f9; border-radius:5px; overflow:hidden; }
+    .pi-bar-fill { display:block; height:100%; background:#6366f1; }
+    .pi-bar-tok { flex:0 0 48px; text-align:right; font-variant-numeric:tabular-nums; color:#6b7280; }
+    details.pi-section { border:1px solid #eef2f7; border-radius:6px; margin-bottom:6px; }
+    details.pi-section > summary { cursor:pointer; padding:7px 10px; font-size:0.8rem; font-weight:600; color:#374151; }
+    .pi-pre { font-size:0.74rem; white-space:pre-wrap; background:#f9fafb; margin:0; padding:10px; border-top:1px solid #eef2f7; max-height:220px; overflow:auto; }
+    .pi-final { font-size:0.74rem; white-space:pre-wrap; background:#0b1021; color:#d1d5db; border-radius:6px; padding:12px; max-height:340px; overflow:auto; }
+    mark.pi-mark { background:#fde047; color:#111827; border-radius:2px; padding:0 1px; }
   </style>
 </head>
 <body>
@@ -1567,9 +1593,9 @@
 
 <!-- ── Prompt Inspector modal (dev) ── -->
 <div class="modal-overlay" id="prompt-inspector-modal">
-  <div class="modal" style="max-width:820px;">
+  <div class="modal" style="max-width:920px;">
     <button class="modal-close" id="prompt-inspector-close" title="Close">×</button>
-    <h2>Prompt Inspector <span style="font-weight:400;font-size:0.78rem;color:#9ca3af;">— what the AI will actually receive (0 tokens)</span></h2>
+    <h2>Prompt Analytics <span style="font-weight:400;font-size:0.78rem;color:#9ca3af;">— exactly what the AI receives, section by section (0 tokens)</span></h2>
     <div id="prompt-inspector-body"><div style="text-align:center;padding:24px 0;"><span class="spinner"></span> Building…</div></div>
   </div>
 </div>

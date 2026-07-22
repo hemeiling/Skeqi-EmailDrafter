@@ -4310,19 +4310,82 @@ async function openPromptInspector() {
   } catch (e) { body.innerHTML = `<div class="msg-error">${escapeHtml(e.message)}</div>`; }
 }
 
+let _lastInspect = null;
 function renderPromptInspector(d) {
+  _lastInspect = d;
   const body = document.getElementById("prompt-inspector-body");
-  const sec = (title, content) => `<div style="margin-bottom:10px;"><div class="intel-cat-title">${escapeHtml(title)}</div>
-      <div style="font-size:0.8rem;color:#374151;white-space:pre-wrap;background:#f9fafb;border:1px solid #eef2f7;border-radius:6px;padding:8px 10px;">${content ? escapeHtml(content) : '<span style="color:#9ca3af;">(none)</span>'}</div></div>`;
-  let html = `<div style="font-size:0.78rem;color:#6b7280;margin-bottom:10px;">Mode: <strong>${escapeHtml(d.mode)}</strong> · Tags used: <strong>${d.tags_used}</strong> · SKQ modules: <strong>${(d.skq_modules || []).length}</strong> · ${escapeHtml(d.prior_interactions || "no prior interactions")}</div>`;
-  html += sec("Company intelligence used (customer profile)", d.customer_profile);
-  html += sec("SKQ capabilities used", d.skq_capabilities);
-  if (d.company_notes) html += sec("Company notes", d.company_notes);
-  if (d.event_name) html += sec("Event", d.event_name);
-  if (d.extra_instructions) html += sec("Your extra instructions", d.extra_instructions);
-  html += `<div class="intel-cat-title" style="margin-top:6px;">Final prompt sent to Claude</div>
-      <pre style="font-size:0.74rem;white-space:pre-wrap;background:#0b1021;color:#d1d5db;border-radius:6px;padding:12px;max-height:340px;overflow:auto;">${escapeHtml(d.prompt || "")}</pre>`;
+  const ta = d.tag_analysis || { total: 0, used_count: 0, ignored_count: 0, tags: [] };
+  const tok = d.token_summary || { sections: [], total: 0 };
+
+  // 1) Summary
+  let html = `<div class="pi-summary">
+    <span><b>Mode</b> ${escapeHtml(d.mode)}</span>
+    <span><b>Tags</b> ${ta.used_count} used · ${ta.ignored_count} ignored · ${ta.total} total</span>
+    <span><b>SKQ</b> ${(d.skq_modules || []).length} module(s)</span>
+    <span><b>~Tokens</b> ${tok.total}</span>
+    <span>${escapeHtml(d.prior_interactions || "no prior interactions")}</span>
+  </div>`;
+
+  // 2) Why these context sources were used
+  if ((d.why || []).length) {
+    html += `<div class="pi-card"><div class="pi-h">Why these were selected</div>
+      <ul class="pi-why">${d.why.map((w) => `<li>${escapeHtml(w)}</li>`).join("")}</ul></div>`;
+  }
+
+  // 3) Company tags: ranked, used vs ignored with reasons (click a used tag to highlight)
+  html += `<div class="pi-card"><div class="pi-h">Company Tags <span class="pi-sub">— ${ta.used_count} used, ${ta.ignored_count} ignored of ${ta.total}. Click a used tag to highlight it in the prompt.</span></div>`;
+  if (!ta.tags.length) {
+    html += `<div class="pi-empty">No saved tags for this company yet.</div>`;
+  } else {
+    html += `<table class="pi-tags"><thead><tr><th>Tag</th><th>Score</th><th>Status / Reason</th></tr></thead><tbody>`;
+    html += ta.tags.map((t) => `
+      <tr class="${t.used ? "pi-used" : "pi-ignored"}" data-val="${escapeAttr(t.value)}" data-used="${t.used ? 1 : 0}">
+        <td>${t.used ? "✅" : "⚠️"} ${escapeHtml(t.name_en || t.value)}${t.name_cn ? ` <span class="pi-cn">${escapeHtml(t.name_cn)}</span>` : ""}</td>
+        <td class="pi-score">${t.score != null ? t.score.toFixed(2) : "—"}</td>
+        <td>${t.used ? `<span class="pi-tag-ok">Used${(t.where && t.where.length) ? " · in " + t.where.map(escapeHtml).join(", ") : ""}</span>` : `<span class="pi-tag-no">${escapeHtml(t.reason || "Ignored")}</span>`}</td>
+      </tr>`).join("");
+    html += `</tbody></table>`;
+  }
+  html += `</div>`;
+
+  // 4) Token usage by section
+  const maxTok = Math.max(1, ...tok.sections.map((s) => s.tokens));
+  html += `<div class="pi-card"><div class="pi-h">Token usage by section <span class="pi-sub">— approximate (~${APPROX_LABEL})</span></div>`;
+  html += tok.sections.map((s) => `
+    <div class="pi-bar-row"><span class="pi-bar-label">${escapeHtml(s.label)}</span>
+      <span class="pi-bar"><span class="pi-bar-fill" style="width:${Math.round((s.tokens / maxTok) * 100)}%"></span></span>
+      <span class="pi-bar-tok">${s.tokens}</span></div>`).join("");
+  html += `<div class="pi-bar-row" style="font-weight:700;"><span class="pi-bar-label">Total</span><span class="pi-bar"></span><span class="pi-bar-tok">${tok.total}</span></div></div>`;
+
+  // 5) Prompt sections (real text, collapsible) + full final prompt
+  html += `<div class="pi-card"><div class="pi-h">Prompt sections <span class="pi-sub">— the actual text sent, split by section</span></div>`;
+  html += (d.sections || []).map((s) => `
+    <details class="pi-section"><summary>${escapeHtml(s.label)} <span class="pi-sub">· ${s.tokens} tok</span></summary>
+      <pre class="pi-pre">${escapeHtml(s.text)}</pre></details>`).join("");
+  html += `</div>`;
+
+  html += `<div class="pi-h" style="margin-top:8px;">Final prompt sent to the LLM</div>
+    <pre class="pi-final" id="pi-final-prompt">${escapeHtml(d.prompt || "")}</pre>`;
+
   body.innerHTML = html;
+
+  // Click a used tag → highlight its occurrences in the final prompt.
+  body.querySelectorAll("tr.pi-used").forEach((tr) => tr.addEventListener("click", () => highlightTagInPrompt(tr.dataset.val)));
+}
+const APPROX_LABEL = "4 chars/token";
+
+function highlightTagInPrompt(value) {
+  const pre = document.getElementById("pi-final-prompt");
+  if (!pre || !_lastInspect) return;
+  const raw = _lastInspect.prompt || "";
+  if (!value) { pre.innerHTML = escapeHtml(raw); return; }
+  // Escape the prompt, then wrap escaped occurrences of the (escaped) value in <mark>.
+  const escVal = escapeHtml(value);
+  const escPrompt = escapeHtml(raw);
+  const safe = escVal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  pre.innerHTML = safe ? escPrompt.replace(new RegExp(safe, "gi"), (m) => `<mark class="pi-mark">${m}</mark>`) : escPrompt;
+  const first = pre.querySelector(".pi-mark");
+  if (first) first.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
 // Header toggles the body; "View / Edit Tags" jumps to the CRM intel tab.

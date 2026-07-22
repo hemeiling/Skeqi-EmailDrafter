@@ -1722,6 +1722,8 @@ async function buildDraftContext(contact, mode, extraInstructions, resolvedConta
   let tagsUsed = 0;
   let breakdown = null;
   let skqModules = [];
+  let rawCompanyTags = [];
+  let rawContactTags = [];
   if (extraInstructions) context.extraInstructions = extraInstructions;
 
   // Resolve the company the SAME way the modal does — by the contact's
@@ -1739,6 +1741,8 @@ async function buildDraftContext(contact, mode, extraInstructions, resolvedConta
       getTaxonomy(),
       resolvedContactId ? listContactTags(Number(resolvedContactId)) : Promise.resolve([]),
     ]);
+    rawCompanyTags = intel ? intel.tags : [];
+    rawContactTags = contactTags || [];
     const profile = buildCustomerProfile(companyRow, intel ? intel.tags : [], contactTags, taxonomy, includeTagIds);
     if (profile.count) {
       context.customerProfile = profile.text;
@@ -1762,7 +1766,80 @@ async function buildDraftContext(contact, mode, extraInstructions, resolvedConta
       }
     }
   }
-  return { context, tagsUsed, breakdown, skqModules, companyId: companyRow ? companyRow.id : null };
+  return { context, tagsUsed, breakdown, skqModules, companyId: companyRow ? companyRow.id : null,
+    companyTags: rawCompanyTags, contactTags: rawContactTags, includeTagIds };
+}
+
+// ── Prompt Analytics helpers (0 tokens; pure DB + string analysis) ──────────
+const APPROX_CHARS_PER_TOKEN = 4;
+const estimateTokens = (s) => Math.max(0, Math.round((s || '').length / APPROX_CHARS_PER_TOKEN));
+
+// Classify every available tag as used or ignored, with a score and a reason —
+// mirrors buildCustomerProfile's pick() so the analysis matches what's sent.
+function analyzeTagUsage(companyTags, contactTags, includeTagIds) {
+  const useSet = Array.isArray(includeTagIds) ? new Set(includeTagIds.map(Number)) : null;
+  const all = [...(companyTags || []), ...(contactTags || [])];
+  const tags = all.map((t) => {
+    const tier = tagTier(t.source, t.confidence);
+    const score = (t.confidence != null) ? Number(t.confidence) : null;
+    let used = false; let reason = '';
+    if (t.source === 'rejected') { used = false; reason = 'Rejected during tag review'; }
+    else if (useSet && !useSet.has(Number(t.tag_id))) { used = false; reason = 'Manually excluded for this email'; }
+    else if (tier.used) { used = true; reason = ''; }
+    else { used = false; reason = tier.tier === 'needs_review' ? `Below confidence threshold (${score != null ? score.toFixed(2) : 'n/a'} < 0.70 — needs review)` : 'Not eligible at current confidence tier'; }
+    return {
+      tag_id: t.tag_id, value: t.value, name_en: t.name_en || t.value, name_cn: t.name_cn || '',
+      category_key: t.category_key || '', source: t.source, tier: tier.tier, score, used, reason,
+    };
+  });
+  // De-dupe by value (company + contact can overlap), keep the "used" / higher score.
+  const byVal = new Map();
+  for (const t of tags) {
+    const k = (t.value || '').toLowerCase();
+    const prev = byVal.get(k);
+    if (!prev || (t.used && !prev.used) || ((t.score || 0) > (prev.score || 0))) byVal.set(k, t);
+  }
+  const deduped = [...byVal.values()].sort((a, b) => (b.score || 0) - (a.score || 0));
+  const used = deduped.filter((t) => t.used);
+  const ignored = deduped.filter((t) => !t.used);
+  return { total: deduped.length, used_count: used.length, ignored_count: ignored.length, tags: deduped };
+}
+
+// Split the ACTUAL assembled prompt into labeled sections by anchor markers, so
+// what's shown is byte-for-byte what's sent (never a summary). Unmatched text
+// attaches to the preceding section.
+const PROMPT_ANCHORS = [
+  { re: /^You are drafting/m, key: 'role', label: 'Role' },
+  { re: /Step 1 — Sender analysis/, key: 'personalization', label: 'Personalization Rules' },
+  { re: /\nRecipient:\n/, key: 'contact', label: 'Contact Information' },
+  { re: /\nSender \(the person writing/, key: 'sender', label: 'Sender' },
+  { re: /\nAdditional context/, key: 'additional', label: 'Additional Context' },
+  { re: /Customer Profile\n/, key: 'company', label: 'Company Context (tags)' },
+  { re: /Relevant SKQ capabilities/, key: 'product', label: 'Product Context (SKQ)' },
+  { re: /\n(Now write|Now write the)/, key: 'rules', label: 'Email Rules & CTA' },
+  { re: /\nAlso provide:/, key: 'output', label: 'Output Format' },
+];
+function sectionizePrompt(prompt) {
+  const found = [];
+  for (const a of PROMPT_ANCHORS) {
+    const m = prompt.match(a.re);
+    if (m && m.index != null) found.push({ ...a, index: m.index });
+  }
+  found.sort((x, y) => x.index - y.index);
+  const sections = [];
+  for (let i = 0; i < found.length; i++) {
+    const start = found[i].index;
+    const end = i + 1 < found.length ? found[i + 1].index : prompt.length;
+    const text = prompt.slice(start, end);
+    sections.push({ key: found[i].key, label: found[i].label, text, tokens: estimateTokens(text) });
+  }
+  // Any preamble before the first anchor.
+  if (found.length && found[0].index > 0) {
+    const pre = prompt.slice(0, found[0].index);
+    if (pre.trim()) sections.unshift({ key: 'intro', label: 'Intro', text: pre, tokens: estimateTokens(pre) });
+  }
+  if (!sections.length) sections.push({ key: 'prompt', label: 'Prompt', text: prompt, tokens: estimateTokens(prompt) });
+  return sections;
 }
 
 app.post('/api/draft-email', async (req, res) => {
@@ -1871,6 +1948,28 @@ app.post('/api/draft-email/inspect', async (req, res) => {
       } catch { priorSummary = null; }
     }
     const prompt = buildPromptForMode(resolvedMode, contact, sender || {}, built.context);
+
+    // ── Prompt Analytics ──────────────────────────────────────────────────
+    const sections = sectionizePrompt(prompt);
+    const tagAnalysis = analyzeTagUsage(built.companyTags, built.contactTags, built.includeTagIds);
+    // For each USED tag, note which prompt sections contain its text.
+    tagAnalysis.tags.forEach((t) => {
+      if (!t.used) { t.where = []; return; }
+      t.where = sections.filter((s) => t.value && s.text.toLowerCase().includes(String(t.value).toLowerCase())).map((s) => s.label);
+    });
+    const tokenSummary = {
+      sections: sections.map((s) => ({ key: s.key, label: s.label, tokens: s.tokens })),
+      total: sections.reduce((n, s) => n + s.tokens, 0),
+    };
+    // Concise, rule-based "why" (which context sources were used — NOT chain-of-thought).
+    const why = [];
+    const topUsed = tagAnalysis.tags.filter((t) => t.used).slice(0, 3);
+    if (topUsed[0]) why.push(`Highest-relevance tag: “${topUsed[0].name_en}” (score ${topUsed[0].score != null ? topUsed[0].score.toFixed(2) : 'n/a'}).`);
+    if ((built.skqModules || []).length) why.push(`${built.skqModules.length} SKQ capability match(es) added from the tag → product catalog.`);
+    if (tagAnalysis.ignored_count) why.push(`${tagAnalysis.ignored_count} tag(s) omitted — see the reason on each below.`);
+    if (built.context.extraInstructions) why.push('Your additional instructions were included.');
+    if (!tagAnalysis.total) why.push('No saved tags for this company — run tag analysis to enrich the prompt.');
+
     res.json({
       ok: true,
       mode: resolvedMode,
@@ -1884,6 +1983,11 @@ app.post('/api/draft-email/inspect', async (req, res) => {
       extra_instructions: built.context.extraInstructions || null,
       prior_interactions: priorSummary,
       prompt,
+      // analytics
+      sections,
+      tag_analysis: tagAnalysis,
+      token_summary: tokenSummary,
+      why,
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to build prompt preview', details: err.message });
