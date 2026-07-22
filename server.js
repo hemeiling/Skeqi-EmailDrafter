@@ -18,6 +18,7 @@ const {
   logApolloResult, listApolloResults,
   insertEmailDraftVersion, listEmailDraftsForContact,
   insertCommunication, listTimelineForContact, getCommunication,
+  getAttachmentsWithDataForCommunication, markCommunicationSend,
   updateCommunication, deleteCommunication, duplicateCommunication, findDuplicateEmail,
   getCurrentDraftForContact, listDraftVersionsForContact, saveDraftEdit,
   setCommunicationStatus, trashCommunication, restoreCommunication,
@@ -51,10 +52,14 @@ const { contactsToCsv, contactsToXml, contactsToXlsx, safeFilename } = require('
 const { parseCompanyFile } = require('./companyImport');
 const { normalizeFileToImages } = require('./cardBatch');
 const { getUsage, resetUsage, recordAiEvent, setPersist, setPricingTable } = require('./usage');
+const emailSvc = require('./email');
+const providers = require('./providers');
 const {
   recordAiUsage, aiUsageTotals, aiUsageByFeature, aiUsageByCompany, estimateAiSaved,
   getAiBudget, setAiBudget, listActivePricing, buildPeriodFilter,
   aiUsageKpis, aiUsageTimeseries, aiUsageFeatureBreakdown, aiUsageByModel, aiUsageByUser, aiUsageEvents,
+  getEmailOrgConfig, saveEmailOrgConfig, getEmailUserAccount, getEmailUserSecret, saveEmailUserAccount,
+  getEmailUserPrefs, saveEmailUserPrefs, recordEmailTest, listEmailTests,
   getTaxonomy, getCompanyIntelligence, listCompanyTags, applyCompanyTagSuggestions,
   setCompanyTagStatus, addManualCompanyTag, removeCompanyTag,
   setCompanyResearch, markIntelligenceReviewed, missingCompanyCategories,
@@ -66,10 +71,15 @@ const {
 const { researchCompanyTags } = require('./research');
 
 const app = express();
+app.set('trust proxy', true); // so req.protocol is https behind Render's proxy (OAuth redirect URIs)
 const PORT = config.PORT;
 
 // Persist every AI usage event (recorded via usage.recordAiEvent) to the DB.
 setPersist(recordAiUsage);
+
+// Short-lived OAuth state store (CSRF protection for the connect flow).
+const _oauthStates = new Map();
+function baseUrl(req) { return `${req.protocol}://${req.get('host')}`; }
 
 // Budget guard: block a new AI call when the daily or monthly token budget is
 // already exceeded. Returns null when allowed, or an { error } object to send.
@@ -118,11 +128,22 @@ function timingSafeStringEqual(a, b) {
 const SERVER_SESSION_ID = crypto.randomUUID();
 // Who/what to attribute AI usage to on a given request.
 function reqUser(req) { return (req && req.appUser) || config.APP_USERNAME || 'local'; }
+// Admin = the login-gate user, or any user listed in ADMIN_USERS. With no login
+// gate configured (local dev), the single user is treated as admin.
+function isAdmin(req) {
+  if (!config.isLoginGateConfigured()) return true;
+  const u = reqUser(req);
+  const admins = String(process.env.ADMIN_USERS || config.APP_USERNAME || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return admins.includes(u) || u === config.APP_USERNAME;
+}
 
 app.use((req, res, next) => {
   const expectedUser = config.APP_USERNAME;
   const expectedPass = config.APP_PASSWORD;
   if (!expectedUser || !expectedPass) return next();
+
+  // Health check must stay public so Render's probe can reach it without creds.
+  if (req.path === '/healthz') return next();
 
   const header = req.headers.authorization || '';
   let user = '';
@@ -1429,6 +1450,92 @@ app.post('/api/communications/:id/status', async (req, res) => {
   }
 });
 
+// Resolve the current send readiness + engine for a user (single provider flow).
+async function resolveSender(userId) {
+  const cfg = await getEmailOrgConfig();
+  const acct = await getEmailUserAccount(userId);
+  const secret = await getEmailUserSecret(userId);
+  const isOAuth = OAUTH_PROVIDER_TYPES.includes(cfg.provider_type);
+  const enabled = Boolean(cfg.integration_enabled);
+  const canSend = isOAuth
+    ? enabled && Boolean(cfg.oauth_connected)
+    : enabled && Boolean(acct && acct.connection_status === 'connected');
+  const senderEmail = isOAuth ? cfg.oauth_email : (acct && acct.sender_email);
+  const senderName = isOAuth ? cfg.oauth_display_name : (acct && acct.sender_name);
+  return { cfg, acct, secret, isOAuth, canSend, senderEmail, senderName };
+}
+
+// POST /api/communications/:id/send — actually send the email to its recipient.
+app.post('/api/communications/:id/send', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const b = req.body || {};
+    // Persist the latest edits first so we send exactly what's on screen.
+    const fields = {};
+    for (const k of ['to_email', 'cc', 'bcc', 'subject', 'body']) if (b[k] != null) fields[k] = b[k];
+    if (Object.keys(fields).length) await saveDraftEdit(id, fields, false);
+
+    const comm = await getCommunication(id);
+    if (!comm) return res.status(404).json({ error: 'Not found' });
+    const to = (b.to_email != null ? b.to_email : comm.to_email) || '';
+    if (!to.trim()) return res.status(400).json({ error: 'Add a recipient before sending.' });
+
+    const s = await resolveSender(reqUser(req));
+    if (!s.canSend) {
+      return res.status(400).json({ error: 'not_ready', message: 'Email sending is not fully configured. Connect your mailbox in Settings → My Email Account.' });
+    }
+    if (s.isOAuth) {
+      return res.status(400).json({ error: 'oauth_send_pending', message: 'Sending via Microsoft/Google API arrives in a later phase. For now use an SMTP provider (e.g. GoDaddy Microsoft 365) to send.' });
+    }
+
+    await markCommunicationSend(id, { delivery_status: 'sending' });
+    console.log(`[email:send] comm=${id} provider=${s.cfg.provider_type} from=${s.senderEmail} to=${to}`);
+
+    const atts = await getAttachmentsWithDataForCommunication(id);
+    const attachments = atts.map((a) => ({ filename: a.original_filename, content: a.file_data, contentType: a.mime_type || undefined }));
+
+    const engine = providers.createEngine({ orgConfig: s.cfg, account: s.acct, secret: s.secret });
+    const result = await engine.sendEmail({
+      to, cc: comm.cc || undefined, bcc: comm.bcc || undefined,
+      subject: comm.subject || '(no subject)', text: comm.body || '', attachments,
+    });
+    console.log(`[email:send] comm=${id} result ok=${result.ok} — ${result.message}`);
+
+    if (!result.ok) {
+      const failed = await markCommunicationSend(id, { delivery_status: 'failed', send_error: result.message });
+      await recordEmailTest({ userId: reqUser(req), kind: 'send', scope: 'user', target: to, ok: false, message: result.message });
+      return res.status(502).json({ error: 'send_failed', message: result.message, communication: failed });
+    }
+    const sent = await markCommunicationSend(id, {
+      delivery_status: 'sent', message_id: result.id || null, send_error: null,
+      status: 'approved', sent_at: new Date(),
+    });
+    await recordEmailTest({ userId: reqUser(req), kind: 'send', scope: 'user', target: to, ok: true, message: `Sent (id ${result.id || '?'})` });
+    if (comm.contact_id) { try { await logContactActivity(comm.contact_id, 'email_sent', `Email sent to ${to}: ${comm.subject || '(no subject)'}`); } catch (e) { /* non-fatal */ } }
+    res.json({ ok: true, communication: sent, result });
+  } catch (err) {
+    console.error('[email:send] error:', err.message);
+    try { await markCommunicationSend(id, { delivery_status: 'failed', send_error: err.message }); } catch (e) { /* ignore */ }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/communications/:id/schedule — store a future send time (queued).
+// NOTE: the background dispatcher that actually fires scheduled sends is a later
+// phase; this records intent and marks the message Queued.
+app.post('/api/communications/:id/schedule', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const when = (req.body && req.body.scheduled_at) ? new Date(req.body.scheduled_at) : null;
+    if (!when || isNaN(when.getTime()) || when.getTime() < Date.now()) {
+      return res.status(400).json({ error: 'Pick a valid future date and time.' });
+    }
+    const comm = await markCommunicationSend(id, { delivery_status: 'queued', scheduled_at: when });
+    if (comm && comm.contact_id) { try { await logContactActivity(comm.contact_id, 'email_scheduled', `Email scheduled for ${when.toLocaleString()}`); } catch (e) { /* ignore */ } }
+    res.json({ ok: true, communication: comm, note: 'Queued. Automatic dispatch of scheduled sends is a later phase.' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // POST /api/communications/:id/trash | /restore | /archive | /unarchive
 app.post('/api/communications/:id/trash', async (req, res) => {
   try {
@@ -2072,6 +2179,359 @@ app.post('/api/settings/sender', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to save sender profile' });
   }
+});
+
+// =========================================================================
+// Email configuration (My Email Account + Org config [admin] + Preferences)
+// =========================================================================
+
+app.get('/api/me', (req, res) => {
+  res.json({ ok: true, user: reqUser(req), is_admin: isAdmin(req) });
+});
+
+// ── Simplified email configuration: provider + domain + OAuth connect ──
+// Public config (no tokens/secrets ever leave the server).
+app.get('/api/email/config', async (req, res) => {
+  try {
+    const c = await getEmailOrgConfig();
+    const provider = c.provider_type || '';
+    res.json({
+      ok: true, is_admin: isAdmin(req),
+      provider, domain: c.allowed_domain || '',
+      connected: Boolean(c.oauth_connected), email: c.oauth_email || '', display_name: c.oauth_display_name || '',
+      connected_at: c.oauth_connected_at || null,
+      client_configured: provider ? emailSvc.oauthConfigured(provider) : false,
+    });
+  } catch (err) { res.status(500).json({ error: 'Failed to load config', details: err.message }); }
+});
+
+// Save provider + domain (admin). Changing provider resets the connection.
+app.post('/api/email/config', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    const provider = String((req.body || {}).provider || '').trim();
+    const domain = String((req.body || {}).domain || '').trim().toLowerCase();
+    const patch = { provider_type: provider, allowed_domain: domain };
+    const cur = await getEmailOrgConfig();
+    if (cur.provider_type && cur.provider_type !== provider) {
+      Object.assign(patch, { oauth_connected: false, oauth_email: null, oauth_access_token: null, oauth_refresh_token: null, integration_enabled: false });
+    }
+    await saveEmailOrgConfig(patch);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Failed to save', details: err.message }); }
+});
+
+// Start the OAuth flow. Returns the provider auth URL, or actionable setup
+// instructions if the org's OAuth app credentials aren't configured yet.
+app.get('/api/email/oauth/start', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    const provider = String(req.query.provider || '');
+    const meta = emailSvc.oauthProviderMeta(provider);
+    if (!meta) return res.status(400).json({ error: 'Unknown provider' });
+    const redirectUri = baseUrl(req) + '/api/email/oauth/callback';
+    if (!emailSvc.oauthConfigured(provider)) {
+      const env = emailSvc.oauthEnvNames(provider);
+      return res.status(400).json({
+        error: 'not_configured',
+        message: `Skeqi IT must register a ${meta.label} OAuth app once, then set ${env.id} and ${env.secret} as environment variables.`,
+        env, redirect_uri: redirectUri, provider_label: meta.label,
+      });
+    }
+    const state = crypto.randomBytes(16).toString('hex');
+    _oauthStates.set(state, { provider, at: Date.now() });
+    // prune old states
+    for (const [k, v] of _oauthStates) if (Date.now() - v.at > 600000) _oauthStates.delete(k);
+    const creds = emailSvc.oauthCreds(provider);
+    const url = emailSvc.oauthAuthUrl(provider, { clientId: creds.clientId, redirectUri, state });
+    res.json({ ok: true, url });
+  } catch (err) { res.status(500).json({ error: 'Failed to start OAuth', details: err.message }); }
+});
+
+// OAuth redirect target — the provider sends the browser here with a code.
+app.get('/api/email/oauth/callback', async (req, res) => {
+  try {
+    const { code, state, error, error_description } = req.query;
+    if (error) return res.redirect('/?email=error&reason=' + encodeURIComponent(error_description || error));
+    const s = _oauthStates.get(state);
+    if (!s) return res.redirect('/?email=error&reason=invalid_state');
+    _oauthStates.delete(state);
+    const creds = emailSvc.oauthCreds(s.provider);
+    const redirectUri = baseUrl(req) + '/api/email/oauth/callback';
+    const tokens = await emailSvc.oauthExchangeCode(s.provider, { code, ...creds, redirectUri });
+    const info = await emailSvc.oauthUserInfo(s.provider, tokens.access_token);
+    await saveEmailOrgConfig({
+      provider_type: s.provider, oauth_connected: true, oauth_email: info.email, oauth_display_name: info.name,
+      oauth_connected_at: new Date(), oauth_access_token: tokens.access_token, oauth_refresh_token: tokens.refresh_token || null,
+      oauth_token_expires: tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000) : null,
+      integration_enabled: true,
+    });
+    res.redirect('/?email=connected');
+  } catch (err) {
+    res.redirect('/?email=error&reason=' + encodeURIComponent(err.message || 'connect_failed'));
+  }
+});
+
+app.post('/api/email/disconnect', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    await saveEmailOrgConfig({ oauth_connected: false, oauth_email: null, oauth_display_name: null, oauth_access_token: null, oauth_refresh_token: null, oauth_token_expires: null, integration_enabled: false });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Failed', details: err.message }); }
+});
+
+// Derives a status badge string from an org-config row.
+// Strip OAuth tokens (and any secret) before an org config leaves the server.
+function publicOrgConfig(cfg) {
+  if (!cfg) return cfg;
+  const { oauth_access_token, oauth_refresh_token, ...safe } = cfg;
+  return safe;
+}
+// Organization *configuration* state (separate from per-user connection state).
+function orgStatus(cfg) {
+  if (!cfg || !cfg.provider_type) return 'not_configured';
+  // OAuth providers: configuration is complete once the org account is connected.
+  if (cfg.provider_type === 'microsoft365' || cfg.provider_type === 'google') {
+    return cfg.oauth_connected ? 'ready_for_users' : 'not_configured';
+  }
+  const hasCore = cfg.smtp_host && cfg.smtp_port && cfg.imap_host && cfg.imap_port;
+  if (!hasCore) return 'configuration_incomplete';
+  if (cfg.integration_enabled && cfg.smtp_verified && cfg.imap_verified) return 'ready_for_users';
+  if (cfg.smtp_verified && cfg.imap_verified) return 'verified';
+  // Servers are present but not yet verified — this is a valid, complete config,
+  // NOT "incomplete". Verification is a connection concern, tested per user.
+  return 'servers_configured';
+}
+
+// Provider catalog — labels, connection type, and default SMTP/IMAP endpoints.
+// Drives the Settings dropdown so the UI stays in sync with the backend registry.
+app.get('/api/email/providers', (req, res) => {
+  res.json({ ok: true, providers: providers.listProviders() });
+});
+
+// Auto Detect: infer the provider from an email address / domain via MX records.
+app.post('/api/email/detect-provider', async (req, res) => {
+  try {
+    const email = String((req.body || {}).email || '').trim();
+    res.json(await providers.detectProvider(email));
+  } catch (err) { res.status(500).json({ error: 'Detection failed', details: err.message }); }
+});
+
+// Org config: readable by any logged-in user (no secrets stored here); only
+// admins may modify or run tests.
+app.get('/api/email/org-config', async (req, res) => {
+  try {
+    const cfg = await getEmailOrgConfig();
+    res.json({ ok: true, config: publicOrgConfig(cfg), status: orgStatus(cfg), is_admin: isAdmin(req) });
+  } catch (err) { res.status(500).json({ error: 'Failed to load config', details: err.message }); }
+});
+
+app.post('/api/email/org-config', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    const patch = { ...(req.body || {}) };
+    const cur = await getEmailOrgConfig();
+    // Provider change ⇒ wipe the previous provider's state so ONLY the newly
+    // selected provider's flow can ever run (no legacy Microsoft/OAuth or stale
+    // SMTP endpoints lingering under a different provider).
+    if (patch.provider_type && patch.provider_type !== cur.provider_type) {
+      console.log(`[email:config] provider changed ${cur.provider_type || '(none)'} → ${patch.provider_type} — clearing legacy OAuth grant + verification flags`);
+      Object.assign(patch, {
+        oauth_connected: false, oauth_email: null, oauth_display_name: null,
+        oauth_access_token: null, oauth_refresh_token: null, oauth_token_expires: null,
+        oauth_connected_at: null,
+        smtp_verified: false, imap_verified: false, integration_enabled: false,
+      });
+    }
+    // Auto-enable sending for SMTP providers once servers are present — removes
+    // the confusing manual "Enable Integration" step. Actual sending still
+    // requires each user to connect their own mailbox (a real auth test).
+    const effectiveProvider = patch.provider_type || cur.provider_type;
+    const isSmtpProvider = effectiveProvider && effectiveProvider !== 'microsoft365' && effectiveProvider !== 'google';
+    const smtpHost = patch.smtp_host !== undefined ? patch.smtp_host : cur.smtp_host;
+    const imapHost = patch.imap_host !== undefined ? patch.imap_host : cur.imap_host;
+    if (isSmtpProvider && smtpHost && imapHost) patch.integration_enabled = true;
+
+    const cfg = await saveEmailOrgConfig(patch);
+    console.log(`[email:config] saved provider=${cfg.provider_type || '(none)'} smtp=${cfg.smtp_host || '(none)'}:${cfg.smtp_port || '?'} imap=${cfg.imap_host || '(none)'}:${cfg.imap_port || '?'} domain=${cfg.allowed_domain || '(none)'} integration_enabled=${cfg.integration_enabled}`);
+    res.json({ ok: true, config: publicOrgConfig(cfg), status: orgStatus(cfg) });
+  } catch (err) { res.status(500).json({ error: 'Failed to save config', details: err.message }); }
+});
+
+app.post('/api/email/org-config/test-smtp', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    const cfg = await getEmailOrgConfig();
+    const secure = cfg.smtp_encryption === 'ssl' || cfg.smtp_encryption === 'tls' || Number(cfg.smtp_port) === 465;
+    console.log(`[email:test-smtp] provider=${cfg.provider_type || '(none)'} host=${cfg.smtp_host || '(none)'}:${cfg.smtp_port || '?'} encryption=${cfg.smtp_encryption || '?'} secure=${secure}`);
+    const result = await emailSvc.probeHost(cfg.smtp_host, cfg.smtp_port, secure);
+    console.log(`[email:test-smtp] result ok=${result.ok} — ${result.message}`);
+    await saveEmailOrgConfig({ smtp_verified: result.ok });
+    await recordEmailTest({ userId: reqUser(req), kind: 'smtp', scope: 'org', target: `${cfg.smtp_host}:${cfg.smtp_port}`, ok: result.ok, message: result.message });
+    res.json({ ok: true, result });
+  } catch (err) { res.status(500).json({ error: 'Test failed', details: err.message }); }
+});
+
+app.post('/api/email/org-config/test-imap', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    const cfg = await getEmailOrgConfig();
+    const secure = cfg.imap_encryption === 'ssl' || cfg.imap_encryption === 'tls' || Number(cfg.imap_port) === 993;
+    console.log(`[email:test-imap] provider=${cfg.provider_type || '(none)'} host=${cfg.imap_host || '(none)'}:${cfg.imap_port || '?'} encryption=${cfg.imap_encryption || '?'} secure=${secure}`);
+    const result = await emailSvc.probeHost(cfg.imap_host, cfg.imap_port, secure);
+    console.log(`[email:test-imap] result ok=${result.ok} — ${result.message}`);
+    await saveEmailOrgConfig({ imap_verified: result.ok });
+    await recordEmailTest({ userId: reqUser(req), kind: 'imap', scope: 'org', target: `${cfg.imap_host}:${cfg.imap_port}`, ok: result.ok, message: result.message });
+    res.json({ ok: true, result });
+  } catch (err) { res.status(500).json({ error: 'Test failed', details: err.message }); }
+});
+
+app.post('/api/email/org-config/validate-domain', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    const cfg = await getEmailOrgConfig();
+    const dns = await emailSvc.validateDomain(cfg.allowed_domain || 'skeqi.com');
+    await saveEmailOrgConfig({ spf_status: dns.spf, dkim_status: dns.dkim, dmarc_status: dns.dmarc });
+    await recordEmailTest({ userId: reqUser(req), kind: 'domain', scope: 'org', target: cfg.allowed_domain || 'skeqi.com', ok: dns.spf === 'pass', message: `SPF ${dns.spf} · DKIM ${dns.dkim} · DMARC ${dns.dmarc}` });
+    res.json({ ok: true, result: dns });
+  } catch (err) { res.status(500).json({ error: 'Domain validation failed', details: err.message }); }
+});
+
+async function setIntegration(req, res, enable) {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    if (enable) {
+      const cur = await getEmailOrgConfig();
+      if (!cur.smtp_verified || !cur.imap_verified) {
+        return res.status(400).json({ error: 'Verify SMTP and IMAP before enabling the integration.' });
+      }
+    }
+    const cfg = await saveEmailOrgConfig({ integration_enabled: enable });
+    res.json({ ok: true, config: publicOrgConfig(cfg), status: orgStatus(cfg) });
+  } catch (err) { res.status(500).json({ error: 'Failed', details: err.message }); }
+}
+app.post('/api/email/org-config/enable', (req, res) => setIntegration(req, res, true));
+app.post('/api/email/org-config/disable', (req, res) => setIntegration(req, res, false));
+
+// Whether real sending is available yet (used to gate the Draft modal) and the
+// sender identity. Two provider families:
+//   • OAuth providers (Microsoft 365 / Google): the org-level sign-in is enough,
+//     and the sender is the signed-in account.
+//   • SMTP/IMAP providers (NetEase Enterprise Mail / Custom): the org SMTP+IMAP
+//     must be verified AND each user must connect their own @domain mailbox.
+const OAUTH_PROVIDER_TYPES = ['microsoft365', 'google'];
+app.get('/api/email/status', async (req, res) => {
+  try {
+    const cfg = await getEmailOrgConfig();
+    const acct = await getEmailUserAccount(reqUser(req));
+    const enabled = Boolean(cfg && cfg.integration_enabled);
+    const isOAuth = OAUTH_PROVIDER_TYPES.includes(cfg.provider_type);
+    let canSend, email, name;
+    if (isOAuth) {
+      canSend = enabled && Boolean(cfg.oauth_connected);
+      email = cfg.oauth_email || ''; name = cfg.oauth_display_name || '';
+    } else {
+      // SMTP providers: a successful per-user mailbox auth test is the real proof
+      // of send capability (stronger than the org-level reachability probe).
+      const userConnected = Boolean(acct && acct.connection_status === 'connected');
+      canSend = enabled && userConnected;
+      email = (acct && acct.sender_email) || ''; name = (acct && acct.sender_name) || '';
+    }
+    res.json({
+      ok: true, ready: canSend, can_send: canSend,
+      provider: cfg.provider_type || '', email, display_name: name,
+      message: canSend ? '' : 'Email sending is not yet fully configured. Please complete and verify the organization and mailbox settings.',
+    });
+  } catch (err) { res.status(500).json({ error: 'Failed', details: err.message }); }
+});
+
+// Per-user mailbox account (every logged-in user).
+app.get('/api/email/account', async (req, res) => {
+  try { res.json({ ok: true, account: await getEmailUserAccount(reqUser(req)) }); }
+  catch (err) { res.status(500).json({ error: 'Failed', details: err.message }); }
+});
+
+app.post('/api/email/account', async (req, res) => {
+  try {
+    const cfg = await getEmailOrgConfig();
+    const b = req.body || {};
+    const domain = (cfg.allowed_domain || 'skeqi.com').toLowerCase();
+    if (b.sender_email && !String(b.sender_email).toLowerCase().endsWith('@' + domain)) {
+      return res.status(400).json({ error: `Sender email must be an @${domain} address.` });
+    }
+    const patch = {};
+    for (const k of ['sender_name', 'sender_email', 'reply_to', 'mailbox_username', 'auth_method']) if (b[k] != null) patch[k] = b[k];
+    if (b.secret) patch.secret = b.secret;
+    if (b.sync_enabled != null) patch.sync_enabled = Boolean(b.sync_enabled);
+    const account = await saveEmailUserAccount(reqUser(req), patch);
+    res.json({ ok: true, account });
+  } catch (err) { res.status(500).json({ error: 'Failed to save account', details: err.message }); }
+});
+
+// Provider-agnostic, staged mailbox verification. The engine is built ONLY from
+// the currently-selected provider, so exactly one authentication flow runs.
+async function accountTest(req, res) {
+  try {
+    const userId = reqUser(req);
+    const cfg = await getEmailOrgConfig();
+    const acct = await getEmailUserAccount(userId);
+    const secret = await getEmailUserSecret(userId);
+    console.log(`[email:verify] user=${userId} selectedProvider=${cfg.provider_type || '(none)'} — running ONLY this provider's flow`);
+    const engine = providers.createEngine({ orgConfig: cfg, account: acct, secret });
+    const result = await engine.verifyConnectionStaged((line) => console.log('[email:verify] ' + line));
+    const patch = { connection_status: result.ok ? 'connected' : 'failed' };
+    if (result.ok) patch.last_sync_at = new Date();
+    const account = await saveEmailUserAccount(userId, patch);
+    const summary = (result.stages || []).map((s) => `${s.stage}:${s.ok ? 'ok' : 'fail'}`).join(' ');
+    await recordEmailTest({ userId, kind: 'mailbox', scope: 'user', target: account.sender_email || '', ok: result.ok, message: summary });
+    res.json({ ok: true, result: { ok: result.ok, stages: result.stages, provider: cfg.provider_type || '' }, account });
+  } catch (err) {
+    console.error('[email:verify] error:', err.message);
+    res.status(500).json({ error: 'Test failed', details: err.message });
+  }
+}
+app.post('/api/email/account/test', accountTest);
+app.post('/api/email/account/reconnect', accountTest);
+
+app.post('/api/email/account/send-test', async (req, res) => {
+  try {
+    const cfg = await getEmailOrgConfig();
+    if (!cfg.integration_enabled) return res.status(400).json({ error: 'Email sending is not enabled by your administrator yet.' });
+    const acct = await getEmailUserAccount(reqUser(req));
+    const secret = await getEmailUserSecret(reqUser(req));
+    if (!acct || !acct.sender_email || !secret) return res.status(400).json({ error: 'Connect your mailbox first.' });
+    // Send via the provider engine — a self-addressed test message.
+    const engine = providers.createEngine({ orgConfig: cfg, account: acct, secret });
+    const result = await engine.sendEmail({
+      to: acct.sender_email,
+      subject: 'Skeqi EmailDrafter — test email',
+      text: 'This is a test email from Skeqi EmailDrafter. If you received it, sending is working.',
+    });
+    await recordEmailTest({ userId: reqUser(req), kind: 'send', scope: 'user', target: acct.sender_email, ok: result.ok, message: result.message });
+    res.json({ ok: true, result });
+  } catch (err) { res.status(500).json({ error: 'Send failed', details: err.message }); }
+});
+
+app.post('/api/email/account/disconnect', async (req, res) => {
+  try { res.json({ ok: true, account: await saveEmailUserAccount(reqUser(req), { connection_status: 'disconnected', sync_enabled: false }) }); }
+  catch (err) { res.status(500).json({ error: 'Failed', details: err.message }); }
+});
+
+app.get('/api/email/prefs', async (req, res) => {
+  try { res.json({ ok: true, prefs: await getEmailUserPrefs(reqUser(req)) }); }
+  catch (err) { res.status(500).json({ error: 'Failed', details: err.message }); }
+});
+app.post('/api/email/prefs', async (req, res) => {
+  try { res.json({ ok: true, prefs: await saveEmailUserPrefs(reqUser(req), req.body || {}) }); }
+  catch (err) { res.status(500).json({ error: 'Failed to save preferences', details: err.message }); }
+});
+
+// Recent connection-test results (org tests + this user's own; admins see all).
+app.get('/api/email/test-history', async (req, res) => {
+  try {
+    const tests = await listEmailTests({ userId: reqUser(req), limit: 20, adminAll: isAdmin(req) });
+    res.json({ ok: true, tests });
+  } catch (err) { res.status(500).json({ error: 'Failed', details: err.message }); }
 });
 
 // =========================================================================

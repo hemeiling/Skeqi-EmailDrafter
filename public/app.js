@@ -68,9 +68,15 @@ function initAppShell() {
   });
 }
 
+// The connected mailbox address (from /api/email/status); "" until connected.
+let _connectedEmail = "";
 function updateUserMenuFromSender() {
   const name = (_sender && _sender.name) || "";
-  document.getElementById("app-user-menu-name").textContent = name || "Your Profile";
+  // From identity = profile name + connected mailbox, e.g. "Meiling He <info@rosalytics.com>".
+  const label = name
+    ? (_connectedEmail ? `${name} <${_connectedEmail}>` : name)
+    : (_connectedEmail || "Your Profile");
+  document.getElementById("app-user-menu-name").textContent = label;
   document.getElementById("app-user-avatar").textContent = name ? name.trim()[0].toUpperCase() : "U";
 }
 
@@ -669,6 +675,7 @@ async function openDraftModalForContact(contact, refreshFn, options = {}) {
   document.getElementById("modal-extra-instructions").value = "";
   openModal("email-modal");
   loadModalIntel(contact); // saved company intelligence + tags used in generation (no AI)
+  loadEmailSendStatus();    // show the "sending not configured yet" banner if applicable
   document.getElementById("modal-body").innerHTML = `<div style="text-align:center;padding:32px 0;"><span class="spinner"></span> Loading…</div>`;
   document.getElementById("draft-library-list").innerHTML = "";
   resetImportedEmailsPanel();
@@ -839,73 +846,110 @@ const DRAFT_ACTION_BAR = {
   trash: [["restore", "Restore", "btn-saved"]],
 };
 
+// Combined status: the send/delivery state wins over the editorial status once a
+// send has been attempted, so the badge reflects Draft→Queued→Sending→Sent/Failed.
+const DELIVERY_STATUS_LABELS = {
+  queued: "Queued", sending: "Sending", sent: "Sent", delivered: "Delivered",
+  opened: "Opened", clicked: "Clicked", replied: "Replied", bounced: "Bounced", failed: "Failed",
+};
+const DELIVERY_STATUS_CLS = {
+  queued: "amber", sending: "blue", sent: "green", delivered: "green",
+  opened: "green", clicked: "green", replied: "green", bounced: "red", failed: "red",
+};
+function draftStatusBadgeHtml(comm) {
+  const ds = comm.delivery_status;
+  if (ds && DELIVERY_STATUS_LABELS[ds]) {
+    return `<span class="draft-status-badge del-${DELIVERY_STATUS_CLS[ds]}">${DELIVERY_STATUS_LABELS[ds]}</span>`;
+  }
+  const status = effectiveDraftStatus(comm);
+  return `<span class="draft-status-badge status-${status}">${DRAFT_STATUS_LABELS[status] || status}</span>`;
+}
+
 function renderDraftEditor(comm, contact) {
   const status = effectiveDraftStatus(comm);
   const note = comm.claude_configured === false
     ? `<div class="draft-note">⚠ Claude key not set — this is a template stub. Add a Claude key in the Config section for AI-generated drafts.</div>`
     : "";
+  const fromName = (_sender && _sender.name) || "";
+  const fromLine = _connectedEmail
+    ? `${escapeHtml(fromName)} <span class="compose-from-email">&lt;${escapeHtml(_connectedEmail)}&gt;</span>`
+    : `${escapeHtml(fromName || "You")} <span class="compose-from-warn">— mailbox not connected</span>`;
 
   document.getElementById("modal-body").innerHTML = `
     ${note}
     <div class="draft-meta-row">
       <div>
-        <span class="draft-status-badge status-${status}">${DRAFT_STATUS_LABELS[status] || status}</span>
+        ${draftStatusBadgeHtml(comm)}
         <span class="draft-meta-text" style="margin-left:8px;">Source: ${DRAFT_SOURCE_LABELS[comm.source] || comm.source || "AI Generated"}</span>
       </div>
       <div class="draft-meta-text">
-        ${comm.created_at ? `Created ${new Date(comm.created_at).toLocaleString()}` : ""}
-        ${comm.updated_at && comm.updated_at !== comm.created_at ? ` · Edited ${new Date(comm.updated_at).toLocaleString()}` : ""}
+        <span id="draft-autosave-status" class="autosave-status"></span>
+        ${comm.created_at ? ` · Created ${new Date(comm.created_at).toLocaleString()}` : ""}
       </div>
     </div>
 
-    <div class="draft-recipient-grid">
-      <div><div class="draft-label">Recipient</div><input class="draft-field" id="draft-field-to" value="${escapeAttr(comm.to_email || "")}" placeholder="recipient@example.com"></div>
-      <div><div class="draft-label">CC</div><input class="draft-field" id="draft-field-cc" value="${escapeAttr(comm.cc || "")}" placeholder="optional"></div>
-    </div>
-    <div class="draft-recipient-grid">
-      <div><div class="draft-label">BCC</div><input class="draft-field" id="draft-field-bcc" value="${escapeAttr(comm.bcc || "")}" placeholder="optional"></div>
-      <div><div class="draft-label">From</div><input class="draft-field" value="${escapeAttr((_sender && _sender.name) || "")}" disabled></div>
+    <!-- Modern compose header -->
+    <div class="compose-header">
+      <div class="compose-row"><label>From</label><div class="compose-from">${fromLine}</div></div>
+      <div class="compose-row"><label>To</label>
+        <div class="chip-input" id="chips-to"></div>
+        <input type="hidden" id="draft-field-to" value="${escapeAttr(comm.to_email || "")}">
+      </div>
+      <div class="compose-row"><label>Cc</label>
+        <div class="chip-input" id="chips-cc"></div>
+        <input type="hidden" id="draft-field-cc" value="${escapeAttr(comm.cc || "")}">
+      </div>
+      <div class="compose-row"><label>Bcc</label>
+        <div class="chip-input" id="chips-bcc"></div>
+        <input type="hidden" id="draft-field-bcc" value="${escapeAttr(comm.bcc || "")}">
+      </div>
+      <div class="compose-row"><label>Subject</label>
+        <input class="compose-subject" id="draft-field-subject" value="${escapeAttr(comm.subject || "")}" placeholder="Subject">
+      </div>
     </div>
 
     <div class="draft-section">
-      <div class="draft-label">Subject Line</div>
-      <input class="draft-field" id="draft-field-subject" value="${escapeAttr(comm.subject || "")}">
-    </div>
-    <div class="draft-section">
-      <div class="draft-label">Email Body</div>
-      <textarea class="draft-field" id="draft-field-body" rows="8">${escapeHtml(comm.body || "")}</textarea>
-    </div>
-    <div class="draft-section">
-      <div class="draft-label">Follow-up Template</div>
-      <textarea class="draft-field" id="draft-field-followup" rows="3">${escapeHtml(comm.followup_text || comm.followup || "")}</textarea>
-    </div>
-    <div class="draft-section">
-      <div class="draft-label">Why This Contact</div>
-      <div class="draft-value">${escapeHtml(comm.rationale || "")}</div>
-    </div>
-    <div class="draft-section">
-      <div class="draft-label">Internal Notes</div>
-      <textarea class="draft-field" id="draft-field-notes" rows="2" placeholder="Notes only your team can see">${escapeHtml(comm.notes || "")}</textarea>
+      <textarea class="draft-field draft-body" id="draft-field-body" rows="11" placeholder="Write your email…">${escapeHtml(comm.body || "")}</textarea>
     </div>
 
     <div class="draft-section">
       <div class="draft-label">Attachments</div>
       <div id="draft-attachment-chips"></div>
-      <button class="btn-sm btn-ghost" id="draft-add-attachment-btn" style="margin-top:6px;">+ Add Attachment</button>
-      <button class="btn-sm btn-ghost" id="draft-attach-from-library-btn" style="margin-top:6px;">+ From Library</button>
+      <button class="btn-sm btn-ghost" id="draft-add-attachment-btn" style="margin-top:6px;">+ Upload</button>
+      <button class="btn-sm btn-ghost" id="draft-attach-from-library-btn" style="margin-top:6px;">+ Choose Library</button>
     </div>
+
+    <details class="em-advanced" style="margin-top:8px;">
+      <summary>⚙️ Follow-up template, rationale &amp; internal notes</summary>
+      <div class="draft-section"><div class="draft-label">Follow-up Template</div>
+        <textarea class="draft-field" id="draft-field-followup" rows="3">${escapeHtml(comm.followup_text || comm.followup || "")}</textarea></div>
+      <div class="draft-section"><div class="draft-label">Why This Contact</div>
+        <div class="draft-value">${escapeHtml(comm.rationale || "")}</div></div>
+      <div class="draft-section"><div class="draft-label">Internal Notes</div>
+        <textarea class="draft-field" id="draft-field-notes" rows="2" placeholder="Notes only your team can see">${escapeHtml(comm.notes || "")}</textarea></div>
+    </details>
 
     <div class="draft-collapsible-header" id="draft-versions-toggle">Version History <span>▾</span></div>
     <div class="draft-collapsible-body" id="draft-versions-body"></div>
-
     <div class="draft-collapsible-header" id="draft-activity-toggle">Activity <span>▾</span></div>
     <div class="draft-collapsible-body" id="draft-activity-body"></div>
 
-    <div class="modal-actions" id="draft-lifecycle-actions"></div>
-    <div class="modal-actions">
-      <button class="btn-sm copy-btn" id="copy-all-btn">Copy Full Draft</button>
-      <button class="btn-sm btn-ghost" id="export-draft-txt-btn">Export .txt</button>
-      <button class="btn-sm btn-ghost" id="export-draft-json-btn">Export JSON</button>
+    <div class="modal-actions" id="draft-lifecycle-actions" style="margin-bottom:4px;"></div>
+    <div class="modal-actions" style="font-size:0.8rem;">
+      <button class="btn-sm copy-btn" id="copy-all-btn">Copy</button>
+      <button class="btn-sm btn-ghost" id="export-draft-txt-btn">.txt</button>
+      <button class="btn-sm btn-ghost" id="export-draft-json-btn">.json</button>
+    </div>
+
+    <!-- Sticky action bar -->
+    <div class="draft-actionbar" id="draft-actionbar">
+      <button class="ab-btn ab-ghost" id="ab-cancel">Cancel</button>
+      <button class="ab-btn ab-ghost" id="ab-save">Save Draft</button>
+      <button class="ab-btn ab-ghost" id="ab-preview">Preview</button>
+      <button class="ab-btn ab-ghost" id="ab-sendtest">Send Test</button>
+      <button class="ab-btn ab-ghost" id="ab-schedule">Schedule ▾</button>
+      <span class="ab-spacer"></span>
+      <button class="ab-btn ab-send" id="ab-send">Send Email</button>
     </div>`;
 
   const fullText = `Subject: ${comm.subject}\n\n${comm.body}\n\n---\nFollow-up: ${comm.followup_text || comm.followup}\n\nRationale: ${comm.rationale}`;
@@ -913,9 +957,17 @@ function renderDraftEditor(comm, contact) {
   document.getElementById("export-draft-txt-btn").addEventListener("click", () => exportDraftText(fullText, contact.name));
   document.getElementById("export-draft-json-btn").addEventListener("click", () => exportDraftJson(JSON.stringify(comm), contact.name));
 
-  document.querySelectorAll(".draft-field").forEach((el) => el.addEventListener("input", () => { _modalDirty = true; }));
+  // Recipient chips (To / Cc / Bcc) sync into the hidden inputs.
+  setupChipInput("chips-to", "draft-field-to", "recipient@example.com");
+  setupChipInput("chips-cc", "draft-field-cc", "cc@example.com");
+  setupChipInput("chips-bcc", "draft-field-bcc", "bcc@example.com");
+
+  // Any edit → dirty + debounced autosave.
+  document.querySelectorAll("#modal-body .draft-field, #draft-field-subject").forEach((el) =>
+    el.addEventListener("input", () => { _modalDirty = true; scheduleAutosave(); }));
 
   renderDraftActionBar(status);
+  wireDraftActionBar(comm);
   loadAttachmentChips(comm.id, "draft-attachment-chips");
   document.getElementById("draft-add-attachment-btn").addEventListener("click", () => uploadOneOffAttachmentsTo(comm.id, "draft-attachment-chips"));
   document.getElementById("draft-attach-from-library-btn").addEventListener("click", () => attachFromLibraryTo(comm.id, "draft-attachment-chips"));
@@ -924,6 +976,149 @@ function renderDraftEditor(comm, contact) {
     toggleDraftCollapsible("draft-versions-body", () => loadDraftVersionsPanel(contact.contact_id)));
   document.getElementById("draft-activity-toggle").addEventListener("click", () =>
     toggleDraftCollapsible("draft-activity-body", () => loadDraftActivityPanel(contact.contact_id)));
+}
+
+// ── Recipient chips ────────────────────────────────────────────────────────
+// A lightweight Outlook-style chip input backed by a hidden comma-joined value
+// (so collectDraftFieldValues() keeps working unchanged).
+function setupChipInput(containerId, hiddenId, placeholder) {
+  const box = document.getElementById(containerId);
+  const hidden = document.getElementById(hiddenId);
+  if (!box || !hidden) return;
+  let values = (hidden.value || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const sync = () => { hidden.value = values.join(", "); _modalDirty = true; scheduleAutosave(); };
+  const render = () => {
+    box.innerHTML = values.map((v, i) =>
+      `<span class="chip">${escapeHtml(v)}<a href="#" data-i="${i}" class="chip-x">✕</a></span>`).join("") +
+      `<input type="text" class="chip-entry" placeholder="${values.length ? "" : escapeHtml(placeholder)}">`;
+    const input = box.querySelector(".chip-entry");
+    box.querySelectorAll(".chip-x").forEach((x) => x.addEventListener("click", (e) => {
+      e.preventDefault(); values.splice(Number(x.dataset.i), 1); render(); sync();
+    }));
+    const commit = () => { const t = input.value.trim().replace(/[,;]$/, "").trim(); if (t) { values.push(t); input.value = ""; render(); sync(); box.querySelector(".chip-entry").focus(); } };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === "," || e.key === ";") { e.preventDefault(); commit(); }
+      else if (e.key === "Backspace" && !input.value && values.length) { values.pop(); render(); sync(); box.querySelector(".chip-entry").focus(); }
+    });
+    input.addEventListener("blur", commit);
+  };
+  render();
+}
+
+// ── Autosave ────────────────────────────────────────────────────────────────
+let _autosaveTimer = null;
+function setAutosaveStatus(state) {
+  const el = document.getElementById("draft-autosave-status");
+  if (!el) return;
+  if (state === "saving") { el.textContent = "Saving…"; el.style.color = "#6b7280"; }
+  else if (state === "saved") { el.textContent = "Saved just now"; el.style.color = "#047857"; }
+  else if (state === "failed") { el.textContent = "Save failed"; el.style.color = "#b91c1c"; }
+  else el.textContent = "";
+}
+function scheduleAutosave() {
+  clearTimeout(_autosaveTimer);
+  _autosaveTimer = setTimeout(() => { autosaveDraft(); }, 1400);
+}
+async function autosaveDraft() {
+  if (!_modalComm || !_modalDirty) return;
+  setAutosaveStatus("saving");
+  try {
+    const r = await fetch(`/api/communications/${_modalComm.id}/save`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...collectDraftFieldValues(), asNewVersion: false }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || "Save failed");
+    _modalComm = d.communication; _modalDirty = false;
+    setAutosaveStatus("saved");
+  } catch (e) { setAutosaveStatus("failed"); }
+}
+
+// ── Sticky action bar wiring ────────────────────────────────────────────────
+function wireDraftActionBar(comm) {
+  const on = (id, fn) => { const b = document.getElementById(id); if (b) b.addEventListener("click", fn); };
+  on("ab-cancel", () => closeModal("email-modal"));
+  on("ab-save", () => saveCurrentDraft(false));
+  on("ab-preview", () => openDraftPreview());
+  on("ab-sendtest", () => sendDraftTest());
+  on("ab-schedule", () => scheduleDraftSend());
+  on("ab-send", () => sendDraftEmail());
+}
+
+async function sendDraftTest() {
+  const btn = document.getElementById("ab-sendtest"); const orig = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
+  try {
+    const d = await (await fetch("/api/email/account/send-test", { method: "POST" })).json();
+    if (d.error) showMessage("Send Test failed: " + (d.message || d.error), "error");
+    else showMessage("✅ Test email sent to your own mailbox.", "info");
+  } catch (e) { showMessage("Send Test failed: " + e.message, "error"); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = orig; } }
+}
+
+function openDraftPreview() {
+  const v = collectDraftFieldValues();
+  const to = v.to_email || "(no recipient)";
+  const from = _connectedEmail ? `${(_sender && _sender.name) || ""} <${_connectedEmail}>` : ((_sender && _sender.name) || "You");
+  const bodyHtml = escapeHtml(v.body || "").replace(/\n/g, "<br>");
+  const el = document.getElementById("draft-preview-body");
+  if (!el) return;
+  el.innerHTML = `
+    <div class="preview-email">
+      <div class="preview-line"><span>From</span><b>${escapeHtml(from)}</b></div>
+      <div class="preview-line"><span>To</span><b>${escapeHtml(to)}</b></div>
+      ${v.cc ? `<div class="preview-line"><span>Cc</span><b>${escapeHtml(v.cc)}</b></div>` : ""}
+      <div class="preview-line"><span>Subject</span><b>${escapeHtml(v.subject || "(no subject)")}</b></div>
+      <hr>
+      <div class="preview-message">${bodyHtml || "<em>(empty body)</em>"}</div>
+    </div>`;
+  openModal("draft-preview-modal");
+}
+
+function scheduleDraftSend() {
+  const when = prompt("Schedule send for (YYYY-MM-DD HH:MM, your local time):");
+  if (!when) return;
+  const dt = new Date(when.replace(" ", "T"));
+  if (isNaN(dt.getTime())) return showMessage("Couldn't understand that date/time.", "error");
+  fetch(`/api/communications/${_modalComm.id}/schedule`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scheduled_at: dt.toISOString() }),
+  }).then((r) => r.json()).then((d) => {
+    if (d.error) return showMessage(d.error, "error");
+    _modalComm = d.communication || _modalComm;
+    showMessage("📅 Queued for " + dt.toLocaleString() + ". (Auto-dispatch of scheduled sends is a later phase.)", "info");
+    renderDraftEditor(_modalComm, _modalContact);
+  }).catch((e) => showMessage("Schedule failed: " + e.message, "error"));
+}
+
+async function sendDraftEmail() {
+  if (!_modalComm) return;
+  const v = collectDraftFieldValues();
+  if (!v.to_email) return showMessage("Add a recipient before sending.", "error");
+  // Confirmation dialog.
+  const from = _connectedEmail ? `${(_sender && _sender.name) || ""} <${_connectedEmail}>` : "(mailbox not connected)";
+  if (!confirm(`Send this email now?\n\nFrom: ${from}\nTo: ${v.to_email}\nSubject: ${v.subject || "(no subject)"}`)) return;
+  const btn = document.getElementById("ab-send"); const orig = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
+  try {
+    const r = await fetch(`/api/communications/${_modalComm.id}/send`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(v),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) {
+      if (d.communication) { _modalComm = d.communication; renderDraftEditor(_modalComm, _modalContact); }
+      showMessage("❌ Send failed: " + (d.message || d.error), "error");
+      return;
+    }
+    _modalComm = d.communication || _modalComm;
+    _modalDirty = false;
+    showMessage("✅ Email sent to " + v.to_email + ".", "info");
+    renderDraftEditor(_modalComm, _modalContact);
+    if (_modalContact && _modalContact.contact_id) await loadDraftLibrary(_modalContact.contact_id);
+    if (_modalRefreshFn) _modalRefreshFn();
+  } catch (e) { showMessage("Send failed: " + e.message, "error"); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = orig; } }
 }
 
 // ── Attachment chips: shared rendering for any communication (draft or imported email) ──
@@ -1770,6 +1965,7 @@ document.getElementById("usage-reset-btn").addEventListener("click", async () =>
 });
 document.getElementById("usage-details-btn").addEventListener("click", () => { showView("ai-usage"); loadAiUsage(); });
 document.getElementById("ai-usage-close").addEventListener("click", () => closeModal("ai-usage-modal"));
+document.getElementById("draft-preview-close").addEventListener("click", () => closeModal("draft-preview-modal"));
 document.getElementById("ai-usage-modal").addEventListener("click", (e) => {
   if (e.target === document.getElementById("ai-usage-modal")) closeModal("ai-usage-modal");
 });
@@ -3059,6 +3255,7 @@ loadDraftModes();
 initIntelligenceView();
 initCrmIntel();
 initAiUsageDashboard();
+initEmailSettings();
 loadCrmContacts();
 loadBrowseSelectors();
 loadSearchTaxonomy();
@@ -4507,4 +4704,552 @@ async function mergeDupCompany(from, to) {
     if (d.ok) { showMessage(`Merged ${d.moved_tags || 0} tag(s) into #${to}.`, "info"); loadDuplicateCompanies(); }
     else showMessage(d.error || "Merge failed", "error");
   } catch (e) { showMessage("Merge failed: " + e.message, "error"); }
+}
+
+/* =======================================================================
+   Email configuration (Settings view). Provider-aware:
+   • NetEase Enterprise Mail / 网易企业邮箱 and Custom → SMTP + IMAP (org
+     servers set once by IT; each user connects their own @domain mailbox).
+   • Microsoft 365 / Google → org-level OAuth sign-in.
+   Four cards: Organization Email Configuration (admin), My Email Account,
+   Signature & Sending Preferences, Connection Test History. Plus the
+   Draft-modal "sending not configured yet" banner.
+   ======================================================================= */
+let _emailIsAdmin = false;
+let _emOrgCfg = {};                    // last-loaded org config (no secrets)
+let _emProviders = {};                 // provider registry from /api/email/providers
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const providerLabel = (id) => (_emProviders[id] && _emProviders[id].label) || id || "";
+const providerType = (id) => (_emProviders[id] && _emProviders[id].type) || "";
+const providerDefaults = (id) => (_emProviders[id] && _emProviders[id].defaults) || {};
+
+// Load the provider catalog from the backend and fill the dropdown. Keeping the
+// list server-driven means adding a provider is a one-file change (providers.js).
+async function loadProviders() {
+  try {
+    const d = await (await fetch("/api/email/providers")).json();
+    _emProviders = {};
+    const sel = document.getElementById("em-org-provider_type");
+    const cur = sel ? sel.value : "";
+    let opts = '<option value="">Choose a provider…</option>';
+    (d.providers || []).forEach((p) => { _emProviders[p.id] = p; opts += `<option value="${p.id}">${esc(p.label)}</option>`; });
+    if (sel) { sel.innerHTML = opts; if (cur && _emProviders[cur]) sel.value = cur; }
+  } catch (e) { /* ignore */ }
+}
+const emVal = (id) => { const e = document.getElementById(id); return e ? e.value.trim() : ""; };
+const emSet = (id, v) => { const e = document.getElementById(id); if (e) e.value = (v == null ? "" : v); };
+const emChk = (id) => { const e = document.getElementById(id); return e ? e.checked : false; };
+const emSetChk = (id, v) => { const e = document.getElementById(id); if (e) e.checked = Boolean(v); };
+function emBadge(id, text, cls) { const e = document.getElementById(id); if (e) { e.textContent = text; e.className = "em-badge " + cls; } }
+function emResult(id, r) {
+  const e = document.getElementById(id); if (!e) return;
+  const ok = r && (r.ok !== false) && (!r.result || r.result.ok !== false);
+  const msg = (r && r.result && r.result.message) || (r && r.message) || (r && r.error) || "";
+  e.style.color = ok ? "#059669" : "#b91c1c";
+  e.textContent = msg;
+}
+const isOAuthProvider = (p) => providerType(p) === "oauth";
+
+async function initEmailSettings() {
+  try {
+    const me = await (await fetch("/api/me")).json();
+    _emailIsAdmin = Boolean(me.is_admin);
+  } catch (e) { /* ignore */ }
+  const orgCard = document.getElementById("em-org-card");
+  if (orgCard) orgCard.style.display = _emailIsAdmin ? "" : "none";
+
+  // Surface the result of an OAuth round-trip (?email=connected|error) once.
+  const q = new URLSearchParams(location.search);
+  if (q.get("email")) {
+    if (q.get("email") === "connected") showMessage("✅ Email account connected.", "info");
+    else showMessage("Couldn't connect email: " + (q.get("reason") || "unknown error"), "error");
+    history.replaceState(null, "", location.pathname);
+  }
+
+  await loadProviders();
+
+  const wire = (id, fn) => { const b = document.getElementById(id); if (b) b.addEventListener("click", fn); };
+  const provSel = document.getElementById("em-org-provider_type");
+  if (provSel) provSel.addEventListener("change", onProviderChange);
+  wire("em-org-detect-btn", emailAutoDetect);
+  wire("em-org-save", saveEmailOrg);
+  wire("em-org-test-smtp", () => emailOrgAction("test-smtp"));
+  wire("em-org-test-imap", () => emailOrgAction("test-imap"));
+  wire("em-org-validate", () => emailOrgAction("validate-domain"));
+  wire("em-acct-save", saveEmailAccount);
+  wire("em-acct-test", testConnection);
+  wire("em-acct-sendtest", () => emailAccountAction("send-test"));
+  wire("em-acct-disconnect", () => emailAccountAction("disconnect"));
+  wire("em-pref-save", saveEmailPrefs);
+  wire("em-history-refresh", loadEmailHistory);
+  // Live "what's missing" checklist as the user types their email / password.
+  ["em-acct-email", "em-acct-secret"].forEach((id) => { const e = document.getElementById(id); if (e) e.addEventListener("input", updateEmailChecklist); });
+
+  await loadEmailOrg();
+  await loadEmailAccount();
+  await loadEmailPrefs();
+  await loadEmailHistory();
+}
+
+// Show only the configuration relevant to the selected provider.
+function applyProviderVisibility(provider) {
+  // Derive from the provider REGISTRY, never a hardcoded list — otherwise new
+  // SMTP providers (GoDaddy M365/Workspace) get treated as "neither" and their
+  // whole section is hidden.
+  const type = providerType(provider);           // 'smtp' | 'oauth' | ''
+  const oauth = type === "oauth";
+  const smtp = type === "smtp";
+  const show = (id, on) => { const e = document.getElementById(id); if (e) e.style.display = on ? "" : "none"; };
+  show("em-org-oauth", oauth);
+  show("em-org-smtpimap", smtp);
+  document.querySelectorAll(".em-smtp-action").forEach((b) => { b.style.display = smtp ? "" : "none"; });
+  // My Email Account: manual mailbox for SMTP providers; sign-in note for OAuth.
+  show("em-acct-manual", smtp || !provider);
+  show("em-acct-oauth", oauth);
+  if (oauth) renderAcctOAuthNote(provider);
+}
+
+// Runs only when the admin explicitly changes provider (dropdown / auto-detect).
+// It OVERWRITES the SMTP/IMAP endpoints with the chosen provider's defaults so
+// no previous provider's servers can linger (the source of "testing both").
+function onProviderChange() {
+  const provider = emVal("em-org-provider_type");
+  const defs = providerDefaults(provider);
+  if (defs && defs.smtp_host) {
+    emSet("em-org-smtp_host", defs.smtp_host); emSet("em-org-smtp_port", defs.smtp_port); emSet("em-org-smtp_encryption", defs.smtp_encryption);
+    emSet("em-org-imap_host", defs.imap_host); emSet("em-org-imap_port", defs.imap_port); emSet("em-org-imap_encryption", defs.imap_encryption);
+    if (defs.app_password_required != null) emSetChk("em-org-app_password_required", defs.app_password_required);
+    emSet("em-org-provider_name", providerLabel(provider));
+  } else if (provider === "custom_imap") {
+    // Custom: clear so the admin types their own endpoints from scratch.
+    ["smtp_host", "smtp_port", "imap_host", "imap_port"].forEach((k) => emSet("em-org-" + k, ""));
+  }
+  // Changing provider invalidates any prior verification — reflect that in the UI.
+  emSet("em-org-spf_status", "unchecked"); emSet("em-org-dkim_status", "unchecked"); emSet("em-org-dmarc_status", "unchecked");
+  const noteEl = document.getElementById("em-org-provider-note");
+  if (noteEl) noteEl.textContent = (_emProviders[provider] && _emProviders[provider].note) || "";
+  emResult("em-org-result", { ok: true, message: provider ? "Provider set to " + providerLabel(provider) + " — click Save Configuration to apply." : "" });
+  updateAutoConfigNote(provider);
+  applyProviderVisibility(provider);
+  renderOrgOAuth();
+  updateEmailChecklist();
+}
+
+// The green "settings configured automatically" summary above Advanced Settings.
+function updateAutoConfigNote(provider) {
+  const el = document.getElementById("em-org-autoconfig-note");
+  if (!el) return;
+  const host = emVal("em-org-smtp_host"), port = emVal("em-org-smtp_port"), enc = emVal("em-org-smtp_encryption");
+  if (host && port) {
+    el.style.display = "";
+    el.innerHTML = `✓ SMTP/IMAP settings configured automatically — <strong>${esc(host)}:${esc(port)}</strong> (${esc((enc || "").toUpperCase())}). You don't need to change anything below.`;
+  } else if (provider === "custom_imap") {
+    el.style.display = "";
+    el.style.color = "#b45309"; el.style.background = "#fffbeb"; el.style.borderColor = "#fde68a";
+    el.innerHTML = "⚠ Custom provider — open Advanced Settings and enter your SMTP/IMAP servers.";
+  } else {
+    el.style.display = "none";
+  }
+}
+
+// Auto Detect — infer the provider from an email domain's MX records.
+async function emailAutoDetect() {
+  const email = emVal("em-org-detect-email");
+  const out = document.getElementById("em-org-detect-result");
+  const btn = document.getElementById("em-org-detect-btn");
+  const show = (html, color) => { if (out) { out.style.color = color || "#374151"; out.innerHTML = html; } };
+  if (!email) return show("Enter an email address first.", "#b91c1c");
+  if (btn) { btn.disabled = true; btn.textContent = "Detecting…"; }
+  try {
+    const d = await (await fetch("/api/email/detect-provider", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email }) })).json();
+    if (d.provider) {
+      const sel = document.getElementById("em-org-provider_type");
+      if (sel && _emProviders[d.provider]) sel.value = d.provider;
+      if (!emVal("em-org-allowed_domain") && d.domain) emSet("em-org-allowed_domain", d.domain);
+      onProviderChange();
+      let msg = `Detected: <strong>${esc(d.label)}</strong>`;
+      if (d.alt) msg += ` <span style="color:#6b7280;">— if GoDaddy-hosted, choose “${esc(d.alt.label)}”.</span>`;
+      show("✅ " + msg, "#047857");
+    } else {
+      show("⚠️ " + esc(d.message || "Couldn't match a provider.") + " Pick one manually.", "#b45309");
+    }
+  } catch (e) { show("Detection failed: " + esc(e.message), "#b91c1c"); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = "🔎 Auto Detect Provider"; } }
+}
+
+// ── Organization config (admin) ───────────────────────────────────────────
+const EM_ORG_TEXT = ["allowed_domain", "provider_name", "provider_type", "smtp_host", "smtp_encryption", "smtp_auth_method",
+  "imap_host", "imap_encryption", "imap_auth_method", "inbox_folder", "sent_folder", "draft_folder", "archive_folder", "trash_folder"];
+const EM_ORG_NUM = ["smtp_port", "imap_port", "sync_interval_seconds", "max_attachment_mb", "hourly_send_limit", "daily_send_limit"];
+const EM_ORG_BOOL = ["imap_idle", "ip_allowlist_required", "app_password_required"];
+const EM_ORG_STATUS_LABEL = {
+  not_configured: ["Not configured", "gray"],
+  configuration_incomplete: ["Servers needed", "amber"],
+  servers_configured: ["Configured", "blue"],
+  verified: ["Verified", "blue"], ready_for_users: ["Ready", "green"],
+};
+async function loadEmailOrg() {
+  try {
+    const d = await (await fetch("/api/email/org-config")).json();
+    const c = d.config || {};
+    _emOrgCfg = c;
+    const domainEl = document.getElementById("em-domain");
+    if (domainEl) domainEl.textContent = c.allowed_domain || "skeqi.com";
+    if (_emailIsAdmin) {
+      EM_ORG_TEXT.forEach((k) => emSet("em-org-" + k, c[k]));
+      EM_ORG_NUM.forEach((k) => emSet("em-org-" + k, c[k]));
+      EM_ORG_BOOL.forEach((k) => emSetChk("em-org-" + k, c[k]));
+      emSet("em-org-spf_status", c.spf_status || "unchecked");
+      emSet("em-org-dkim_status", c.dkim_status || "unchecked");
+      emSet("em-org-dmarc_status", c.dmarc_status || "unchecked");
+      // Org badge: OAuth providers show their connection; SMTP providers use orgStatus.
+      if (isOAuthProvider(c.provider_type)) {
+        emBadge("em-org-status", c.oauth_connected ? "Ready for sending" : "Not configured", c.oauth_connected ? "green" : "gray");
+      } else {
+        const lbl = EM_ORG_STATUS_LABEL[d.status] || EM_ORG_STATUS_LABEL.not_configured;
+        emBadge("em-org-status", lbl[0], lbl[1]);
+      }
+      applyProviderVisibility(c.provider_type || "");
+      renderOrgOAuth();
+      updateAutoConfigNote(c.provider_type || "");
+    }
+    updateEmailChecklist();
+  } catch (e) { /* ignore */ }
+}
+async function saveEmailOrg() {
+  const body = {};
+  EM_ORG_TEXT.forEach((k) => { body[k] = emVal("em-org-" + k); });
+  EM_ORG_NUM.forEach((k) => { const v = emVal("em-org-" + k); body[k] = v ? Number(v) : null; });
+  EM_ORG_BOOL.forEach((k) => { body[k] = emChk("em-org-" + k); });
+  if (body.allowed_domain) body.allowed_domain = body.allowed_domain.toLowerCase();
+  try {
+    const d = await (await fetch("/api/email/org-config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+    if (d.ok) { emResult("em-org-result", { ok: true, message: "Configuration saved." }); loadEmailOrg(); loadEmailAccount(); }
+    else emResult("em-org-result", d);
+  } catch (e) { emResult("em-org-result", { error: e.message }); }
+}
+async function emailOrgAction(action) {
+  const map = { "test-smtp": "em-org-test-smtp", "test-imap": "em-org-test-imap", "validate-domain": "em-org-validate", enable: "em-org-enable", disable: "em-org-disable" };
+  const b = document.getElementById(map[action]); const orig = b ? b.textContent : "";
+  if (b) { b.disabled = true; b.textContent = "…"; }
+  try {
+    const d = await (await fetch("/api/email/org-config/" + action, { method: "POST" })).json();
+    if (action === "validate-domain" && d.result) {
+      emSet("em-org-spf_status", d.result.spf); emSet("em-org-dkim_status", d.result.dkim); emSet("em-org-dmarc_status", d.result.dmarc);
+    }
+    emResult("em-org-result", d.error ? d : { ok: true, message: (d.result && d.result.message) || (action === "enable" ? "Integration enabled." : action === "disable" ? "Integration disabled." : "Done.") });
+    loadEmailOrg();
+    loadEmailSendStatus();
+    loadEmailHistory();
+  } catch (e) { emResult("em-org-result", { error: e.message }); }
+  finally { if (b) { b.disabled = false; b.textContent = orig; } }
+}
+
+// ── OAuth sub-section inside the org card (Microsoft 365 / Google) ─────────
+function renderOrgOAuth() {
+  const el = document.getElementById("em-org-oauth-body");
+  if (!el) return;
+  const c = _emOrgCfg || {};
+  const provider = emVal("em-org-provider_type");
+  if (!isOAuthProvider(provider)) return;
+  if (c.oauth_connected && c.provider_type === provider) {
+    const when = c.oauth_connected_at ? new Date(c.oauth_connected_at).toLocaleString() : "—";
+    el.innerHTML = `
+      <div class="em-status-card">
+        <div class="em-status-row"><span class="em-status-k">Signed-in account</span><span class="em-status-v">${esc(c.oauth_email || "—")}${c.oauth_display_name ? " · " + esc(c.oauth_display_name) : ""}</span></div>
+        <div class="em-status-row"><span class="em-status-k">Status</span><span class="em-status-v"><span class="em-badge green">✅ Connected</span></span></div>
+        <div class="em-status-row"><span class="em-status-k">Connected</span><span class="em-status-v">${esc(when)}</span></div>
+      </div>
+      <div class="em-actions" style="margin-top:10px;">
+        <button class="btn-sm btn-ghost" id="em-oauth-reconnect">Reconnect</button>
+        <button class="btn-sm btn-ghost" id="em-oauth-disconnect">Disconnect Account</button>
+      </div>`;
+    document.getElementById("em-oauth-reconnect").addEventListener("click", emailConnectOAuth);
+    document.getElementById("em-oauth-disconnect").addEventListener("click", emailDisconnectOAuth);
+  } else {
+    el.innerHTML = `
+      <div style="font-size:0.86rem;color:#4b5563;margin-bottom:8px;">Sign in once with the organization ${esc(providerLabel(provider))} account. Each user will then send as their own signed-in address.</div>
+      <button class="btn-sm btn-orange" id="em-oauth-connect">🔗 Connect &amp; sign in</button>
+      <div class="em-result" id="em-oauth-result" style="margin-top:8px;"></div>`;
+    document.getElementById("em-oauth-connect").addEventListener("click", emailConnectOAuth);
+  }
+}
+async function emailConnectOAuth() {
+  const provider = emVal("em-org-provider_type");
+  const domain = emVal("em-org-allowed_domain");
+  const result = document.getElementById("em-oauth-result");
+  const setErr = (m) => { if (result) { result.style.color = "#b91c1c"; result.innerHTML = m; } };
+  if (!domain || !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain)) return setErr("Enter a valid organization domain first (e.g. skeqi.com).");
+  try {
+    await fetch("/api/email/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider, domain: domain.toLowerCase() }) });
+    const d = await (await fetch("/api/email/oauth/start?provider=" + encodeURIComponent(provider))).json();
+    if (d.ok && d.url) { location.href = d.url; return; }
+    if (d.error === "not_configured") {
+      setErr(`<div style="color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px;line-height:1.5;text-align:left;">
+        <strong>One-time setup needed by Skeqi IT.</strong><br>${esc(d.message)}<br>
+        <span style="color:#6b7280;">Redirect URI to register:</span> <code>${esc(d.redirect_uri)}</code></div>`);
+    } else setErr(esc(d.error || "Couldn't start sign-in."));
+  } catch (e) { setErr(esc(e.message)); }
+}
+async function emailDisconnectOAuth() {
+  if (!confirm("Disconnect the organization email account? Sending will be disabled until you reconnect.")) return;
+  try {
+    await fetch("/api/email/disconnect", { method: "POST" });
+    await loadEmailOrg();
+    loadEmailSendStatus();
+    showMessage("Email account disconnected.", "info");
+  } catch (e) { showMessage("Disconnect failed: " + e.message, "error"); }
+}
+
+// The note shown in "My Email Account" when the org uses an OAuth provider.
+function renderAcctOAuthNote(provider) {
+  const el = document.getElementById("em-acct-oauth");
+  if (!el) return;
+  const email = _emOrgCfg && _emOrgCfg.oauth_email;
+  el.innerHTML = _emOrgCfg && _emOrgCfg.oauth_connected
+    ? `Your organization uses <strong>${esc(providerLabel(provider))}</strong>. Sending uses the organization sign-in${email ? ` — messages go out as <strong>${esc(email)}</strong>` : ""}. Nothing to configure here.`
+    : `Your organization uses <strong>${esc(providerLabel(provider))}</strong>. Once your administrator connects the account, sending is enabled automatically — you don't enter any credentials here.`;
+}
+
+// ── My Email Account (all users, SMTP/IMAP providers) ─────────────────────
+let _emAccount = {};
+async function loadEmailAccount() {
+  try {
+    const d = await (await fetch("/api/email/account")).json();
+    const a = d.account || {};
+    _emAccount = a;
+    emSet("em-acct-name", a.sender_name); emSet("em-acct-email", a.sender_email);
+    emSet("em-acct-replyto", a.reply_to); emSet("em-acct-username", a.mailbox_username);
+    emSet("em-acct-authmethod", a.auth_method || "app_password");
+    emSetChk("em-acct-sync", a.sync_enabled);
+    const ls = document.getElementById("em-acct-lastsync");
+    if (ls) ls.textContent = a.last_sync_at ? new Date(a.last_sync_at).toLocaleString() : "never";
+    updateEmailChecklist();   // drives the connection-state badge + checklist
+    // If a prior test failed, surface an actionable hint (full stages on retry).
+    const res = document.getElementById("em-acct-result");
+    if (res && a.connection_status === "failed" && !res.innerHTML.trim()) {
+      res.style.color = "#b91c1c";
+      res.innerHTML = "⚠ The last connection attempt failed. Check your password / app password, then click <strong>Test Connection</strong> to retry and see the exact failed stage.";
+    }
+  } catch (e) { /* ignore */ }
+}
+
+// Configuration Status: shows exactly what's done and what's missing, sets the
+// connection-state badge, and tells the user the single next step. Separate from
+// the org card's configuration-state message ("Configuration saved").
+function updateEmailChecklist() {
+  const el = document.getElementById("em-acct-checklist");
+  const next = document.getElementById("em-acct-nextstep");
+  if (!el) return;
+  const cfg = _emOrgCfg || {}, acct = _emAccount || {};
+  const provider = cfg.provider_type || "";
+  // OAuth providers: no per-user email/password — the badge follows the org sign-in.
+  if (isOAuthProvider(provider)) {
+    emBadge("em-acct-status", cfg.oauth_connected ? "Connected" : "Not configured", cfg.oauth_connected ? "green" : "gray");
+    const next = document.getElementById("em-acct-nextstep");
+    if (next) next.textContent = cfg.oauth_connected ? "" : "Next: your administrator connects the organization account in Organization Email Configuration.";
+    return;
+  }
+  const email = emVal("em-acct-email");
+  const secret = emVal("em-acct-secret");
+  const domain = (cfg.allowed_domain || "").toLowerCase();
+  const providerOk = Boolean(provider);
+  const serversOk = Boolean(cfg.smtp_host && cfg.smtp_port);
+  const domainOk = Boolean(domain) && (!email || email.toLowerCase().endsWith("@" + domain));
+  const emailOk = Boolean(email);
+  const secretOk = Boolean(secret || acct.has_secret);   // typed now OR already saved
+  const tested = acct.connection_status || "disconnected";
+  const testedOk = tested === "connected";
+
+  const items = [
+    ["Organization provider configured", providerOk, providerOk ? providerLabel(provider) : "choose a provider above"],
+    ["SMTP settings configured", serversOk, serversOk ? `${cfg.smtp_host}:${cfg.smtp_port} (${(cfg.smtp_encryption || "").toUpperCase()})` : "not configured"],
+    ["Authorized email domain", domainOk, domain ? "@" + domain + (email && !domainOk ? " — your email must match" : "") : "not set"],
+    ["Mailbox email", emailOk, emailOk ? email : "required"],
+    ["Password / app password", secretOk, secretOk ? "provided" : "required"],
+    ["Connection verified", testedOk, tested === "failed" ? "failed — see result below" : testedOk ? "connected ✓" : "not verified"],
+  ];
+  el.innerHTML = items.map(([k, ok, v]) =>
+    `<div class="em-check-item ${ok ? "done" : ""}"><span>${ok ? "✅" : "⚠️"}</span><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join("");
+
+  let step = "", badge = "Not configured", cls = "gray";
+  if (!providerOk) step = "Next: choose your email provider in Organization Email Configuration.";
+  else if (!serversOk) step = "Next: open Advanced Settings and complete the SMTP server, or re-select the provider.";
+  else if (!emailOk) step = "Next: enter your mailbox email address.";
+  else if (!domainOk) step = `Next: use an @${domain} address (or update the authorized domain in Organization Email Configuration).`;
+  else if (!secretOk) step = "Next: enter your mailbox password / app password, then click Test Connection.";
+  else if (!testedOk) {
+    if (tested === "failed") { step = "Connection failed — check your password / app password and click Test Connection again."; badge = "Connection failed"; cls = "red"; }
+    else { step = "Ready to test — click Test Connection."; badge = "Ready to test"; cls = "amber-blue"; }
+  } else { step = ""; badge = "Connected"; cls = "green"; }
+  if (next) next.textContent = step;
+  emBadge("em-acct-status", badge, cls);
+}
+
+// POST the account fields; returns the parsed response (no UI side effects).
+async function postEmailAccount() {
+  const body = {
+    sender_name: emVal("em-acct-name"), sender_email: emVal("em-acct-email"), reply_to: emVal("em-acct-replyto"),
+    mailbox_username: emVal("em-acct-username"), auth_method: emVal("em-acct-authmethod"), sync_enabled: emChk("em-acct-sync"),
+  };
+  const secret = emVal("em-acct-secret"); if (secret) body.secret = secret;
+  return (await fetch("/api/email/account", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+}
+async function saveEmailAccount() {
+  try {
+    const d = await postEmailAccount();
+    if (d.ok) { emResult("em-acct-result", { ok: true, message: "Saved (not tested)." }); await loadEmailAccount(); }
+    else emResult("em-acct-result", d);
+  } catch (e) { emResult("em-acct-result", { error: e.message }); }
+}
+
+// One-click: save the entered email + password, then run the staged test.
+async function testConnection() {
+  const b = document.getElementById("em-acct-test"); const orig = b ? b.textContent : "";
+  const email = emVal("em-acct-email"), secret = emVal("em-acct-secret");
+  if (!email) return emResult("em-acct-result", { error: "Enter your email address first." });
+  if (!secret && !(_emAccount && _emAccount.has_secret)) return emResult("em-acct-result", { error: "Enter your mailbox password / app password first." });
+  if (b) { b.disabled = true; b.textContent = "Testing…"; }
+  try {
+    const saved = await postEmailAccount();
+    if (!saved.ok) { emResult("em-acct-result", saved); return; }
+    const d = await (await fetch("/api/email/account/test", { method: "POST" })).json();
+    if (d.result && Array.isArray(d.result.stages)) renderConnStages("em-acct-result", d.result);
+    else emResult("em-acct-result", d);
+    await loadEmailAccount();
+    loadEmailHistory();
+    loadEmailSendStatus();
+  } catch (e) { emResult("em-acct-result", { error: e.message }); }
+  finally { if (b) { b.disabled = false; b.textContent = orig || "🔌 Test Connection"; } }
+}
+async function emailAccountAction(action) {
+  const btnMap = { test: "em-acct-test", reconnect: "em-acct-reconnect", "send-test": "em-acct-sendtest", disconnect: "em-acct-disconnect" };
+  const b = document.getElementById(btnMap[action]); const orig = b ? b.textContent : "";
+  if (b) { b.disabled = true; b.textContent = "…"; }
+  try {
+    const d = await (await fetch("/api/email/account/" + action, { method: "POST" })).json();
+    if (d.result && Array.isArray(d.result.stages)) renderConnStages("em-acct-result", d.result);
+    else emResult("em-acct-result", d);
+    loadEmailAccount();
+    loadEmailHistory();
+    if (action === "send-test" || action === "reconnect" || action === "test") loadEmailSendStatus();
+  } catch (e) { emResult("em-acct-result", { error: e.message }); }
+  finally { if (b) { b.disabled = false; b.textContent = orig; } }
+}
+
+// Staged connection status — one line per stage (network, TLS, authentication,
+// mailbox access, send capability) instead of a generic "Connection Failed."
+const STAGE_LABELS = {
+  config: "Configuration", network: "Network", tls: "TLS / encryption",
+  authentication: "Authentication", mailbox_access: "Mailbox access",
+  send_capability: "Send capability", oauth: "OAuth sign-in",
+};
+function renderConnStages(elId, result) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const stages = result.stages || [];
+  const prov = result.provider ? providerLabel(result.provider) : "";
+  const rows = stages.map((s) => {
+    const icon = s.ok ? "✅" : "❌";
+    const color = s.ok ? "#4b5563" : "#b91c1c";
+    return `<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px solid #f3f4f6;">
+      <span style="width:1.1em;">${icon}</span>
+      <span style="min-width:130px;font-weight:600;color:#374151;">${esc(STAGE_LABELS[s.stage] || s.stage)}</span>
+      <span style="color:${color};flex:1;">${esc(s.message)}</span></div>`;
+  }).join("");
+  el.style.color = "";
+  el.innerHTML = `
+    ${prov ? `<div style="font-size:0.78rem;color:#6b7280;margin-bottom:4px;">Provider tested: <strong>${esc(prov)}</strong></div>` : ""}
+    <div>${rows}</div>
+    <div style="margin-top:8px;font-weight:700;color:${result.ok ? "#047857" : "#b91c1c"};">
+      ${result.ok ? "✅ All required checks passed — ready to send." : "❌ Connection didn't complete — see the failed stage above."}
+    </div>`;
+}
+
+// ── Signature & Sending Preferences (all users) ───────────────────────────
+async function loadEmailPrefs() {
+  try {
+    const d = await (await fetch("/api/email/prefs")).json();
+    const p = d.prefs || {};
+    emSet("em-pref-signature", p.signature); emSet("em-pref-default_cc", p.default_cc);
+    emSet("em-pref-default_bcc", p.default_bcc); emSet("em-pref-default_reply_to", p.default_reply_to);
+    emSet("em-pref-default_send_mode", p.default_send_mode || "draft"); emSet("em-pref-sync_frequency", p.sync_frequency || "normal");
+    emSetChk("em-pref-confirm_before_send", p.confirm_before_send !== false);
+  } catch (e) { /* ignore */ }
+}
+async function saveEmailPrefs() {
+  const body = {
+    signature: emVal("em-pref-signature"), default_cc: emVal("em-pref-default_cc"), default_bcc: emVal("em-pref-default_bcc"),
+    default_reply_to: emVal("em-pref-default_reply_to"), default_send_mode: emVal("em-pref-default_send_mode"),
+    sync_frequency: emVal("em-pref-sync_frequency"), confirm_before_send: emChk("em-pref-confirm_before_send"),
+  };
+  try {
+    const d = await (await fetch("/api/email/prefs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+    emResult("em-pref-result", d.ok ? { ok: true, message: "Preferences saved." } : d);
+  } catch (e) { emResult("em-pref-result", { error: e.message }); }
+}
+
+// ── Connection Test History (all users) ───────────────────────────────────
+const EM_TEST_KIND = { smtp: "SMTP", imap: "IMAP", domain: "Domain DNS", mailbox: "Mailbox", send: "Send test" };
+async function loadEmailHistory() {
+  const el = document.getElementById("em-history-body");
+  if (!el) return;
+  try {
+    const d = await (await fetch("/api/email/test-history")).json();
+    const tests = (d && d.tests) || [];
+    if (!tests.length) { el.innerHTML = `<div style="color:#9ca3af;font-size:0.85rem;padding:8px 0;">No tests run yet.</div>`; return; }
+    el.innerHTML = `<div style="overflow-x:auto;"><table class="em-history">
+      <thead><tr><th>When</th><th>Test</th><th>Target</th><th>Result</th><th>Detail</th></tr></thead>
+      <tbody>${tests.map((t) => `
+        <tr>
+          <td>${esc(new Date(t.created_at).toLocaleString())}</td>
+          <td>${esc(EM_TEST_KIND[t.kind] || t.kind || "—")}${t.scope === "org" ? ' <span class="em-badge gray" style="font-size:0.62rem;">org</span>' : ""}</td>
+          <td>${esc(t.target || "—")}</td>
+          <td>${t.ok ? '<span class="em-badge green">✓ Pass</span>' : '<span class="em-badge red">✕ Fail</span>'}</td>
+          <td style="color:#6b7280;max-width:260px;">${esc(t.message || "")}</td>
+        </tr>`).join("")}</tbody></table></div>`;
+  } catch (e) { el.innerHTML = `<div style="color:#b91c1c;font-size:0.85rem;">Couldn't load history: ${esc(e.message)}</div>`; }
+}
+
+async function loadEmailSendStatus() {
+  const el = document.getElementById("email-send-status");
+  if (!el) return;
+  try {
+    const d = await (await fetch("/api/email/status")).json();
+    // Keep the "From" identity in sync with the connected mailbox.
+    _connectedEmail = (d.ok && d.can_send && d.email) ? d.email : "";
+    try { updateUserMenuFromSender(); } catch (e) { /* ignore */ }
+    if (d.ok && !d.can_send) {
+      // Not configured yet — drafting still works, sending is disabled. Offer a
+      // one-click jump into Settings → My Email Account.
+      el.style.background = ""; el.style.color = "";
+      el.innerHTML = "✉️ " + esc(d.message) +
+        ' <a href="#" id="email-setup-link" style="color:#1d4ed8;font-weight:600;text-decoration:underline;margin-left:6px;">Complete Email Setup →</a>';
+      el.style.display = "";
+      const link = document.getElementById("email-setup-link");
+      if (link) link.addEventListener("click", (ev) => { ev.preventDefault(); openEmailSetup(); });
+    } else if (d.ok && d.can_send && d.email) {
+      // Connected — the sender identity comes from the provider automatically.
+      el.style.color = "#047857";
+      el.textContent = "✅ Sending as " + (d.display_name ? d.display_name + " <" + d.email + ">" : d.email);
+      el.style.display = "";
+    } else {
+      el.style.display = "none";
+    }
+  } catch (e) { el.style.display = "none"; }
+}
+
+// Jump from the draft warning straight to Settings → My Email Account, expanded
+// and focused, so the user can finish connecting their mailbox.
+function openEmailSetup() {
+  try { closeModal("email-modal"); } catch (e) { /* ignore */ }
+  try { showView("settings"); } catch (e) { /* ignore */ }
+  // Make sure the account section is expanded/visible for the current provider.
+  try { applyProviderVisibility((_emOrgCfg && _emOrgCfg.provider_type) || ""); } catch (e) { /* ignore */ }
+  setTimeout(() => {
+    const card = document.getElementById("em-acct-card");
+    if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
+    const email = document.getElementById("em-acct-email");
+    if (email) email.focus();
+  }, 120);
 }

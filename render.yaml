@@ -22,3 +22,13 @@ services:
         sync: false
       - key: APP_PASSWORD          # HTTP Basic Auth password
         sync: false
+      # Optional — only needed for Microsoft 365 / Google *OAuth* sign-in.
+      # The SMTP providers (GoDaddy, NetEase, Custom) do NOT need these.
+      - key: MS_CLIENT_ID
+        sync: false
+      - key: MS_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false

@@ -227,6 +227,12 @@ async function initDb() {
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS follow_up_sequence_number INTEGER`);
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`);
+  // Send lifecycle + threading (Phase 1 uses delivery_status/message_id/scheduled_at;
+  // in_reply_to/references_header are stored now for Phase 2 threading).
+  for (const col of [
+    `message_id TEXT`, `delivery_status TEXT`, `scheduled_at TIMESTAMPTZ`, `send_error TEXT`,
+    `in_reply_to TEXT`, `references_header TEXT`,
+  ]) { await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS ${col}`); }
   // Rows migrated long ago from the old email_drafts table never set
   // draft_mode -- backfill so every draft has a real category (drafts are
   // now scoped/versioned per (contact, draft_mode), not just per contact).
@@ -563,6 +569,63 @@ async function initDb() {
   await pool.query(`ALTER TABLE tag_categories ADD COLUMN IF NOT EXISTS description_en TEXT`);
   await pool.query(`ALTER TABLE tag_categories ADD COLUMN IF NOT EXISTS description_cn TEXT`);
   await pool.query(`ALTER TABLE tag_categories ADD COLUMN IF NOT EXISTS translations JSONB`);
+
+  // ── Email configuration (org-level shared infra + per-user mailbox/prefs) ──
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_org_config (
+      id INTEGER PRIMARY KEY DEFAULT 1,
+      allowed_domain TEXT DEFAULT 'skeqi.com',
+      provider_name TEXT, provider_type TEXT,
+      smtp_host TEXT, smtp_port INTEGER, smtp_encryption TEXT DEFAULT 'starttls', smtp_auth_method TEXT DEFAULT 'password',
+      imap_host TEXT, imap_port INTEGER, imap_encryption TEXT DEFAULT 'ssl', imap_auth_method TEXT DEFAULT 'password',
+      inbox_folder TEXT DEFAULT 'INBOX', sent_folder TEXT DEFAULT 'Sent', draft_folder TEXT DEFAULT 'Drafts',
+      archive_folder TEXT DEFAULT 'Archive', trash_folder TEXT DEFAULT 'Trash',
+      sync_interval_seconds INTEGER DEFAULT 300, imap_idle BOOLEAN DEFAULT FALSE,
+      max_attachment_mb INTEGER DEFAULT 25, hourly_send_limit INTEGER DEFAULT 100, daily_send_limit INTEGER DEFAULT 500,
+      ip_allowlist_required BOOLEAN DEFAULT FALSE, oauth_available BOOLEAN DEFAULT FALSE, app_password_required BOOLEAN DEFAULT TRUE,
+      spf_status TEXT, dkim_status TEXT, dmarc_status TEXT,
+      smtp_verified BOOLEAN DEFAULT FALSE, imap_verified BOOLEAN DEFAULT FALSE, integration_enabled BOOLEAN DEFAULT FALSE,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`INSERT INTO email_org_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+  // OAuth connection (the simplified "connect your provider" model).
+  for (const col of [
+    `oauth_connected BOOLEAN DEFAULT FALSE`, `oauth_email TEXT`, `oauth_display_name TEXT`,
+    `oauth_connected_at TIMESTAMPTZ`, `oauth_access_token TEXT`, `oauth_refresh_token TEXT`, `oauth_token_expires TIMESTAMPTZ`,
+  ]) {
+    await pool.query(`ALTER TABLE email_org_config ADD COLUMN IF NOT EXISTS ${col}`);
+  }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_user_account (
+      user_id TEXT PRIMARY KEY,
+      sender_name TEXT, sender_email TEXT, reply_to TEXT, mailbox_username TEXT,
+      auth_method TEXT DEFAULT 'app_password', secret TEXT,
+      connection_status TEXT DEFAULT 'disconnected',
+      sync_enabled BOOLEAN DEFAULT FALSE, last_sync_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_user_prefs (
+      user_id TEXT PRIMARY KEY,
+      signature TEXT, default_cc TEXT, default_bcc TEXT, default_reply_to TEXT,
+      default_send_mode TEXT DEFAULT 'draft', confirm_before_send BOOLEAN DEFAULT TRUE,
+      sync_frequency TEXT DEFAULT 'normal', updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_test_log (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT,
+      kind TEXT,          -- 'smtp' | 'imap' | 'domain' | 'mailbox' | 'send'
+      scope TEXT,         -- 'org' | 'user'
+      target TEXT,        -- host:port or address tested
+      ok BOOLEAN,
+      message TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
 
   await seedTagTaxonomy();
   await seedSkqSystems();
@@ -1837,6 +1900,31 @@ async function getCommunication(id) {
   return q1(`SELECT * FROM communications WHERE id = $1`, [id]);
 }
 
+// Attachments for a communication including their binary data, for real sending.
+async function getAttachmentsWithDataForCommunication(communicationId) {
+  return q(`
+    SELECT a.id, a.original_filename, a.mime_type, a.file_data
+    FROM communication_attachments ca
+    JOIN attachments a ON a.id = ca.attachment_id
+    WHERE ca.communication_id = $1
+    ORDER BY ca.created_at ASC
+  `, [communicationId]);
+}
+
+// Record the outcome of a send/schedule attempt on a communication.
+async function markCommunicationSend(id, patch) {
+  const cols = []; const vals = []; let i = 1;
+  for (const k of ['delivery_status', 'message_id', 'send_error', 'status']) {
+    if (k in patch) { cols.push(`${k} = $${i++}`); vals.push(patch[k]); }
+  }
+  if ('sent_at' in patch) { cols.push(`sent_at = $${i++}`); vals.push(patch.sent_at); }
+  if ('scheduled_at' in patch) { cols.push(`scheduled_at = $${i++}`); vals.push(patch.scheduled_at); }
+  if (!cols.length) return getCommunication(id);
+  vals.push(id);
+  await q(`UPDATE communications SET ${cols.join(', ')}, updated_at = NOW() WHERE id = $${i}`, vals);
+  return getCommunication(id);
+}
+
 async function updateCommunication(id, fields) {
   const allowed = [
     'subject','body','category','status','draft_mode','followup_text','rationale',
@@ -2603,6 +2691,84 @@ async function setAiBudget(patch) {
   return next;
 }
 
+// ===========================================================================
+// Email configuration (org-level + per-user)
+// ===========================================================================
+const EMAIL_ORG_COLS = ['allowed_domain', 'provider_name', 'provider_type',
+  'smtp_host', 'smtp_port', 'smtp_encryption', 'smtp_auth_method',
+  'imap_host', 'imap_port', 'imap_encryption', 'imap_auth_method',
+  'inbox_folder', 'sent_folder', 'draft_folder', 'archive_folder', 'trash_folder',
+  'sync_interval_seconds', 'imap_idle', 'max_attachment_mb', 'hourly_send_limit', 'daily_send_limit',
+  'ip_allowlist_required', 'oauth_available', 'app_password_required',
+  'spf_status', 'dkim_status', 'dmarc_status', 'smtp_verified', 'imap_verified', 'integration_enabled',
+  'oauth_connected', 'oauth_email', 'oauth_display_name', 'oauth_connected_at',
+  'oauth_access_token', 'oauth_refresh_token', 'oauth_token_expires'];
+
+async function getEmailOrgConfig() {
+  return q1(`SELECT * FROM email_org_config WHERE id = 1`);
+}
+async function saveEmailOrgConfig(patch) {
+  const cols = []; const vals = []; let i = 1;
+  for (const k of EMAIL_ORG_COLS) if (k in patch) { cols.push(`${k} = $${i++}`); vals.push(patch[k]); }
+  if (cols.length) { vals.push(1); await q(`UPDATE email_org_config SET ${cols.join(', ')}, updated_at = NOW() WHERE id = $${i}`, vals); }
+  return getEmailOrgConfig();
+}
+
+const EMAIL_ACCT_COLS = ['sender_name', 'sender_email', 'reply_to', 'mailbox_username', 'auth_method', 'connection_status', 'sync_enabled', 'last_sync_at'];
+async function getEmailUserAccount(userId) {
+  return q1(`
+    SELECT user_id, sender_name, sender_email, reply_to, mailbox_username, auth_method,
+           connection_status, sync_enabled, last_sync_at, updated_at,
+           (secret IS NOT NULL AND secret <> '') AS has_secret
+    FROM email_user_account WHERE user_id = $1
+  `, [userId]);
+}
+async function getEmailUserSecret(userId) {
+  const row = await q1(`SELECT secret FROM email_user_account WHERE user_id = $1`, [userId]);
+  return row ? row.secret : null;
+}
+async function saveEmailUserAccount(userId, patch) {
+  await q(`INSERT INTO email_user_account (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId]);
+  const cols = []; const vals = []; let i = 1;
+  for (const k of EMAIL_ACCT_COLS) if (k in patch) { cols.push(`${k} = $${i++}`); vals.push(patch[k]); }
+  if (patch.secret != null && patch.secret !== '') { cols.push(`secret = $${i++}`); vals.push(patch.secret); }
+  if (cols.length) { vals.push(userId); await q(`UPDATE email_user_account SET ${cols.join(', ')}, updated_at = NOW() WHERE user_id = $${i}`, vals); }
+  return getEmailUserAccount(userId);
+}
+
+const EMAIL_PREF_COLS = ['signature', 'default_cc', 'default_bcc', 'default_reply_to', 'default_send_mode', 'confirm_before_send', 'sync_frequency'];
+async function getEmailUserPrefs(userId) {
+  const row = await q1(`SELECT * FROM email_user_prefs WHERE user_id = $1`, [userId]);
+  return row || {
+    user_id: userId, signature: '', default_cc: '', default_bcc: '', default_reply_to: '',
+    default_send_mode: 'draft', confirm_before_send: true, sync_frequency: 'normal',
+  };
+}
+async function saveEmailUserPrefs(userId, patch) {
+  await q(`INSERT INTO email_user_prefs (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId]);
+  const cols = []; const vals = []; let i = 1;
+  for (const k of EMAIL_PREF_COLS) if (k in patch) { cols.push(`${k} = $${i++}`); vals.push(patch[k]); }
+  if (cols.length) { vals.push(userId); await q(`UPDATE email_user_prefs SET ${cols.join(', ')}, updated_at = NOW() WHERE user_id = $${i}`, vals); }
+  return getEmailUserPrefs(userId);
+}
+
+// Connection Test History — every SMTP/IMAP/domain/mailbox/send test is logged
+// so admins and users can see recent verification results on the Settings page.
+async function recordEmailTest({ userId, kind, scope, target, ok, message }) {
+  try {
+    await q(
+      `INSERT INTO email_test_log (user_id, kind, scope, target, ok, message) VALUES ($1,$2,$3,$4,$5,$6)`,
+      [userId || null, kind || null, scope || null, target || null, Boolean(ok), (message || '').slice(0, 500)]
+    );
+  } catch { /* logging must never break the test itself */ }
+}
+async function listEmailTests({ userId, limit = 20, adminAll = false } = {}) {
+  // Admins see org-scope tests plus everyone's; users see org tests + their own.
+  return adminAll
+    ? q(`SELECT * FROM email_test_log ORDER BY created_at DESC LIMIT $1`, [limit])
+    : q(`SELECT * FROM email_test_log WHERE scope = 'org' OR user_id = $1 ORDER BY created_at DESC LIMIT $2`, [userId || '', limit]);
+}
+
 async function getSetting(key) {
   const row = await q1(`SELECT value FROM settings WHERE key = $1`, [key]);
   return row ? row.value : null;
@@ -2639,6 +2805,7 @@ module.exports = {
   insertEmailDraftVersion, listEmailDraftsForContact, findLatestDraftForContact,
   // communications (unified timeline)
   insertCommunication, listTimelineForContact, getCommunication,
+  getAttachmentsWithDataForCommunication, markCommunicationSend,
   updateCommunication, deleteCommunication, duplicateCommunication, findDuplicateEmail,
   // draft lifecycle: current draft, versions, save, status, trash/archive, follow-ups
   getCurrentDraftForContact, listDraftVersionsForContact, saveDraftEdit,
@@ -2675,5 +2842,10 @@ module.exports = {
   recordAiUsage, aiUsageTotals, aiUsageByFeature, aiUsageByCompany,
   estimateAiSaved, getAiBudget, setAiBudget,
   seedAiModelPricing, listActivePricing, buildPeriodFilter,
-  aiUsageKpis, aiUsageTimeseries, aiUsageFeatureBreakdown, aiUsageByModel, aiUsageByUser, aiUsageEvents
+  aiUsageKpis, aiUsageTimeseries, aiUsageFeatureBreakdown, aiUsageByModel, aiUsageByUser, aiUsageEvents,
+  // email configuration
+  getEmailOrgConfig, saveEmailOrgConfig,
+  getEmailUserAccount, getEmailUserSecret, saveEmailUserAccount,
+  getEmailUserPrefs, saveEmailUserPrefs,
+  recordEmailTest, listEmailTests
 };

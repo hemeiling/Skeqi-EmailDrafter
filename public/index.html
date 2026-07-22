@@ -676,6 +676,82 @@
     .intel-subtab .st-close { color:#9ca3af; font-size:0.95rem; line-height:1; }
     .intel-subtab .st-close:hover { color:#ef4444; }
     #crm-intel-panel { border:1px solid #e5e7eb; border-radius:0 8px 8px 8px; padding:14px; background:#fdfdfd; }
+    /* settings email forms */
+    .em-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:6px; }
+    .em-grid.two { grid-template-columns:repeat(2,1fr); }
+    .em-field label { display:block; font-size:0.76rem; color:#555; margin-bottom:3px; }
+    .em-field input, .em-field select, .em-field textarea { width:100%; padding:8px 10px; border:1px solid #d1d5db; border-radius:6px; font-size:13px; background:#fff; box-sizing:border-box; }
+    .em-field.check { display:flex; align-items:center; gap:6px; margin-top:20px; font-size:0.82rem; color:#374151; }
+    .em-field.check input { width:auto; }
+    .em-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; }
+    .em-subtitle { font-size:0.78rem; font-weight:600; color:#6b7280; text-transform:uppercase; letter-spacing:.03em; margin:14px 0 4px; }
+    .em-badge { font-size:0.72rem; font-weight:600; padding:3px 9px; border-radius:12px; white-space:nowrap; }
+    .em-badge.gray { background:#f3f4f6; color:#6b7280; } .em-badge.green { background:#ecfdf5; color:#047857; }
+    .em-badge.amber { background:#fffbeb; color:#b45309; } .em-badge.red { background:#fee2e2; color:#b91c1c; } .em-badge.blue { background:#eff6ff; color:#2563eb; }
+    .em-result { font-size:0.78rem; margin-top:8px; }
+    /* Simplified OAuth wizard + status card */
+    .em-wizard { display:flex; flex-direction:column; gap:16px; max-width:520px; margin-top:6px; }
+    .em-step { display:flex; align-items:flex-start; gap:12px; }
+    .em-step-n { flex:0 0 auto; width:24px; height:24px; border-radius:50%; background:#111827; color:#fff; font-size:0.78rem; font-weight:700; display:flex; align-items:center; justify-content:center; margin-top:2px; }
+    .em-step .em-field { flex:1; }
+    .em-status-card { max-width:460px; border:1px solid #e5e7eb; border-radius:10px; padding:14px 16px; background:#fafafa; }
+    .em-status-row { display:flex; justify-content:space-between; gap:16px; padding:6px 0; border-bottom:1px solid #f0f0f0; font-size:0.86rem; }
+    .em-status-row:last-child { border-bottom:none; }
+    .em-status-k { color:#6b7280; }
+    .em-status-v { color:#111827; font-weight:600; text-align:right; }
+    table.em-history { width:100%; border-collapse:collapse; font-size:0.8rem; margin-top:6px; }
+    table.em-history th { text-align:left; color:#6b7280; font-weight:600; padding:6px 10px; border-bottom:1px solid #e5e7eb; white-space:nowrap; }
+    table.em-history td { padding:6px 10px; border-bottom:1px solid #f3f4f6; vertical-align:top; }
+    table.em-history tr:hover td { background:#fafafa; }
+    /* Advanced Settings disclosure */
+    details.em-advanced { border:1px solid #e5e7eb; border-radius:8px; padding:0 12px; margin-top:6px; background:#fafafa; }
+    details.em-advanced > summary { cursor:pointer; padding:10px 0; font-size:0.84rem; font-weight:600; color:#374151; list-style:none; }
+    details.em-advanced > summary::-webkit-details-marker { display:none; }
+    details.em-advanced[open] { padding-bottom:12px; }
+    /* Configuration Status checklist */
+    .em-checklist { display:flex; flex-direction:column; gap:5px; margin:4px 0 6px; }
+    .em-check-item { display:flex; gap:8px; align-items:baseline; font-size:0.86rem; }
+    .em-check-item .k { min-width:150px; color:#374151; }
+    .em-check-item.done .k { color:#111827; }
+    .em-check-item .v { color:#6b7280; }
+    .em-nextstep { font-size:0.88rem; font-weight:600; color:#1d4ed8; background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; padding:9px 12px; margin:8px 0 12px; }
+    .em-nextstep:empty { display:none; }
+    .em-badge.amber-blue { background:#eff6ff; color:#1d4ed8; }
+    /* ── Phase 1: Compose header, chips, sticky action bar ── */
+    .compose-header { border:1px solid #e5e7eb; border-radius:10px; overflow:hidden; margin:10px 0; }
+    .compose-row { display:flex; align-items:center; gap:10px; padding:7px 12px; border-bottom:1px solid #f0f0f0; }
+    .compose-row:last-child { border-bottom:none; }
+    .compose-row > label { flex:0 0 54px; font-size:0.78rem; color:#6b7280; font-weight:600; }
+    .compose-from { font-size:0.9rem; color:#111827; font-weight:600; }
+    .compose-from-email { color:#2563eb; font-weight:600; }
+    .compose-from-warn { color:#b45309; font-weight:500; font-size:0.82rem; }
+    .compose-subject { flex:1; border:none; outline:none; font-size:0.95rem; font-weight:600; color:#111827; background:transparent; padding:2px 0; }
+    .chip-input { flex:1; display:flex; flex-wrap:wrap; gap:5px; align-items:center; min-height:26px; }
+    .chip { display:inline-flex; align-items:center; gap:5px; background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; border-radius:14px; padding:2px 8px; font-size:0.8rem; }
+    .chip .chip-x { color:#6366f1; text-decoration:none; font-size:0.72rem; }
+    .chip-entry { flex:1; min-width:120px; border:none; outline:none; font-size:0.86rem; padding:2px 0; background:transparent; }
+    .draft-body { width:100%; box-sizing:border-box; border:1px solid #e5e7eb; border-radius:10px; padding:12px; font-size:0.9rem; line-height:1.5; resize:vertical; }
+    .autosave-status { font-size:0.74rem; }
+    /* delivery status badges */
+    .draft-status-badge.del-green { background:#ecfdf5; color:#047857; }
+    .draft-status-badge.del-amber { background:#fffbeb; color:#b45309; }
+    .draft-status-badge.del-blue { background:#eff6ff; color:#2563eb; }
+    .draft-status-badge.del-red { background:#fee2e2; color:#b91c1c; }
+    /* sticky action bar */
+    .draft-actionbar { position:sticky; bottom:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+      background:rgba(255,255,255,0.97); backdrop-filter:blur(4px); border-top:1px solid #e5e7eb;
+      padding:12px 4px; margin:14px -4px -4px; z-index:5; }
+    .ab-spacer { flex:1; }
+    .ab-btn { border:1px solid #d1d5db; background:#fff; color:#374151; border-radius:8px; padding:8px 14px; font-size:0.85rem; font-weight:600; cursor:pointer; }
+    .ab-btn:hover { background:#f9fafb; }
+    .ab-btn:disabled { opacity:0.6; cursor:default; }
+    .ab-send { background:#ea580c; border-color:#ea580c; color:#fff; padding:8px 20px; }
+    .ab-send:hover { background:#c2410c; }
+    /* preview */
+    .preview-email { border:1px solid #e5e7eb; border-radius:10px; padding:16px; }
+    .preview-line { display:flex; gap:10px; font-size:0.84rem; padding:2px 0; }
+    .preview-line > span { flex:0 0 60px; color:#9ca3af; }
+    .preview-message { font-size:0.9rem; line-height:1.55; color:#111827; margin-top:6px; }
   </style>
 </head>
 <body>
@@ -755,6 +831,164 @@
       </select>
       <div style="font-size:0.78rem;color:#9ca3af;margin-top:6px;">The AI always receives the English tag names for consistency; this only changes what you see.</div>
     </div>
+  </div>
+
+  <!-- ══ Email: Organization Configuration (admin/IT only) ══ -->
+  <div class="card view-hidden" data-view="settings" id="em-org-card" style="display:none;">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+      <span>Organization Email Configuration <span style="font-weight:400;font-size:0.82rem;color:#9ca3af">— admin / IT only · set once for the whole team</span></span>
+      <span id="em-org-status" class="em-badge gray">Not configured</span>
+    </div>
+
+    <!-- Auto Detect: infer the provider from an email domain (MX lookup) -->
+    <div class="em-subtitle">Auto detect</div>
+    <div class="em-grid">
+      <div class="em-field"><label>Email address (for detection)</label><input type="email" id="em-org-detect-email" placeholder="me@yourcompany.com" /></div>
+      <div class="em-field" style="align-self:end;"><button class="btn-sm btn-ghost" id="em-org-detect-btn" style="width:fit-content;">🔎 Auto Detect Provider</button></div>
+      <div class="em-field"><div id="em-org-detect-result" style="font-size:0.8rem;margin-top:2px;"></div></div>
+    </div>
+
+    <!-- Provider selection (always visible) -->
+    <div class="em-subtitle">Provider</div>
+    <div class="em-grid">
+      <div class="em-field"><label>Email provider</label>
+        <select id="em-org-provider_type"><option value="">Loading providers…</option></select></div>
+      <div class="em-field"><label>Organization email domain</label><input type="text" id="em-org-allowed_domain" placeholder="skeqi.com" /></div>
+      <div class="em-field"><label>Display name (optional)</label><input type="text" id="em-org-provider_name" placeholder="e.g. NetEase Enterprise Mail" /></div>
+    </div>
+    <div id="em-org-provider-note" style="font-size:0.78rem;color:#6b7280;margin-top:-4px;"></div>
+
+    <!-- OAuth providers (Microsoft 365 / Google) -->
+    <div id="em-org-oauth" style="display:none;">
+      <div class="em-subtitle">Connect the organization account</div>
+      <div id="em-org-oauth-body" style="font-size:0.86rem;color:#4b5563;">…</div>
+    </div>
+
+    <!-- SMTP / IMAP providers (NetEase Enterprise / Custom) -->
+    <div id="em-org-smtpimap" style="display:none;">
+      <div id="em-org-autoconfig-note" style="font-size:0.84rem;color:#047857;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:8px 12px;margin:8px 0;"></div>
+      <details class="em-advanced" id="em-org-advanced">
+        <summary>⚙️ Advanced Settings — SMTP / IMAP servers, folders, limits, DNS <span style="color:#9ca3af;font-weight:400;">(auto-filled; override only if your provider differs)</span></summary>
+      <div class="em-subtitle">SMTP (outgoing)</div>
+      <div class="em-grid">
+        <div class="em-field"><label>SMTP host</label><input type="text" id="em-org-smtp_host" placeholder="smtp.qiye.163.com" /></div>
+        <div class="em-field"><label>SMTP port</label><input type="number" id="em-org-smtp_port" placeholder="465" /></div>
+        <div class="em-field"><label>SMTP encryption</label><select id="em-org-smtp_encryption"><option value="ssl">SSL/TLS</option><option value="starttls">STARTTLS</option><option value="none">None</option></select></div>
+        <div class="em-field"><label>SMTP auth method</label><select id="em-org-smtp_auth_method"><option value="password">Password / authorization code</option><option value="oauth">OAuth</option></select></div>
+      </div>
+      <div class="em-subtitle">IMAP (incoming)</div>
+      <div class="em-grid">
+        <div class="em-field"><label>IMAP host</label><input type="text" id="em-org-imap_host" placeholder="imap.qiye.163.com" /></div>
+        <div class="em-field"><label>IMAP port</label><input type="number" id="em-org-imap_port" placeholder="993" /></div>
+        <div class="em-field"><label>IMAP encryption</label><select id="em-org-imap_encryption"><option value="ssl">SSL/TLS</option><option value="starttls">STARTTLS</option><option value="none">None</option></select></div>
+        <div class="em-field"><label>IMAP auth method</label><select id="em-org-imap_auth_method"><option value="password">Password / authorization code</option><option value="oauth">OAuth</option></select></div>
+      </div>
+      <div class="em-subtitle">Folders</div>
+      <div class="em-grid">
+        <div class="em-field"><label>Inbox</label><input type="text" id="em-org-inbox_folder" value="INBOX" /></div>
+        <div class="em-field"><label>Sent</label><input type="text" id="em-org-sent_folder" value="Sent" /></div>
+        <div class="em-field"><label>Drafts</label><input type="text" id="em-org-draft_folder" value="Drafts" /></div>
+        <div class="em-field"><label>Archive</label><input type="text" id="em-org-archive_folder" value="Archive" /></div>
+        <div class="em-field"><label>Trash</label><input type="text" id="em-org-trash_folder" value="Trash" /></div>
+      </div>
+      <div class="em-subtitle">Sync &amp; limits</div>
+      <div class="em-grid">
+        <div class="em-field"><label>Sync interval (seconds)</label><input type="number" id="em-org-sync_interval_seconds" value="300" /></div>
+        <div class="em-field"><label>Max attachment size (MB)</label><input type="number" id="em-org-max_attachment_mb" value="25" /></div>
+        <div class="em-field"><label>Hourly sending limit</label><input type="number" id="em-org-hourly_send_limit" value="100" /></div>
+        <div class="em-field"><label>Daily sending limit</label><input type="number" id="em-org-daily_send_limit" value="500" /></div>
+        <div class="em-field check"><input type="checkbox" id="em-org-imap_idle" /> <label style="margin:0;">IMAP IDLE support</label></div>
+        <div class="em-field check"><input type="checkbox" id="em-org-ip_allowlist_required" /> <label style="margin:0;">Server IP allowlisting required</label></div>
+        <div class="em-field check"><input type="checkbox" id="em-org-app_password_required" checked /> <label style="margin:0;">App password / authorization code required</label></div>
+      </div>
+      <div class="em-subtitle">Domain authentication (DNS)</div>
+      <div class="em-grid">
+        <div class="em-field"><label>SPF</label><input type="text" id="em-org-spf_status" readonly placeholder="unchecked" /></div>
+        <div class="em-field"><label>DKIM</label><input type="text" id="em-org-dkim_status" readonly placeholder="unchecked" /></div>
+        <div class="em-field"><label>DMARC</label><input type="text" id="em-org-dmarc_status" readonly placeholder="unchecked" /></div>
+      </div>
+      </details>
+    </div>
+
+    <div class="em-actions" id="em-org-actions">
+      <button class="btn-sm btn-orange" id="em-org-save">Save Configuration</button>
+      <button class="btn-sm btn-ghost em-smtp-action" id="em-org-test-smtp">Test SMTP server</button>
+      <button class="btn-sm btn-ghost em-smtp-action" id="em-org-test-imap">Test IMAP server</button>
+      <button class="btn-sm btn-ghost em-smtp-action" id="em-org-validate">Check domain DNS</button>
+    </div>
+    <div style="font-size:0.74rem;color:#9ca3af;margin-top:6px;">Saving valid servers enables sending automatically — individual users still connect their own mailbox in “My Email Account.” Server/DNS tests above are optional diagnostics.</div>
+    <div class="em-result" id="em-org-result"></div>
+  </div>
+
+  <!-- ══ Email: My Email Account (all users) ══ -->
+  <div class="card view-hidden" data-view="settings" id="em-acct-card">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+      <span>My Email Account <span style="font-weight:400;font-size:0.82rem;color:#9ca3af">— connect your authorized @<span id="em-domain">skeqi.com</span> mailbox</span></span>
+      <span id="em-acct-status" class="em-badge gray">Disconnected</span>
+    </div>
+
+    <!-- OAuth providers: identity comes from sign-in, nothing to type -->
+    <div id="em-acct-oauth" style="display:none;font-size:0.88rem;color:#4b5563;line-height:1.5;"></div>
+
+    <!-- SMTP/IMAP providers: user enters only email + password -->
+    <div id="em-acct-manual">
+      <!-- Configuration Status: exactly what's done and what's missing -->
+      <div class="em-checklist" id="em-acct-checklist"></div>
+      <div id="em-acct-nextstep" class="em-nextstep"></div>
+
+      <div class="em-grid two">
+        <div class="em-field"><label>Email address</label><input type="email" id="em-acct-email" placeholder="you@yourcompany.com" /></div>
+        <div class="em-field"><label>Password / app password</label><input type="password" id="em-acct-secret" placeholder="••••••••" autocomplete="new-password" /></div>
+      </div>
+
+      <details class="em-advanced" id="em-acct-advanced" style="margin-top:10px;">
+        <summary>⚙️ Advanced — sender name, reply-to, username, auth method</summary>
+        <div class="em-grid">
+          <div class="em-field"><label>Sender name</label><input type="text" id="em-acct-name" placeholder="e.g. Sarah Chen" /></div>
+          <div class="em-field"><label>Reply-to address</label><input type="email" id="em-acct-replyto" placeholder="(optional)" /></div>
+          <div class="em-field"><label>Mailbox username</label><input type="text" id="em-acct-username" placeholder="(defaults to your email)" /></div>
+          <div class="em-field"><label>Authentication method</label>
+            <select id="em-acct-authmethod"><option value="app_password">App password</option><option value="auth_code">Authorization code (授权码)</option><option value="oauth">OAuth</option></select></div>
+          <div class="em-field check"><input type="checkbox" id="em-acct-sync" /> <label style="margin:0;">Mailbox synchronization enabled</label></div>
+        </div>
+      </details>
+
+      <div style="font-size:0.74rem;color:#9ca3af;margin-top:8px;">Last successful test: <span id="em-acct-lastsync">never</span>. SMTP/IMAP servers come from the organization configuration — you don't enter them here.</div>
+      <div class="em-actions">
+        <button class="btn-sm btn-orange" id="em-acct-test">🔌 Test Connection</button>
+        <button class="btn-sm btn-ghost" id="em-acct-save">Save without testing</button>
+        <button class="btn-sm btn-ghost" id="em-acct-sendtest">Send Test Email</button>
+        <button class="btn-sm btn-ghost" id="em-acct-disconnect">Disconnect</button>
+      </div>
+    </div>
+    <div class="em-result" id="em-acct-result"></div>
+  </div>
+
+  <!-- ══ Email: Signature & Sending Preferences (all users) ══ -->
+  <div class="card view-hidden" data-view="settings" id="em-pref-card">
+    <div class="card-title">Email Signature &amp; Sending Preferences</div>
+    <div class="em-field" style="margin-bottom:10px;"><label>Email signature</label><textarea id="em-pref-signature" rows="4" placeholder="Best regards,&#10;Your Name · Skeqi"></textarea></div>
+    <div class="em-grid">
+      <div class="em-field"><label>Default CC</label><input type="text" id="em-pref-default_cc" placeholder="(optional)" /></div>
+      <div class="em-field"><label>Default BCC</label><input type="text" id="em-pref-default_bcc" placeholder="(optional)" /></div>
+      <div class="em-field"><label>Default reply-to</label><input type="text" id="em-pref-default_reply_to" placeholder="(optional)" /></div>
+      <div class="em-field"><label>Default sending mode</label>
+        <select id="em-pref-default_send_mode"><option value="draft">Save as draft</option><option value="send">Send immediately</option><option value="schedule">Schedule</option></select></div>
+      <div class="em-field"><label>Preferred sync frequency</label>
+        <select id="em-pref-sync_frequency"><option value="realtime">Real-time (IDLE)</option><option value="normal">Normal (5 min)</option><option value="low">Low (30 min)</option><option value="manual">Manual only</option></select></div>
+      <div class="em-field check"><input type="checkbox" id="em-pref-confirm_before_send" checked /> <label style="margin:0;">Confirm before sending</label></div>
+    </div>
+    <div class="em-actions"><button class="btn-sm btn-orange" id="em-pref-save">Save preferences</button></div>
+    <div class="em-result" id="em-pref-result"></div>
+  </div>
+
+  <!-- ══ Email: Connection Test History (all users) ══ -->
+  <div class="card view-hidden" data-view="settings" id="em-history-card">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+      <span>Connection Test History</span>
+      <button class="btn-sm btn-ghost" id="em-history-refresh">Refresh</button>
+    </div>
+    <div id="em-history-body"><div style="color:#9ca3af;font-size:0.85rem;padding:8px 0;">No tests run yet.</div></div>
   </div>
 
   <!-- ── Company list upload card ── -->
@@ -1371,6 +1605,8 @@
       <div id="modal-intel-body" style="margin-top:10px;"></div>
     </div>
 
+    <div id="email-send-status" style="display:none;background:#fffbeb;border:1px solid #fcd34d;color:#92400e;border-radius:6px;padding:8px 12px;margin:10px 0;font-size:0.8rem;"></div>
+
     <div class="draft-section" id="draft-library-section" style="border-top:1px solid #e0e4ea;border-bottom:1px solid #e0e4ea;padding:12px 0;">
       <div class="draft-label">Drafts for this Contact</div>
       <div id="draft-library-list" class="draft-library-list"></div>
@@ -1408,6 +1644,16 @@
       <button class="btn-sm" id="unsaved-discard-btn" style="background:#f3f4f6;color:#374151;">Discard Changes</button>
       <button class="btn-orange" id="unsaved-save-btn">Save Draft</button>
     </div>
+  </div>
+</div>
+
+<!-- ── Draft preview (recipient view) ── -->
+<div class="modal-overlay" id="draft-preview-modal">
+  <div class="modal" style="max-width:640px;">
+    <button class="modal-close" id="draft-preview-close" title="Close">×</button>
+    <h2 style="margin-bottom:4px;">Preview</h2>
+    <div style="font-size:0.78rem;color:#9ca3af;margin-bottom:12px;">This is how your recipient will see the email.</div>
+    <div id="draft-preview-body"></div>
   </div>
 </div>
 
