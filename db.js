@@ -551,6 +551,11 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_ai_pricing_model ON ai_model_pricing (provider, model, effective_start)`);
   await seedAiModelPricing();
 
+  // Strategic category carried over from the booth map (available / competitor /
+  // customer / batmat / …), so the CRM can filter by the same buckets the floor
+  // plan uses. Backfilled by scripts/backfill_booth_categories.js.
+  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS booth_category TEXT`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_companies_booth_category ON companies(booth_category)`);
   await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS ai_research_summary TEXT`);
   await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS intelligence_reviewed_at TIMESTAMPTZ`);
   // Distinct from intelligence_reviewed_at (human review): when the AI last ran.
@@ -624,6 +629,41 @@ async function initDb() {
       ok BOOLEAN,
       message TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Server-side tool calls billed on top of tokens (web search: $10 / 1,000).
+  await pool.query(`ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS web_search_calls INTEGER DEFAULT 0`);
+
+  // ── Account Intelligence Report generator (ported from Skeqi-AccountResearch) ──
+  // Reports were file-based JSON in the standalone app; here they live in
+  // Postgres so they survive redeploys and are searchable alongside the CRM.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS account_reports (
+      id TEXT PRIMARY KEY,
+      report_key TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      target TEXT, target_zh TEXT, turl TEXT,
+      company_name TEXT, company_name_zh TEXT,
+      seller TEXT, surl TEXT,
+      report_type TEXT DEFAULT 'Executive Account Plan · 高管账户计划',
+      sections JSONB, usage JSONB,
+      data JSONB NOT NULL,
+      company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+      created_by TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_account_reports_key ON account_reports(report_key)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_account_reports_created ON account_reports(created_at DESC)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS account_research_cache (
+      cache_type TEXT NOT NULL,
+      cache_key TEXT NOT NULL,
+      data JSONB NOT NULL,
+      cost_usd NUMERIC(12,6) DEFAULT 0,
+      cached_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (cache_type, cache_key)
     )
   `);
 
@@ -1295,16 +1335,28 @@ async function upsertCompany(fields) {
   return { id, updated: false };
 }
 
+// contact_count lets the UI show which companies still need prospecting —
+// the whole point of the "search contacts with Apollo" flow in Quick Browse.
+const COMPANY_CONTACT_COUNT = `
+  LEFT JOIN (
+    SELECT company_id, COUNT(*)::int AS contact_count
+    FROM contacts WHERE company_id IS NOT NULL GROUP BY company_id
+  ) cc ON cc.company_id = c.id`;
+
 async function listCompanies(searchTerm) {
   if (searchTerm && searchTerm.trim()) {
     const like = `%${searchTerm.trim().toLowerCase()}%`;
     return q(`
-      SELECT * FROM companies
-      WHERE LOWER(name) LIKE $1 OR LOWER(chinese_name) LIKE $2 OR LOWER(industry) LIKE $3
-      ORDER BY priority DESC, name
+      SELECT c.*, COALESCE(cc.contact_count, 0) AS contact_count
+      FROM companies c ${COMPANY_CONTACT_COUNT}
+      WHERE LOWER(c.name) LIKE $1 OR LOWER(c.chinese_name) LIKE $2 OR LOWER(c.industry) LIKE $3
+      ORDER BY c.priority DESC, c.name
     `, [like, like, like]);
   }
-  return q(`SELECT * FROM companies ORDER BY priority DESC, name`);
+  return q(`
+    SELECT c.*, COALESCE(cc.contact_count, 0) AS contact_count
+    FROM companies c ${COMPANY_CONTACT_COUNT}
+    ORDER BY c.priority DESC, c.name`);
 }
 
 async function getCompanyContacts(companyId) {
@@ -1681,6 +1733,18 @@ async function filterContacts(filters = {}, limit = 1000) {
   if (seniorityLevels.length) {
     params.push(seniorityLevels);
     clauses.push(`c.seniority_level = ANY($${params.length}::text[])`);
+  }
+  // Show filter — matches on the *company's* event, not the contact's. A contact
+  // scanned at a different show still belongs to an exhibitor of this one.
+  if (filters.show_event) {
+    params.push(filters.show_event);
+    clauses.push(`comp.event_id IN (SELECT id FROM events WHERE LOWER(name) = LOWER($${params.length}))`);
+  }
+  // Booth-map strategic category (customer / competitor / batmat / …).
+  const boothCategories = ([].concat(filters.booth_categories || [])).map((s) => String(s).trim()).filter(Boolean);
+  if (boothCategories.length) {
+    params.push(boothCategories);
+    clauses.push(`comp.booth_category = ANY($${params.length}::text[])`);
   }
 
   params.push(limit);
@@ -2428,8 +2492,9 @@ async function recordAiUsage(evt) {
       (feature, sub_feature, outcome, request_type, model, provider,
        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens,
        cost_usd, currency, tokens_saved_input, tokens_saved_output, cost_saved_usd,
-       company_id, contact_id, thread_id, session_id, user_id, response_ms, status, error_message, request_id)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+       company_id, contact_id, thread_id, session_id, user_id, response_ms, status, error_message, request_id,
+       web_search_calls)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
     ON CONFLICT (request_id) DO NOTHING
   `, [
     evt.feature, evt.sub_feature || null, evt.outcome, evt.request_type || null, evt.model || null, evt.provider || 'anthropic',
@@ -2437,31 +2502,136 @@ async function recordAiUsage(evt) {
     evt.cost_usd || 0, evt.currency || 'USD', evt.tokens_saved_input || 0, evt.tokens_saved_output || 0, evt.cost_saved_usd || 0,
     evt.company_id || null, evt.contact_id || null, evt.thread_id || null, evt.session_id || null, evt.user_id || null,
     evt.response_ms || null, evt.status || 'success', evt.error_message || null, evt.request_id || null,
+    evt.web_search_calls || 0,
   ]);
 }
 
+// ===========================================================================
+// Account Intelligence Reports (ported from the standalone Skeqi-AccountResearch
+// app, whose file-based JSON store did not survive redeploys)
+// ===========================================================================
+
+function arSlugify(v) {
+  return String(v || '').trim().toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'na';
+}
+
+async function saveAccountReport(D, userId) {
+  const key = `${arSlugify(D.target)}__${arSlugify(D.seller)}`;
+  const vr = await q(
+    `SELECT COALESCE(MAX(version), 0) + 1 AS next FROM account_reports WHERE report_key = $1`, [key]);
+  const version = Number(vr[0].next);
+  const id = `${key}__v${version}__${Date.now()}`;
+  const sections = ['od', 'fd', 'sd', 'nd', 'cd', 'sal'].reduce((acc, k) => {
+    const st = D._sectionStatus && D._sectionStatus[k];
+    acc[k] = st === 'success' ? 'live' : (st === 'fallback' ? 'fallback' : (D[k] ? 'live' : 'fallback'));
+    return acc;
+  }, {});
+  const usage = D._usage ? {
+    model: D._usage.model || '', apiCalls: D._usage.apiCalls || 0,
+    inputTokens: D._usage.inputTokens || 0, outputTokens: D._usage.outputTokens || 0,
+    totalTokens: (D._usage.inputTokens || 0) + (D._usage.outputTokens || 0),
+    costUSD: D._usage.costUSD || 0,
+  } : null;
+  // Link the report to a CRM company when the name matches one we already know.
+  const cm = await q(
+    `SELECT id FROM companies WHERE name_key = $1 LIMIT 1`, [normalizeNameKey(D.target)]);
+  await q(`
+    INSERT INTO account_reports
+      (id, report_key, version, target, target_zh, turl, company_name, company_name_zh,
+       seller, surl, sections, usage, data, company_id, created_by)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+  `, [
+    id, key, version, D.target, (D.od && D.od.companyNameZh) || '', D.turl || '',
+    (D.od && D.od.companyName) || '', (D.od && D.od.companyNameZh) || '',
+    D.seller, D.surl || '', JSON.stringify(sections), usage ? JSON.stringify(usage) : null,
+    JSON.stringify({ ...D, id, key, version, createdAt: new Date().toISOString() }),
+    cm.length ? cm[0].id : null, userId || null,
+  ]);
+  return { id, key, version };
+}
+
+async function listAccountReports(search) {
+  const term = String(search || '').trim();
+  const params = [];
+  let where = '';
+  if (term) {
+    params.push(`%${term.toLowerCase()}%`);
+    where = `WHERE LOWER(COALESCE(target,'') || ' ' || COALESCE(target_zh,'') || ' ' ||
+                    COALESCE(seller,'') || ' ' || COALESCE(turl,'') || ' ' || COALESCE(surl,'')) LIKE $1`;
+  }
+  return await q(`
+    SELECT id, report_key AS key, version, target, target_zh AS "targetZh", turl,
+           company_name AS "companyName", company_name_zh AS "companyNameZh",
+           seller, surl, report_type AS "reportType", sections, usage, company_id,
+           created_at AS "createdAt"
+    FROM account_reports ${where} ORDER BY created_at DESC LIMIT 500
+  `, params);
+}
+
+async function getAccountReport(id) {
+  const rows = await q(`SELECT data FROM account_reports WHERE id = $1`, [id]);
+  return rows.length ? rows[0].data : null;
+}
+
+async function deleteAccountReport(id) {
+  const rows = await q(`DELETE FROM account_reports WHERE id = $1 RETURNING id`, [id]);
+  return rows.length > 0;
+}
+
+async function getAccountResearchCache(type, key, ttlMs) {
+  const rows = await q(
+    `SELECT data, cost_usd, cached_at FROM account_research_cache WHERE cache_type = $1 AND cache_key = $2`,
+    [type, key]);
+  if (!rows.length) return { found: false };
+  const ageMs = Date.now() - new Date(rows[0].cached_at).getTime();
+  if (ttlMs && ageMs > ttlMs) return { found: false, expired: true };
+  return { found: true, data: rows[0].data, costUSD: Number(rows[0].cost_usd) || 0,
+           cachedAt: new Date(rows[0].cached_at).getTime(), ageMs };
+}
+
+async function setAccountResearchCache(type, key, data, costUSD) {
+  await q(`
+    INSERT INTO account_research_cache (cache_type, cache_key, data, cost_usd, cached_at)
+    VALUES ($1,$2,$3,$4,NOW())
+    ON CONFLICT (cache_type, cache_key)
+    DO UPDATE SET data = EXCLUDED.data, cost_usd = EXCLUDED.cost_usd, cached_at = NOW()
+  `, [type, key, JSON.stringify(data), costUSD || 0]);
+}
+
+async function clearAccountResearchCache(type, key) {
+  await q(`DELETE FROM account_research_cache WHERE cache_type = $1 AND cache_key = $2`, [type, key]);
+}
+
 // period → SQL WHERE body (no params). Custom ranges use buildPeriodFilter.
-function periodWhere(period) {
+// `alias` qualifies the column for queries that join another table carrying its
+// own created_at (e.g. companies) — without it those queries fail with
+// "column reference created_at is ambiguous".
+function periodWhere(period, alias = '') {
+  const c = alias ? `${alias}.created_at` : 'created_at';
   switch (period) {
-    case 'today': return `created_at >= date_trunc('day', NOW())`;
-    case 'yesterday': return `created_at >= date_trunc('day', NOW()) - INTERVAL '1 day' AND created_at < date_trunc('day', NOW())`;
-    case '7d': return `created_at >= NOW() - INTERVAL '7 days'`;
-    case '30d': return `created_at >= NOW() - INTERVAL '30 days'`;
-    case 'month': return `created_at >= date_trunc('month', NOW())`;
-    case 'prev_month': return `created_at >= date_trunc('month', NOW()) - INTERVAL '1 month' AND created_at < date_trunc('month', NOW())`;
-    case 'year': return `created_at >= date_trunc('year', NOW())`;
+    case 'today': return `${c} >= date_trunc('day', NOW())`;
+    case 'yesterday': return `${c} >= date_trunc('day', NOW()) - INTERVAL '1 day' AND ${c} < date_trunc('day', NOW())`;
+    case '7d': return `${c} >= NOW() - INTERVAL '7 days'`;
+    case '30d': return `${c} >= NOW() - INTERVAL '30 days'`;
+    case 'month': return `${c} >= date_trunc('month', NOW())`;
+    case 'prev_month': return `${c} >= date_trunc('month', NOW()) - INTERVAL '1 month' AND ${c} < date_trunc('month', NOW())`;
+    case 'year': return `${c} >= date_trunc('year', NOW())`;
     default: return `TRUE`;
   }
 }
 // Returns { sql, params } — custom range binds dates as params.
-function buildPeriodFilter(period, from, to) {
+// Pass `alias` when the consuming query joins a table that also has created_at.
+function buildPeriodFilter(period, from, to, alias = '') {
+  const c = alias ? `${alias}.created_at` : 'created_at';
   if (period === 'custom' && (from || to)) {
     const parts = []; const params = [];
-    if (from) { params.push(from); parts.push(`created_at >= $${params.length}::date`); }
-    if (to) { params.push(to); parts.push(`created_at < ($${params.length}::date + INTERVAL '1 day')`); }
+    if (from) { params.push(from); parts.push(`${c} >= $${params.length}::date`); }
+    if (to) { params.push(to); parts.push(`${c} < ($${params.length}::date + INTERVAL '1 day')`); }
     return { sql: parts.join(' AND ') || 'TRUE', params };
   }
-  return { sql: periodWhere(period), params: [] };
+  return { sql: periodWhere(period, alias), params: [] };
 }
 
 async function aiUsageTotals(period = 'all') {
@@ -2521,7 +2691,7 @@ async function aiUsageByCompany(period = 'all', limit = 20) {
       COALESCE(SUM(e.tokens_saved_input+e.tokens_saved_output),0)::int AS saved_total,
       COALESCE(SUM(e.cost_saved_usd),0) AS saved_cost_usd
     FROM ai_usage_events e LEFT JOIN companies c ON c.id = e.company_id
-    WHERE ${periodWhere(period)} AND e.company_id IS NOT NULL
+    WHERE ${periodWhere(period, 'e')} AND e.company_id IS NOT NULL
     GROUP BY e.company_id, c.name ORDER BY cost_usd DESC LIMIT $1
   `, [limit]);
 }
@@ -2621,12 +2791,14 @@ async function aiUsageByUser(filter) {
 }
 
 // Paginated request-level audit log (no prompt/email content — metadata only).
+// `filter` must be built with alias 'e' — both queries below alias the events
+// table, and the row query joins companies (which carries its own created_at).
 async function aiUsageEvents(filter, opts = {}) {
   const params = [...filter.params];
   let where = filter.sql;
-  if (opts.feature) { params.push(opts.feature); where += ` AND feature = $${params.length}`; }
-  if (opts.status) { params.push(opts.status); where += ` AND status = $${params.length}`; }
-  const countRow = await q1(`SELECT COUNT(*)::int AS n FROM ai_usage_events WHERE ${where}`, params);
+  if (opts.feature) { params.push(opts.feature); where += ` AND e.feature = $${params.length}`; }
+  if (opts.status) { params.push(opts.status); where += ` AND e.status = $${params.length}`; }
+  const countRow = await q1(`SELECT COUNT(*)::int AS n FROM ai_usage_events e WHERE ${where}`, params);
   const limit = Math.min(200, Math.max(1, opts.limit || 50));
   const offset = Math.max(0, opts.offset || 0);
   params.push(limit); const limIdx = params.length;
@@ -2784,6 +2956,9 @@ async function setSetting(key, value) {
 module.exports = {
   pool,
   initDb,
+  // account intelligence reports
+  saveAccountReport, listAccountReports, getAccountReport, deleteAccountReport,
+  getAccountResearchCache, setAccountResearchCache, clearAccountResearchCache,
   // events
   getOrCreateEvent, listEvents,
   // accounts

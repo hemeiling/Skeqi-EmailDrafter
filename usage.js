@@ -49,8 +49,14 @@ const REQUEST_TYPE = {
 
 const FEATURES = [
   'company_research', 'email_draft', 'contact_intel',
-  'product_match', 'attachment_rec', 'email_classify', 'other',
+  'product_match', 'attachment_rec', 'email_classify',
+  'account_research', 'other',
 ];
+
+// Server-side tool fees that are billed on top of tokens. The Anthropic web
+// search tool is $10 per 1,000 searches; token-only accounting under-reports
+// any feature that uses it.
+const WEB_SEARCH_USD_PER_CALL = 0.01;
 // Outcomes that reused saved data instead of spending tokens.
 const REUSE_OUTCOMES = ['db_reuse', 'cache_hit', 'ai_avoided'];
 
@@ -95,7 +101,10 @@ function recordAiEvent(evt = {}) {
   const savedIn = evt.tokens_saved_input || 0;
   const savedOut = evt.tokens_saved_output || 0;
   const reuse = isReuse(outcome);
-  const cost = reuse ? 0 : costFor(model, input, output, cacheRead, cacheWrite);
+  // Server-side tool fees (e.g. web search) are billed in addition to tokens.
+  const searchCalls = evt.web_search_calls || 0;
+  const toolCost = reuse ? 0 : searchCalls * WEB_SEARCH_USD_PER_CALL;
+  const cost = (reuse ? 0 : costFor(model, input, output, cacheRead, cacheWrite)) + toolCost;
   const savedCost = reuse ? costFor(model, savedIn, savedOut) : 0;
 
   const f = session.by_feature[feature];
@@ -116,7 +125,7 @@ function recordAiEvent(evt = {}) {
       cache_read_tokens: reuse ? 0 : cacheRead,
       cache_write_tokens: reuse ? 0 : cacheWrite,
       reasoning_tokens: reuse ? 0 : (evt.reasoning_tokens || 0),
-      cost_usd: cost, currency: 'USD',
+      cost_usd: cost, currency: 'USD', web_search_calls: reuse ? 0 : searchCalls,
       tokens_saved_input: savedIn, tokens_saved_output: savedOut, cost_saved_usd: savedCost,
       company_id: evt.company_id || null, contact_id: evt.contact_id || null, thread_id: evt.thread_id || null,
       session_id: evt.session_id || null, user_id: evt.user_id || null,
@@ -183,5 +192,5 @@ module.exports = {
   recordAiEvent, recordClaudeUsage,
   recordApolloPeopleCall, recordApolloOrgCall,
   getUsage, resetUsage, costFor, setPersist, setPricingTable,
-  PRICING, FEATURES, REUSE_OUTCOMES,
+  PRICING, FEATURES, REUSE_OUTCOMES, WEB_SEARCH_USD_PER_CALL,
 };

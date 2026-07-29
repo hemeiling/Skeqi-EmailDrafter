@@ -1,0 +1,1202 @@
+[
+ {
+  "id": 2,
+  "name": "The Regents of the University of Michigan, a Constitutional Corp",
+  "created_at": "2026-07-12T17:44:14.950Z",
+  "updated_at": "2026-07-12T17:44:14.950Z"
+ },
+ {
+  "id": 3,
+  "name": "Tesla",
+  "created_at": "2026-07-12T17:44:15.184Z",
+  "updated_at": "2026-07-12T17:44:15.184Z"
+ },
+ {
+  "id": 4,
+  "name": "Auckland City Toyota",
+  "created_at": "2026-07-12T17:44:15.311Z",
+  "updated_at": "2026-07-12T17:44:15.311Z"
+ },
+ {
+  "id": 5,
+  "name": "Toyota Danmark A/S",
+  "created_at": "2026-07-12T17:44:15.431Z",
+  "updated_at": "2026-07-12T17:44:15.431Z"
+ },
+ {
+  "id": 6,
+  "name": "TechWish",
+  "created_at": "2026-07-12T17:44:15.552Z",
+  "updated_at": "2026-07-12T17:44:15.552Z"
+ },
+ {
+  "id": 7,
+  "name": "Toyota Kirloskar Motor",
+  "created_at": "2026-07-12T17:44:15.672Z",
+  "updated_at": "2026-07-12T17:44:15.672Z"
+ },
+ {
+  "id": 8,
+  "name": "Toyota Material Handling Australia",
+  "created_at": "2026-07-12T17:44:15.794Z",
+  "updated_at": "2026-07-12T17:44:15.794Z"
+ },
+ {
+  "id": 9,
+  "name": "CATL Debrecen",
+  "created_at": "2026-07-12T17:44:15.911Z",
+  "updated_at": "2026-07-12T17:44:15.911Z"
+ },
+ {
+  "id": 10,
+  "name": "Toyota Malaysia",
+  "created_at": "2026-07-12T17:44:16.031Z",
+  "updated_at": "2026-07-12T17:44:16.031Z"
+ },
+ {
+  "id": 11,
+  "name": "Atlas Toyota Material Handling",
+  "created_at": "2026-07-12T17:44:16.149Z",
+  "updated_at": "2026-07-12T17:44:16.149Z"
+ },
+ {
+  "id": 12,
+  "name": "Toyota Tsusho Praha",
+  "created_at": "2026-07-12T17:44:16.273Z",
+  "updated_at": "2026-07-12T17:44:16.273Z"
+ },
+ {
+  "id": 13,
+  "name": "Toyota Boshoku America",
+  "created_at": "2026-07-12T17:44:16.390Z",
+  "updated_at": "2026-07-12T17:44:16.390Z"
+ },
+ {
+  "id": 14,
+  "name": "Ardmore Toyota",
+  "created_at": "2026-07-12T17:44:16.508Z",
+  "updated_at": "2026-07-12T17:44:16.508Z"
+ },
+ {
+  "id": 15,
+  "name": "Toyota Motor Europe",
+  "created_at": "2026-07-12T17:44:16.638Z",
+  "updated_at": "2026-07-12T17:44:16.638Z"
+ },
+ {
+  "id": 16,
+  "name": "Toyota Insurance",
+  "created_at": "2026-07-12T17:44:16.756Z",
+  "updated_at": "2026-07-12T17:44:16.756Z"
+ },
+ {
+  "id": 17,
+  "name": "Southeast Toyota Finance",
+  "created_at": "2026-07-12T17:44:16.874Z",
+  "updated_at": "2026-07-12T17:44:16.874Z"
+ },
+ {
+  "id": 18,
+  "name": "Toyota Motor Corporation",
+  "created_at": "2026-07-12T17:44:16.993Z",
+  "updated_at": "2026-07-12T17:44:16.993Z"
+ },
+ {
+  "id": 19,
+  "name": "Toyota Deutschland",
+  "created_at": "2026-07-12T17:44:17.111Z",
+  "updated_at": "2026-07-12T17:44:17.111Z"
+ },
+ {
+  "id": 20,
+  "name": "Toyota France",
+  "created_at": "2026-07-12T17:44:17.228Z",
+  "updated_at": "2026-07-12T17:44:17.228Z"
+ },
+ {
+  "id": 21,
+  "name": "Toyota",
+  "created_at": "2026-07-12T17:44:17.347Z",
+  "updated_at": "2026-07-12T17:44:17.347Z"
+ },
+ {
+  "id": 22,
+  "name": "Toyota Credit Canada Inc.",
+  "created_at": "2026-07-12T17:44:17.465Z",
+  "updated_at": "2026-07-12T17:44:17.465Z"
+ },
+ {
+  "id": 23,
+  "name": "Toyota Canada Inc.",
+  "created_at": "2026-07-12T17:44:17.589Z",
+  "updated_at": "2026-07-12T17:44:17.589Z"
+ },
+ {
+  "id": 24,
+  "name": "Toyota Central Europe – Polska",
+  "created_at": "2026-07-12T17:44:17.713Z",
+  "updated_at": "2026-07-12T17:44:17.713Z"
+ },
+ {
+  "id": 25,
+  "name": "Kerry Toyota",
+  "created_at": "2026-07-12T17:44:17.835Z",
+  "updated_at": "2026-07-12T17:44:17.835Z"
+ },
+ {
+  "id": 26,
+  "name": "CATL",
+  "created_at": "2026-07-12T17:44:17.954Z",
+  "updated_at": "2026-07-12T17:44:17.954Z"
+ },
+ {
+  "id": 27,
+  "name": "Ford Trucks Deutschland",
+  "created_at": "2026-07-12T17:44:18.073Z",
+  "updated_at": "2026-07-12T17:44:18.073Z"
+ },
+ {
+  "id": 28,
+  "name": "Toyota Sørvest",
+  "created_at": "2026-07-12T17:44:18.190Z",
+  "updated_at": "2026-07-12T17:44:18.190Z"
+ },
+ {
+  "id": 29,
+  "name": "VM Care & Wellness Pvt Ltd",
+  "created_at": "2026-07-12T17:44:18.309Z",
+  "updated_at": "2026-07-12T17:44:18.309Z"
+ },
+ {
+  "id": 30,
+  "name": "Ford Energy",
+  "created_at": "2026-07-12T17:44:18.426Z",
+  "updated_at": "2026-07-12T17:44:18.426Z"
+ },
+ {
+  "id": 31,
+  "name": "CC Ford Healthcare",
+  "created_at": "2026-07-12T17:44:18.551Z",
+  "updated_at": "2026-07-12T17:44:18.551Z"
+ },
+ {
+  "id": 32,
+  "name": "Midway Ford",
+  "created_at": "2026-07-12T17:44:18.669Z",
+  "updated_at": "2026-07-12T17:44:18.669Z"
+ },
+ {
+  "id": 33,
+  "name": "BorgWarner",
+  "created_at": "2026-07-12T17:44:18.786Z",
+  "updated_at": "2026-07-12T17:44:18.786Z"
+ },
+ {
+  "id": 34,
+  "name": "TOM FORD BEAUTY",
+  "created_at": "2026-07-12T17:44:18.906Z",
+  "updated_at": "2026-07-12T17:44:18.906Z"
+ },
+ {
+  "id": 35,
+  "name": "Quartz Claims Pty Ltd",
+  "created_at": "2026-07-12T17:44:19.024Z",
+  "updated_at": "2026-07-12T17:44:19.024Z"
+ },
+ {
+  "id": 36,
+  "name": "SN Systems Ltd",
+  "created_at": "2026-07-12T17:44:19.141Z",
+  "updated_at": "2026-07-12T17:44:19.141Z"
+ },
+ {
+  "id": 37,
+  "name": "Midland Microfin Ltd",
+  "created_at": "2026-07-12T17:44:19.260Z",
+  "updated_at": "2026-07-12T17:44:19.260Z"
+ },
+ {
+  "id": 38,
+  "name": "Austin Engineering Ltd",
+  "created_at": "2026-07-12T17:44:19.382Z",
+  "updated_at": "2026-07-12T17:44:19.382Z"
+ },
+ {
+  "id": 39,
+  "name": "Ford Motor Company",
+  "created_at": "2026-07-12T17:44:19.506Z",
+  "updated_at": "2026-07-12T17:44:19.506Z"
+ },
+ {
+  "id": 40,
+  "name": "Apple Ford Lincoln",
+  "created_at": "2026-07-12T17:44:19.624Z",
+  "updated_at": "2026-07-12T17:44:19.624Z"
+ },
+ {
+  "id": 41,
+  "name": "Ford House",
+  "created_at": "2026-07-12T17:44:19.743Z",
+  "updated_at": "2026-07-12T17:44:19.743Z"
+ },
+ {
+  "id": 42,
+  "name": "Henry Ford Health",
+  "created_at": "2026-07-12T17:44:19.861Z",
+  "updated_at": "2026-07-12T17:44:19.861Z"
+ },
+ {
+  "id": 43,
+  "name": "Ford Credit",
+  "created_at": "2026-07-12T17:44:19.978Z",
+  "updated_at": "2026-07-12T17:44:19.978Z"
+ },
+ {
+  "id": 44,
+  "name": "Henry Ford Health System and Health Alliance Plan",
+  "created_at": "2026-07-12T17:44:20.098Z",
+  "updated_at": "2026-07-12T17:44:20.098Z"
+ },
+ {
+  "id": 45,
+  "name": "Ford Piquette Avenue Plant",
+  "created_at": "2026-07-12T17:44:20.216Z",
+  "updated_at": "2026-07-12T17:44:20.216Z"
+ },
+ {
+  "id": 46,
+  "name": "Ford China",
+  "created_at": "2026-07-12T17:44:20.333Z",
+  "updated_at": "2026-07-12T17:44:20.333Z"
+ },
+ {
+  "id": 47,
+  "name": "ford",
+  "created_at": "2026-07-12T17:44:20.452Z",
+  "updated_at": "2026-07-12T17:44:20.452Z"
+ },
+ {
+  "id": 48,
+  "name": "The Henry Ford",
+  "created_at": "2026-07-12T17:44:20.574Z",
+  "updated_at": "2026-07-12T17:44:20.574Z"
+ },
+ {
+  "id": 49,
+  "name": "HCS Ltd",
+  "created_at": "2026-07-12T17:44:20.699Z",
+  "updated_at": "2026-07-12T17:44:20.699Z"
+ },
+ {
+  "id": 50,
+  "name": "Rationale Ltd",
+  "created_at": "2026-07-12T17:44:20.823Z",
+  "updated_at": "2026-07-12T17:44:20.823Z"
+ },
+ {
+  "id": 51,
+  "name": "BeamMed LTD.",
+  "created_at": "2026-07-12T17:44:20.942Z",
+  "updated_at": "2026-07-12T17:44:20.942Z"
+ },
+ {
+  "id": 52,
+  "name": "KMJ Ltd",
+  "created_at": "2026-07-12T17:44:21.076Z",
+  "updated_at": "2026-07-12T17:44:21.076Z"
+ },
+ {
+  "id": 53,
+  "name": "LOTTE-Nestle Korea",
+  "created_at": "2026-07-12T17:44:21.195Z",
+  "updated_at": "2026-07-12T17:44:21.195Z"
+ },
+ {
+  "id": 54,
+  "name": "Chempolis Ltd.",
+  "created_at": "2026-07-12T17:44:21.324Z",
+  "updated_at": "2026-07-12T17:44:21.324Z"
+ },
+ {
+  "id": 55,
+  "name": "Nestlerode & Loy, Inc.",
+  "created_at": "2026-07-12T17:44:21.459Z",
+  "updated_at": "2026-07-12T17:44:21.459Z"
+ },
+ {
+  "id": 56,
+  "name": "3G Mobile (Pty)Ltd",
+  "created_at": "2026-07-12T17:44:21.576Z",
+  "updated_at": "2026-07-12T17:44:21.576Z"
+ },
+ {
+  "id": 57,
+  "name": "Nestlé",
+  "created_at": "2026-07-12T17:44:21.696Z",
+  "updated_at": "2026-07-12T17:44:21.696Z"
+ },
+ {
+  "id": 58,
+  "name": "Mike Geric Construction Ltd",
+  "created_at": "2026-07-12T17:44:21.818Z",
+  "updated_at": "2026-07-12T17:44:21.818Z"
+ },
+ {
+  "id": 59,
+  "name": "Osem Nestle אסם נסטלה",
+  "created_at": "2026-07-12T17:44:21.937Z",
+  "updated_at": "2026-07-12T17:44:21.937Z"
+ },
+ {
+  "id": 60,
+  "name": "Nestle India LTD (Dummy account)",
+  "created_at": "2026-07-12T17:44:22.060Z",
+  "updated_at": "2026-07-12T17:44:22.060Z"
+ },
+ {
+  "id": 61,
+  "name": "Cereal Partners Worldwide (Nestlé & General Mills)",
+  "created_at": "2026-07-12T17:44:22.179Z",
+  "updated_at": "2026-07-12T17:44:22.179Z"
+ },
+ {
+  "id": 62,
+  "name": "Nestlé Purina North America",
+  "created_at": "2026-07-12T17:44:22.303Z",
+  "updated_at": "2026-07-12T17:44:22.303Z"
+ },
+ {
+  "id": 63,
+  "name": "Nestle India",
+  "created_at": "2026-07-12T17:44:22.426Z",
+  "updated_at": "2026-07-12T17:44:22.426Z"
+ },
+ {
+  "id": 64,
+  "name": "Nestle",
+  "created_at": "2026-07-12T17:44:22.545Z",
+  "updated_at": "2026-07-12T17:44:22.545Z"
+ },
+ {
+  "id": 65,
+  "name": "Gals Bio Ltd",
+  "created_at": "2026-07-12T17:44:22.662Z",
+  "updated_at": "2026-07-12T17:44:22.662Z"
+ },
+ {
+  "id": 66,
+  "name": "SK On Hungary",
+  "created_at": "2026-07-12T17:44:22.791Z",
+  "updated_at": "2026-07-12T17:44:22.791Z"
+ },
+ {
+  "id": 67,
+  "name": "MindsView Technologies Ltd",
+  "created_at": "2026-07-12T17:44:22.918Z",
+  "updated_at": "2026-07-12T17:44:22.918Z"
+ },
+ {
+  "id": 68,
+  "name": "SK On",
+  "created_at": "2026-07-12T17:44:23.039Z",
+  "updated_at": "2026-07-12T17:44:23.039Z"
+ },
+ {
+  "id": 69,
+  "name": "Eberspaecher Vecture Inc.",
+  "created_at": "2026-07-12T17:44:23.157Z",
+  "updated_at": "2026-07-12T17:44:23.157Z"
+ },
+ {
+  "id": 70,
+  "name": "StorTronics",
+  "created_at": "2026-07-12T17:44:23.287Z",
+  "updated_at": "2026-07-12T17:44:23.287Z"
+ },
+ {
+  "id": 71,
+  "name": "Grepow, Inc.",
+  "created_at": "2026-07-12T17:44:23.411Z",
+  "updated_at": "2026-07-12T17:44:23.411Z"
+ },
+ {
+  "id": 72,
+  "name": "Quanta Computer Inc.",
+  "created_at": "2026-07-12T17:44:23.530Z",
+  "updated_at": "2026-07-12T17:44:23.530Z"
+ },
+ {
+  "id": 73,
+  "name": "Haidi Energy Technology Co., Ltd.",
+  "created_at": "2026-07-12T17:44:23.647Z",
+  "updated_at": "2026-07-12T17:44:23.647Z"
+ },
+ {
+  "id": 74,
+  "name": "Hirschmann Automotive GmbH",
+  "created_at": "2026-07-12T17:44:23.770Z",
+  "updated_at": "2026-07-12T17:44:23.770Z"
+ },
+ {
+  "id": 75,
+  "name": "JJE (Jing-Jin Electric)",
+  "created_at": "2026-07-12T17:44:23.889Z",
+  "updated_at": "2026-07-12T17:44:23.889Z"
+ },
+ {
+  "id": 76,
+  "name": "Elite Battery Systems Ltd.",
+  "created_at": "2026-07-12T17:44:24.010Z",
+  "updated_at": "2026-07-12T17:44:24.010Z"
+ },
+ {
+  "id": 77,
+  "name": "JEE Technology Co., Ltd.",
+  "created_at": "2026-07-12T17:44:24.125Z",
+  "updated_at": "2026-07-12T17:44:24.125Z"
+ },
+ {
+  "id": 78,
+  "name": "Kewell Technology Co., Ltd.",
+  "created_at": "2026-07-12T17:44:24.242Z",
+  "updated_at": "2026-07-12T17:44:24.242Z"
+ },
+ {
+  "id": 79,
+  "name": "FastLion Energy Inc.",
+  "created_at": "2026-07-12T17:44:24.362Z",
+  "updated_at": "2026-07-12T17:44:24.362Z"
+ },
+ {
+  "id": 80,
+  "name": "Ionworks Technologies Inc",
+  "created_at": "2026-07-12T17:44:24.480Z",
+  "updated_at": "2026-07-12T17:44:24.480Z"
+ },
+ {
+  "id": 81,
+  "name": "Lear Corporation",
+  "created_at": "2026-07-12T17:44:24.600Z",
+  "updated_at": "2026-07-12T17:44:24.600Z"
+ },
+ {
+  "id": 82,
+  "name": "Lithium Power, Inc",
+  "created_at": "2026-07-12T17:44:24.721Z",
+  "updated_at": "2026-07-12T17:44:24.721Z"
+ },
+ {
+  "id": 83,
+  "name": "Bright Blue Sea Canada Innovation Co. LTD.",
+  "created_at": "2026-07-12T17:44:24.845Z",
+  "updated_at": "2026-07-12T17:44:24.845Z"
+ },
+ {
+  "id": 84,
+  "name": "Green Cubes Technology",
+  "created_at": "2026-07-12T17:44:24.966Z",
+  "updated_at": "2026-07-12T17:44:24.966Z"
+ },
+ {
+  "id": 85,
+  "name": "American Battery Solutions, Inc.",
+  "created_at": "2026-07-12T17:44:25.091Z",
+  "updated_at": "2026-07-12T17:44:25.091Z"
+ },
+ {
+  "id": 86,
+  "name": "American Leili Motors",
+  "created_at": "2026-07-12T17:44:25.211Z",
+  "updated_at": "2026-07-12T17:44:25.211Z"
+ },
+ {
+  "id": 87,
+  "name": "Rnbc New Energy Co., Ltd.",
+  "created_at": "2026-07-12T17:44:25.331Z",
+  "updated_at": "2026-07-12T17:44:25.331Z"
+ },
+ {
+  "id": 88,
+  "name": "Amandarry Sodium Power LLC.",
+  "created_at": "2026-07-12T17:44:25.453Z",
+  "updated_at": "2026-07-12T17:44:25.453Z"
+ },
+ {
+  "id": 89,
+  "name": "Energy Tech Solution Co., Ltd.",
+  "created_at": "2026-07-12T17:44:25.577Z",
+  "updated_at": "2026-07-12T17:44:25.577Z"
+ },
+ {
+  "id": 90,
+  "name": "Noah Energy Solutions",
+  "created_at": "2026-07-12T17:44:25.694Z",
+  "updated_at": "2026-07-12T17:44:25.694Z"
+ },
+ {
+  "id": 91,
+  "name": "Shanghai PYTES Energy Co., Ltd.",
+  "created_at": "2026-07-12T17:44:25.811Z",
+  "updated_at": "2026-07-12T17:44:25.811Z"
+ },
+ {
+  "id": 92,
+  "name": "OPmobility",
+  "created_at": "2026-07-12T17:44:25.936Z",
+  "updated_at": "2026-07-12T17:44:25.936Z"
+ },
+ {
+  "id": 93,
+  "name": "SEG Automotive North America LLC",
+  "created_at": "2026-07-12T17:44:26.064Z",
+  "updated_at": "2026-07-12T17:44:26.064Z"
+ },
+ {
+  "id": 94,
+  "name": "Shenzhen BAK Power Battery Co., Ltd.",
+  "created_at": "2026-07-12T17:44:26.184Z",
+  "updated_at": "2026-07-12T17:44:26.184Z"
+ },
+ {
+  "id": 95,
+  "name": "EVVA Technology Co., Limited",
+  "created_at": "2026-07-12T17:44:26.304Z",
+  "updated_at": "2026-07-12T17:44:26.304Z"
+ },
+ {
+  "id": 96,
+  "name": "BST Power (Shenzhen) Limited",
+  "created_at": "2026-07-12T17:44:26.430Z",
+  "updated_at": "2026-07-12T17:44:26.430Z"
+ },
+ {
+  "id": 97,
+  "name": "Sogefi Air & Cooling USA, Inc.",
+  "created_at": "2026-07-12T17:44:26.549Z",
+  "updated_at": "2026-07-12T17:44:26.549Z"
+ },
+ {
+  "id": 98,
+  "name": "Soteria Battery Innovation Group",
+  "created_at": "2026-07-12T17:44:26.670Z",
+  "updated_at": "2026-07-12T17:44:26.670Z"
+ },
+ {
+  "id": 99,
+  "name": "Titan Advanced Energy Solutions",
+  "created_at": "2026-07-12T17:44:26.791Z",
+  "updated_at": "2026-07-12T17:44:26.791Z"
+ },
+ {
+  "id": 100,
+  "name": "Beijing WeLion New Energy Technology Co., Ltd.",
+  "created_at": "2026-07-12T17:44:26.909Z",
+  "updated_at": "2026-07-12T17:44:26.909Z"
+ },
+ {
+  "id": 101,
+  "name": "Shenzhen Futureway Technology Co., Ltd.",
+  "created_at": "2026-07-12T17:44:27.026Z",
+  "updated_at": "2026-07-12T17:44:27.026Z"
+ },
+ {
+  "id": 102,
+  "name": "Vtoman Technology LLC",
+  "created_at": "2026-07-12T17:44:27.146Z",
+  "updated_at": "2026-07-12T17:44:27.146Z"
+ },
+ {
+  "id": 103,
+  "name": "Systematic Power Solutions",
+  "created_at": "2026-07-12T17:44:27.263Z",
+  "updated_at": "2026-07-12T17:44:27.263Z"
+ },
+ {
+  "id": 104,
+  "name": "Neogen Ionics Ltd.",
+  "created_at": "2026-07-12T17:44:27.381Z",
+  "updated_at": "2026-07-12T17:44:27.381Z"
+ },
+ {
+  "id": 105,
+  "name": "Eaton",
+  "created_at": "2026-07-12T17:44:27.501Z",
+  "updated_at": "2026-07-12T17:44:27.501Z"
+ },
+ {
+  "id": 106,
+  "name": "Powerland Technology/Greenwatt Power",
+  "created_at": "2026-07-12T17:44:27.632Z",
+  "updated_at": "2026-07-12T17:44:27.632Z"
+ },
+ {
+  "id": 107,
+  "name": "Zeta Energy Corporation",
+  "created_at": "2026-07-12T17:44:27.758Z",
+  "updated_at": "2026-07-12T17:44:27.758Z"
+ },
+ {
+  "id": 108,
+  "name": "A123 Systems GmbH",
+  "created_at": "2026-07-12T17:44:27.877Z",
+  "updated_at": "2026-07-12T17:44:27.877Z"
+ },
+ {
+  "id": 109,
+  "name": "Airtho",
+  "created_at": "2026-07-12T17:44:27.997Z",
+  "updated_at": "2026-07-12T17:44:27.997Z"
+ },
+ {
+  "id": 110,
+  "name": "Amepower",
+  "created_at": "2026-07-12T17:44:28.120Z",
+  "updated_at": "2026-07-12T17:44:28.120Z"
+ },
+ {
+  "id": 111,
+  "name": "AMPHERR AG",
+  "created_at": "2026-07-12T17:44:28.243Z",
+  "updated_at": "2026-07-12T17:44:28.243Z"
+ },
+ {
+  "id": 112,
+  "name": "Apex Mobile Power",
+  "created_at": "2026-07-12T17:44:28.361Z",
+  "updated_at": "2026-07-12T17:44:28.361Z"
+ },
+ {
+  "id": 113,
+  "name": "BattGenie Inc.",
+  "created_at": "2026-07-12T17:44:28.478Z",
+  "updated_at": "2026-07-12T17:44:28.478Z"
+ },
+ {
+  "id": 114,
+  "name": "Betterial Co., Ltd.",
+  "created_at": "2026-07-12T17:44:28.597Z",
+  "updated_at": "2026-07-12T17:44:28.597Z"
+ },
+ {
+  "id": 115,
+  "name": "C-BATT Materials",
+  "created_at": "2026-07-12T17:44:28.737Z",
+  "updated_at": "2026-07-12T17:44:28.737Z"
+ },
+ {
+  "id": 116,
+  "name": "Cellerate Limited",
+  "created_at": "2026-07-12T17:44:28.854Z",
+  "updated_at": "2026-07-12T17:44:28.854Z"
+ },
+ {
+  "id": 117,
+  "name": "CeLLife Technologies Oy",
+  "created_at": "2026-07-12T17:44:28.974Z",
+  "updated_at": "2026-07-12T17:44:28.974Z"
+ },
+ {
+  "id": 118,
+  "name": "EECOMOBILITY",
+  "created_at": "2026-07-12T17:44:29.092Z",
+  "updated_at": "2026-07-12T17:44:29.092Z"
+ },
+ {
+  "id": 119,
+  "name": "EGI Battery Inc.",
+  "created_at": "2026-07-12T17:44:29.216Z",
+  "updated_at": "2026-07-12T17:44:29.216Z"
+ },
+ {
+  "id": 120,
+  "name": "Fedco Batteries",
+  "created_at": "2026-07-12T17:44:29.340Z",
+  "updated_at": "2026-07-12T17:44:29.340Z"
+ },
+ {
+  "id": 121,
+  "name": "FireKim Energy Solution Co., Ltd.",
+  "created_at": "2026-07-12T17:44:29.462Z",
+  "updated_at": "2026-07-12T17:44:29.462Z"
+ },
+ {
+  "id": 122,
+  "name": "FSIP Electronics",
+  "created_at": "2026-07-12T17:44:29.582Z",
+  "updated_at": "2026-07-12T17:44:29.582Z"
+ },
+ {
+  "id": 123,
+  "name": "Gridless",
+  "created_at": "2026-07-12T17:44:29.699Z",
+  "updated_at": "2026-07-12T17:44:29.699Z"
+ },
+ {
+  "id": 124,
+  "name": "Inventus Power",
+  "created_at": "2026-07-12T17:44:29.817Z",
+  "updated_at": "2026-07-12T17:44:29.817Z"
+ },
+ {
+  "id": 125,
+  "name": "Lithos Energy, Inc",
+  "created_at": "2026-07-12T17:44:29.951Z",
+  "updated_at": "2026-07-12T17:44:29.951Z"
+ },
+ {
+  "id": 126,
+  "name": "Lyten, Inc.",
+  "created_at": "2026-07-12T17:44:30.071Z",
+  "updated_at": "2026-07-12T17:44:30.071Z"
+ },
+ {
+  "id": 127,
+  "name": "MaxPower",
+  "created_at": "2026-07-12T17:44:30.189Z",
+  "updated_at": "2026-07-12T17:44:30.189Z"
+ },
+ {
+  "id": 128,
+  "name": "Modal Motors, Inc",
+  "created_at": "2026-07-12T17:44:30.306Z",
+  "updated_at": "2026-07-12T17:44:30.306Z"
+ },
+ {
+  "id": 129,
+  "name": "Novonix Battery Technology Solutions Inc.",
+  "created_at": "2026-07-12T17:44:30.430Z",
+  "updated_at": "2026-07-12T17:44:30.430Z"
+ },
+ {
+  "id": 130,
+  "name": "One Mobility",
+  "created_at": "2026-07-12T17:44:30.548Z",
+  "updated_at": "2026-07-12T17:44:30.548Z"
+ },
+ {
+  "id": 131,
+  "name": "PHD Energy Group Corp.",
+  "created_at": "2026-07-12T17:44:30.667Z",
+  "updated_at": "2026-07-12T17:44:30.667Z"
+ },
+ {
+  "id": 132,
+  "name": "Prodrive Technologies",
+  "created_at": "2026-07-12T17:44:30.785Z",
+  "updated_at": "2026-07-12T17:44:30.785Z"
+ },
+ {
+  "id": 133,
+  "name": "Promark Electronics Inc.",
+  "created_at": "2026-07-12T17:44:30.905Z",
+  "updated_at": "2026-07-12T17:44:30.905Z"
+ },
+ {
+  "id": 134,
+  "name": "Reliance Lithium Werks",
+  "created_at": "2026-07-12T17:44:31.026Z",
+  "updated_at": "2026-07-12T17:44:31.026Z"
+ },
+ {
+  "id": 135,
+  "name": "REON Technology, Inc.",
+  "created_at": "2026-07-12T17:44:31.144Z",
+  "updated_at": "2026-07-12T17:44:31.144Z"
+ },
+ {
+  "id": 136,
+  "name": "Rincon Power, LLC",
+  "created_at": "2026-07-12T17:44:31.264Z",
+  "updated_at": "2026-07-12T17:44:31.264Z"
+ },
+ {
+  "id": 137,
+  "name": "Senior Flexonics Corp.",
+  "created_at": "2026-07-12T17:44:31.381Z",
+  "updated_at": "2026-07-12T17:44:31.381Z"
+ },
+ {
+  "id": 138,
+  "name": "SF Motors, Inc. DBA SERES",
+  "created_at": "2026-07-12T17:44:31.505Z",
+  "updated_at": "2026-07-12T17:44:31.505Z"
+ },
+ {
+  "id": 139,
+  "name": "SPE Battery",
+  "created_at": "2026-07-12T17:44:31.622Z",
+  "updated_at": "2026-07-12T17:44:31.622Z"
+ },
+ {
+  "id": 140,
+  "name": "Kunshan ST Electronics Co., Ltd.",
+  "created_at": "2026-07-12T17:44:31.740Z",
+  "updated_at": "2026-07-12T17:44:31.740Z"
+ },
+ {
+  "id": 141,
+  "name": "Sunbird North America, Inc.",
+  "created_at": "2026-07-12T17:44:31.860Z",
+  "updated_at": "2026-07-12T17:44:31.860Z"
+ },
+ {
+  "id": 142,
+  "name": "TL Power",
+  "created_at": "2026-07-12T17:44:31.980Z",
+  "updated_at": "2026-07-12T17:44:31.980Z"
+ },
+ {
+  "id": 143,
+  "name": "Torus, Inc.",
+  "created_at": "2026-07-12T17:44:32.127Z",
+  "updated_at": "2026-07-12T17:44:32.127Z"
+ },
+ {
+  "id": 144,
+  "name": "Turntide Technologies Inc.",
+  "created_at": "2026-07-12T17:44:32.276Z",
+  "updated_at": "2026-07-12T17:44:32.276Z"
+ },
+ {
+  "id": 145,
+  "name": "UniverCell Holding GmbH",
+  "created_at": "2026-07-12T17:44:32.410Z",
+  "updated_at": "2026-07-12T17:44:32.410Z"
+ },
+ {
+  "id": 146,
+  "name": "Variant Energy",
+  "created_at": "2026-07-12T17:44:32.540Z",
+  "updated_at": "2026-07-12T17:44:32.540Z"
+ },
+ {
+  "id": 147,
+  "name": "Vikinor LLC",
+  "created_at": "2026-07-12T17:44:32.658Z",
+  "updated_at": "2026-07-12T17:44:32.658Z"
+ },
+ {
+  "id": 148,
+  "name": "VOLTFACTORY GmbH",
+  "created_at": "2026-07-12T17:44:32.782Z",
+  "updated_at": "2026-07-12T17:44:32.782Z"
+ },
+ {
+  "id": 149,
+  "name": "Voltra Energy Inc.",
+  "created_at": "2026-07-12T17:44:32.899Z",
+  "updated_at": "2026-07-12T17:44:32.899Z"
+ },
+ {
+  "id": 150,
+  "name": "Astotec Automotive",
+  "created_at": "2026-07-12T17:44:33.023Z",
+  "updated_at": "2026-07-12T17:44:33.023Z"
+ },
+ {
+  "id": 151,
+  "name": "ElringKlinger AG",
+  "created_at": "2026-07-12T17:44:33.141Z",
+  "updated_at": "2026-07-12T17:44:33.141Z"
+ },
+ {
+  "id": 152,
+  "name": "ZF Friedrichshafen AG",
+  "created_at": "2026-07-12T17:44:33.260Z",
+  "updated_at": "2026-07-12T17:44:33.260Z"
+ },
+ {
+  "id": 153,
+  "name": "Kautex Textron GmbH & Co. KG",
+  "created_at": "2026-07-12T17:44:33.378Z",
+  "updated_at": "2026-07-12T17:44:33.378Z"
+ },
+ {
+  "id": 154,
+  "name": "Kautex Textron GmbH & Co K.G.",
+  "created_at": "2026-07-12T17:44:33.495Z",
+  "updated_at": "2026-07-12T17:44:33.495Z"
+ },
+ {
+  "id": 155,
+  "name": "Beijing WeLion New Energy Technology Co.",
+  "created_at": "2026-07-12T17:44:33.615Z",
+  "updated_at": "2026-07-12T17:44:33.615Z"
+ },
+ {
+  "id": 156,
+  "name": "Ltd.",
+  "created_at": "2026-07-12T17:44:33.744Z",
+  "updated_at": "2026-07-12T17:44:33.744Z"
+ },
+ {
+  "id": 157,
+  "name": "Cynopia LTD",
+  "created_at": "2026-07-12T17:44:33.879Z",
+  "updated_at": "2026-07-12T17:44:33.879Z"
+ },
+ {
+  "id": 158,
+  "name": "Anitua Ltd",
+  "created_at": "2026-07-12T17:44:34.003Z",
+  "updated_at": "2026-07-12T17:44:34.003Z"
+ },
+ {
+  "id": 159,
+  "name": "Rhomu Ltd.",
+  "created_at": "2026-07-12T17:44:34.120Z",
+  "updated_at": "2026-07-12T17:44:34.120Z"
+ },
+ {
+  "id": 160,
+  "name": "Christian360 Ltd",
+  "created_at": "2026-07-12T17:44:34.240Z",
+  "updated_at": "2026-07-12T17:44:34.240Z"
+ },
+ {
+  "id": 161,
+  "name": "NeoPhore Ltd",
+  "created_at": "2026-07-12T17:44:34.362Z",
+  "updated_at": "2026-07-12T17:44:34.362Z"
+ },
+ {
+  "id": 162,
+  "name": "BSM Global Pty Ltd",
+  "created_at": "2026-07-12T17:44:34.480Z",
+  "updated_at": "2026-07-12T17:44:34.480Z"
+ },
+ {
+  "id": 163,
+  "name": "Bajajsons Ltd",
+  "created_at": "2026-07-12T17:44:34.599Z",
+  "updated_at": "2026-07-12T17:44:34.599Z"
+ },
+ {
+  "id": 164,
+  "name": "DR Utilight Ltd",
+  "created_at": "2026-07-12T17:44:34.719Z",
+  "updated_at": "2026-07-12T17:44:34.719Z"
+ },
+ {
+  "id": 165,
+  "name": "Justice Technology, Ltd",
+  "created_at": "2026-07-12T17:44:34.841Z",
+  "updated_at": "2026-07-12T17:44:34.841Z"
+ },
+ {
+  "id": 166,
+  "name": "Bouchey Financial Group, Ltd.",
+  "created_at": "2026-07-12T17:44:34.958Z",
+  "updated_at": "2026-07-12T17:44:34.958Z"
+ },
+ {
+  "id": 167,
+  "name": "Counselors Associates Ltd.",
+  "created_at": "2026-07-12T17:44:35.082Z",
+  "updated_at": "2026-07-12T17:44:35.082Z"
+ },
+ {
+  "id": 168,
+  "name": "EVE ENERGY Co. Ltd",
+  "created_at": "2026-07-12T17:44:35.202Z",
+  "updated_at": "2026-07-12T17:44:35.202Z"
+ },
+ {
+  "id": 169,
+  "name": "EVE Energy Co.,Ltd.",
+  "created_at": "2026-07-12T17:44:35.324Z",
+  "updated_at": "2026-07-12T17:44:35.324Z"
+ },
+ {
+  "id": 170,
+  "name": "SF Motors",
+  "created_at": "2026-07-12T17:44:35.442Z",
+  "updated_at": "2026-07-12T17:44:35.442Z"
+ },
+ {
+  "id": 171,
+  "name": "Inc. DBA SERES",
+  "created_at": "2026-07-12T17:44:35.561Z",
+  "updated_at": "2026-07-12T17:44:35.561Z"
+ },
+ {
+  "id": 202,
+  "name": "Panasonic Energy",
+  "created_at": "2026-07-12T18:16:51.933Z",
+  "updated_at": "2026-07-12T18:16:51.933Z"
+ },
+ {
+  "id": 220,
+  "name": "ZZTEST_Ford_1783887286087_htfl2d",
+  "created_at": "2026-07-12T20:14:50.644Z",
+  "updated_at": "2026-07-12T20:14:50.644Z"
+ },
+ {
+  "id": 221,
+  "name": "ZZTEST_EVE_1783887286087_htfl2d Energy Co.,Ltd.",
+  "created_at": "2026-07-12T20:14:50.913Z",
+  "updated_at": "2026-07-12T20:14:50.913Z"
+ },
+ {
+  "id": 222,
+  "name": "ZZTEST_Ford2_1783887286087_htfl2d",
+  "created_at": "2026-07-12T20:14:51.221Z",
+  "updated_at": "2026-07-12T20:14:51.221Z"
+ },
+ {
+  "id": 223,
+  "name": "ZZTEST_FordMulti_1783887286087_htfl2d",
+  "created_at": "2026-07-12T20:14:51.766Z",
+  "updated_at": "2026-07-12T20:14:51.766Z"
+ },
+ {
+  "id": 224,
+  "name": "ZZTEST_TeslaMulti_1783887286087_htfl2d",
+  "created_at": "2026-07-12T20:14:51.850Z",
+  "updated_at": "2026-07-12T20:14:51.850Z"
+ },
+ {
+  "id": 225,
+  "name": "ZZTEST_OtherMulti_1783887286087_htfl2d",
+  "created_at": "2026-07-12T20:14:51.935Z",
+  "updated_at": "2026-07-12T20:14:51.935Z"
+ },
+ {
+  "id": 226,
+  "name": "ZZTEST_Atlas_1783887286087_htfl2d Corp",
+  "created_at": "2026-07-12T20:14:53.045Z",
+  "updated_at": "2026-07-12T20:14:53.045Z"
+ },
+ {
+  "id": 227,
+  "name": "ZZTEST_Atlas_1783887286087_htfl2d Financial Ltd",
+  "created_at": "2026-07-12T20:14:53.218Z",
+  "updated_at": "2026-07-12T20:14:53.218Z"
+ },
+ {
+  "id": 237,
+  "name": "sk on battery",
+  "created_at": "2026-07-12T20:21:50.026Z",
+  "updated_at": "2026-07-12T20:21:50.026Z"
+ },
+ {
+  "id": 285,
+  "name": "xpeng",
+  "created_at": "2026-07-12T21:19:19.626Z",
+  "updated_at": "2026-07-12T21:19:19.626Z"
+ },
+ {
+  "id": 332,
+  "name": "Siemens",
+  "created_at": "2026-07-13T01:20:36.016Z",
+  "updated_at": "2026-07-13T01:20:36.016Z"
+ },
+ {
+  "id": 366,
+  "name": "huawei",
+  "created_at": "2026-07-13T03:07:18.367Z",
+  "updated_at": "2026-07-13T03:07:18.367Z"
+ },
+ {
+  "id": 378,
+  "name": "Gotion",
+  "created_at": "2026-07-14T02:55:23.667Z",
+  "updated_at": "2026-07-14T02:55:23.667Z"
+ },
+ {
+  "id": 379,
+  "name": "PowerCo",
+  "created_at": "2026-07-14T08:17:48.138Z",
+  "updated_at": "2026-07-14T08:17:48.138Z"
+ },
+ {
+  "id": 380,
+  "name": "RRc",
+  "created_at": "2026-07-14T09:29:51.128Z",
+  "updated_at": "2026-07-14T09:29:51.128Z"
+ },
+ {
+  "id": 381,
+  "name": "GM",
+  "created_at": "2026-07-14T17:04:46.357Z",
+  "updated_at": "2026-07-14T17:04:46.357Z"
+ },
+ {
+  "id": 382,
+  "name": "SK On Tennessee",
+  "created_at": "2026-07-15T07:46:09.157Z",
+  "updated_at": "2026-07-15T07:46:09.157Z"
+ },
+ {
+  "id": 383,
+  "name": "GoodWe",
+  "created_at": "2026-07-15T08:03:27.402Z",
+  "updated_at": "2026-07-15T08:03:27.402Z"
+ },
+ {
+  "id": 384,
+  "name": "SK Tennessee",
+  "created_at": "2026-07-15T08:18:36.781Z",
+  "updated_at": "2026-07-15T08:18:36.781Z"
+ },
+ {
+  "id": 385,
+  "name": "Tennessee",
+  "created_at": "2026-07-15T08:18:42.291Z",
+  "updated_at": "2026-07-15T08:18:42.291Z"
+ },
+ {
+  "id": 386,
+  "name": "HiTHIUM",
+  "created_at": "2026-07-16T05:51:59.122Z",
+  "updated_at": "2026-07-16T05:51:59.122Z"
+ },
+ {
+  "id": 387,
+  "name": "NextStar Energy",
+  "created_at": "2026-07-18T03:17:51.902Z",
+  "updated_at": "2026-07-18T03:17:51.902Z"
+ },
+ {
+  "id": 399,
+  "name": "ZZTEST_GuardDemo_37427",
+  "created_at": "2026-07-21T00:39:53.774Z",
+  "updated_at": "2026-07-21T00:39:53.774Z"
+ },
+ {
+  "id": 400,
+  "name": "RRC Power Solution",
+  "created_at": "2026-07-21T02:50:19.978Z",
+  "updated_at": "2026-07-21T02:50:19.978Z"
+ },
+ {
+  "id": 401,
+  "name": "eve",
+  "created_at": "2026-07-21T04:06:00.169Z",
+  "updated_at": "2026-07-21T04:06:00.169Z"
+ },
+ {
+  "id": 402,
+  "name": "Fubco industrial group",
+  "created_at": "2026-07-21T07:24:32.984Z",
+  "updated_at": "2026-07-21T07:24:32.984Z"
+ },
+ {
+  "id": 403,
+  "name": "Forsee Power",
+  "created_at": "2026-07-21T08:36:28.257Z",
+  "updated_at": "2026-07-21T08:36:28.257Z"
+ },
+ {
+  "id": 404,
+  "name": "Lyten",
+  "created_at": "2026-07-22T07:40:43.479Z",
+  "updated_at": "2026-07-22T07:40:43.479Z"
+ },
+ {
+  "id": 405,
+  "name": "Advantelec",
+  "created_at": "2026-07-27T07:34:45.984Z",
+  "updated_at": "2026-07-27T07:34:45.984Z"
+ }
+]

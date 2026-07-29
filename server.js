@@ -53,6 +53,7 @@ const { parseCompanyFile } = require('./companyImport');
 const { normalizeFileToImages } = require('./cardBatch');
 const { getUsage, resetUsage, recordAiEvent, setPersist, setPricingTable } = require('./usage');
 const emailSvc = require('./email');
+const accountResearch = require('./accountResearch');
 const providers = require('./providers');
 const {
   recordAiUsage, aiUsageTotals, aiUsageByFeature, aiUsageByCompany, estimateAiSaved,
@@ -170,6 +171,18 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ── Account Intelligence Report generator (its own tab in the SPA) ──────────
+// Mounted under /account-research so its API surface can never collide with
+// this app's own /api/* routes. It inherits the Basic Auth gate above.
+app.use('/account-research', accountResearch.createRouter(require('./db')));
+// Export libraries served locally — the ported UI must not depend on a CDN.
+for (const [route, pkg] of [
+  ['pptxgenjs', 'pptxgenjs/dist'], ['docx', 'docx/dist'],
+  ['jspdf', 'jspdf/dist'], ['html2canvas', 'html2canvas/dist'],
+]) {
+  app.use(`/account-research/vendor/${route}`, express.static(path.join(__dirname, 'node_modules', pkg)));
+}
 
 app.get('/healthz', (_req, res) => {
   res.status(200).json({ ok: true, status: 'healthy' });
@@ -402,21 +415,24 @@ app.post('/api/contacts', async (req, res) => {
 // GET /api/contacts
 app.get('/api/contacts', async (req, res) => {
   try {
-    const { q, event, company, industry, follow_up_status, tags, assigned_salesperson, accounts, contact_ids, department_categories, seniority_levels, sortBy } = req.query;
+    const { q, event, company, industry, follow_up_status, tags, assigned_salesperson, accounts, contact_ids, department_categories, seniority_levels, sortBy, show_event, booth_categories } = req.query;
     // Multi-select filters travel as comma-separated strings (?accounts=Ford,Tesla,CATL).
     const accountList = accounts ? String(accounts).split(',').map((s) => s.trim()).filter(Boolean) : [];
     const contactIdList = contact_ids ? String(contact_ids).split(',').map(Number).filter((n) => Number.isInteger(n)) : [];
     const departmentList = department_categories ? String(department_categories).split(',').map((s) => s.trim()).filter(Boolean) : [];
     const seniorityList = seniority_levels ? String(seniority_levels).split(',').map((s) => s.trim()).filter(Boolean) : [];
+    const boothCatList = booth_categories ? String(booth_categories).split(',').map((s) => s.trim()).filter(Boolean) : [];
     const hasStructuredFilter = event || company || industry || follow_up_status || tags || assigned_salesperson
-      || accountList.length || contactIdList.length || departmentList.length || seniorityList.length;
+      || accountList.length || contactIdList.length || departmentList.length || seniorityList.length
+      || show_event || boothCatList.length;
 
     let contacts;
     if (hasStructuredFilter) {
       contacts = await filterContacts({
         event, company, industry, follow_up_status, tags, assigned_salesperson,
         accounts: accountList, contact_ids: contactIdList,
-        department_categories: departmentList, seniority_levels: seniorityList, sortBy
+        department_categories: departmentList, seniority_levels: seniorityList, sortBy,
+        show_event, booth_categories: boothCatList
       });
     } else if (q) {
       contacts = await searchContacts(q);
@@ -2181,6 +2197,7 @@ app.post('/api/companies/:id/research', async (req, res) => {
       feature: 'company_research', sub_feature: onlyCategories ? 'missing_categories' : 'full',
       outcome, model: u.model, company_id: companyId,
       input_tokens: u.input_tokens || 0, output_tokens: u.output_tokens || 0,
+      web_search_calls: u.web_search_calls || 0,
       response_ms: _rms, status: 'success', user_id: reqUser(req),
       session_id: SERVER_SESSION_ID, request_id: crypto.randomUUID(),
     });
@@ -2790,7 +2807,8 @@ app.get('/api/ai-usage', async (req, res) => {
 // Paginated request-level audit log (metadata only — no prompts/email content).
 app.get('/api/ai-usage/events', async (req, res) => {
   try {
-    const filter = buildPeriodFilter(req.query.period || 'all', req.query.from, req.query.to);
+    // alias 'e' — aiUsageEvents joins companies, which also has created_at.
+    const filter = buildPeriodFilter(req.query.period || 'all', req.query.from, req.query.to, 'e');
     const out = await aiUsageEvents(filter, {
       feature: req.query.feature || null,
       status: req.query.status || null,
@@ -2806,7 +2824,8 @@ app.get('/api/ai-usage/events', async (req, res) => {
 // CSV export of the audit log (respects the same filters).
 app.get('/api/ai-usage/export.csv', async (req, res) => {
   try {
-    const filter = buildPeriodFilter(req.query.period || 'all', req.query.from, req.query.to);
+    // alias 'e' — aiUsageEvents joins companies, which also has created_at.
+    const filter = buildPeriodFilter(req.query.period || 'all', req.query.from, req.query.to, 'e');
     const out = await aiUsageEvents(filter, {
       feature: req.query.feature || null, status: req.query.status || null, limit: 200, offset: 0,
     });

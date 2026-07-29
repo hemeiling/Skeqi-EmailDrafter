@@ -17,14 +17,18 @@
   "dependencies": {
     "@napi-rs/canvas": "^1.0.2",
     "csv-parse": "^7.0.1",
+    "docx": "^9.7.1",
     "dotenv": "^17.4.2",
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "heic-convert": "^2.1.0",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^4.2.1",
     "multer": "^2.2.0",
     "nodemailer": "^9.0.3",
     "pdfjs-dist": "^6.1.200",
     "pg": "^8.22.0",
+    "pptxgenjs": "^4.0.1",
     "tesseract.js": "^7.0.0"
   }
 }

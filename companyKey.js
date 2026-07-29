@@ -50,11 +50,24 @@ const NON_COMPANY_VALUES = new Set([
   'information technology', 'finance', 'executive leadership', 'maintenance',
   'ehs', 'plant management', 'human resources', 'hr',
   // generic placeholders
-  'n/a', 'na', 'unknown', 'none', 'tbd', 'test', '-', '--', 'n\\a'
+  'n/a', 'na', 'unknown', 'none', 'tbd', 'test', '-', '--', 'n\\a',
+  // Bare legal-entity suffixes. These show up when a name containing a comma
+  // ("AGC Chemicals Americas, Inc.") is fed to something that treats commas as
+  // a multi-company separator -- the tail becomes its own "company". Blocking
+  // them here stops the junk row no matter which ingestion path is at fault.
+  'inc', 'llc', 'ltd', 'co', 'corp', 'corporation', 'incorporated', 'limited',
+  'gmbh', 'ag', 'sa', 's a', 'bv', 'b v', 'nv', 'n v', 'srl', 'spa', 's p a',
+  'plc', 'kg', 'kgaa', 'oy', 'ab', 'as', 'aps', 'pte', 'pte ltd', 'pty', 'pty ltd',
+  'llp', 'lp', 'pc', 'pllc', 'sas', 'sarl', 'sl', 'oyj', 'a s', 'd o o', 'sdn bhd'
 ]);
 
 function isInvalidCompanyName(name) {
-  const key = String(name || '').trim().toLowerCase().replace(/[.]+$/, '');
+  // Normalise punctuation too, so "S.A.", "Pte. Ltd." and "B.V." collapse onto
+  // the bare forms listed above rather than slipping through as real names.
+  const key = String(name || '').trim().toLowerCase()
+    .replace(/[.,]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   return !key || NON_COMPANY_VALUES.has(key);
 }
 

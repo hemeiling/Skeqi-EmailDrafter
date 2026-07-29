@@ -158,7 +158,9 @@ async function researchCompanyTags(company, taxonomy, opts = {}) {
   const prompt = buildResearchPrompt(company, taxonomy, onlyCategories);
   const messages = [{ role: 'user', content: prompt }];
   const sources = [];
-  const usageAcc = { input_tokens: 0, output_tokens: 0 };
+  // web_search is billed per search ($10 / 1,000) on top of tokens, so the
+  // count has to be carried out with the usage or the cost is under-reported.
+  const usageAcc = { input_tokens: 0, output_tokens: 0, web_search_calls: 0 };
 
   try {
     let finalContent = [];
@@ -191,6 +193,9 @@ async function researchCompanyTags(company, taxonomy, opts = {}) {
       usageAcc.input_tokens += u.input_tokens || 0;
       usageAcc.output_tokens += u.output_tokens || 0;
       const content = data.content || [];
+      usageAcc.web_search_calls += content.filter(
+        (b) => b.type === 'server_tool_use' && b.name === 'web_search'
+      ).length;
       sources.push(...extractSources(content));
       finalContent = content;
 
@@ -213,7 +218,12 @@ async function researchCompanyTags(company, taxonomy, opts = {}) {
       missing_info: parsed.missing_info,
       sources: uniqueSources,
       claude_configured: true,
-      usage: { input_tokens: usageAcc.input_tokens, output_tokens: usageAcc.output_tokens, model: RESEARCH_MODEL }
+      usage: {
+        input_tokens: usageAcc.input_tokens,
+        output_tokens: usageAcc.output_tokens,
+        web_search_calls: usageAcc.web_search_calls,
+        model: RESEARCH_MODEL
+      }
     };
   } catch (err) {
     return {

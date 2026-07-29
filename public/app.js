@@ -16,7 +16,17 @@ let _sender = { name: "", title: "", company: "" };
 
 /* ── Application shell: sidebar nav / view switching / collapse persistence ── */
 
-const APP_VIEW_LABELS = { search: "Search & Scan", crm: "CRM", intelligence: "Customer Intelligence", "ai-usage": "AI Usage", settings: "Settings" };
+// Breadcrumb labels follow the sidebar's Chinese naming so the two never
+// disagree; the English name is kept alongside for the nav item's tooltip.
+const APP_VIEW_LABELS = { home: "首页概览", search: "AI 邮件起草", "booth-map": "展会地图", crm: "CRM 管理", intelligence: "客户情报", "account-research": "账户研究报告", "ai-usage": "数据分析", settings: "设置中心" };
+
+// The Booth Map and Account Report tabs are ported standalone apps rendered in
+// iframes. Load each on first open rather than on page load — the map is a
+// 565 KB single file and the report tab pulls in four export libraries.
+function ensureFrameLoaded(id, src) {
+  const f = document.getElementById(id);
+  if (f && !f.getAttribute("src")) f.setAttribute("src", src);
+}
 
 function showView(name) {
   if (!APP_VIEW_LABELS[name]) return;
@@ -27,6 +37,10 @@ function showView(name) {
     item.classList.toggle("active", item.dataset.navView === name);
   });
   document.getElementById("app-breadcrumb-current").textContent = APP_VIEW_LABELS[name];
+  if (name === "booth-map") ensureFrameLoaded("bm-frame", "/booth-map/");
+  if (name === "account-research") ensureFrameLoaded("ar-frame", "/account-research/");
+  if (name === "home") loadDashboard();
+  if (name === "crm") initCrmCategoryFilter();
   try { localStorage.setItem("app_active_view", name); } catch (e) { /* ignore (private browsing, etc.) */ }
 }
 
@@ -34,10 +48,14 @@ function initAppShell() {
   document.querySelectorAll(".app-nav-item").forEach((item) => {
     item.addEventListener("click", () => showView(item.dataset.navView));
   });
+  // Dashboard cards and "查看全部" links are navigation too.
+  document.querySelectorAll("[data-goto]").forEach((el) => {
+    el.addEventListener("click", () => showView(el.dataset.goto));
+  });
 
-  let savedView = "search";
-  try { savedView = localStorage.getItem("app_active_view") || "search"; } catch (e) { /* ignore */ }
-  showView(APP_VIEW_LABELS[savedView] ? savedView : "search");
+  let savedView = "home";
+  try { savedView = localStorage.getItem("app_active_view") || "home"; } catch (e) { /* ignore */ }
+  showView(APP_VIEW_LABELS[savedView] ? savedView : "home");
 
   const collapseBtn = document.getElementById("app-sidebar-collapse-btn");
   const collapseIcon = document.getElementById("app-sidebar-collapse-icon");
@@ -48,11 +66,19 @@ function initAppShell() {
   let savedCollapsed = false;
   try { savedCollapsed = localStorage.getItem("app_sidebar_collapsed") === "true"; } catch (e) { /* ignore */ }
   applyCollapsed(savedCollapsed);
-  collapseBtn.addEventListener("click", () => {
+  function toggleCollapsed() {
     const collapsed = !document.body.classList.contains("sidebar-collapsed");
     applyCollapsed(collapsed);
     try { localStorage.setItem("app_sidebar_collapsed", String(collapsed)); } catch (e) { /* ignore */ }
-  });
+  }
+  collapseBtn.addEventListener("click", toggleCollapsed);
+  // The top-bar hamburger drives the same state as the footer button.
+  document.getElementById("app-menu-btn").addEventListener("click", toggleCollapsed);
+
+  // Both the top-bar pill and the sidebar meter open the usage dashboard.
+  document.getElementById("app-usage-pill").addEventListener("click", () => showView("ai-usage"));
+  document.getElementById("app-token-link").addEventListener("click", () => showView("ai-usage"));
+  document.getElementById("app-help-btn").addEventListener("click", () => showView("settings"));
 
   // User-profile menu in the top bar mirrors the sender-profile name/company
   // (already tracked in `_sender`) rather than introducing a separate concept.
@@ -66,6 +92,172 @@ function initAppShell() {
     document.getElementById("crm-search-input").value = q;
     loadCrmContacts(q);
   });
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   首页概览 · dashboard data
+   Every figure is read from a live endpoint. A source that fails or has
+   no rows renders "—" / an empty-state line rather than a made-up value.
+   ══════════════════════════════════════════════════════════════════════ */
+
+const nf = new Intl.NumberFormat("en-US");
+// Deterministic tint per name so the same company keeps the same chip colour.
+const DASH_TINTS = ["tint-purple", "tint-blue", "tint-green", "tint-amber", "tint-red"];
+function tintFor(s) {
+  let h = 0;
+  for (let i = 0; i < (s || "").length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return DASH_TINTS[h % DASH_TINTS.length];
+}
+function initialsOf(s) {
+  const parts = String(s || "?").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  return (parts.length === 1 ? parts[0].slice(0, 2) : parts[0][0] + parts[1][0]).toUpperCase();
+}
+function relTime(v) {
+  if (!v) return "";
+  const d = new Date(v);
+  if (isNaN(d)) return "";
+  const mins = Math.round((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return "刚刚";
+  if (mins < 60) return `${mins} 分钟前`;
+  if (mins < 1440) return `${Math.round(mins / 60)} 小时前`;
+  if (mins < 10080) return `${Math.round(mins / 1440)} 天前`;
+  return d.toLocaleDateString("zh-CN");
+}
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} → HTTP ${r.status}`);
+  return r.json();
+}
+function setText(id, v) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = v;
+}
+function renderRows(containerId, rows, emptyMsg) {
+  const box = document.getElementById(containerId);
+  if (!box) return;
+  if (!rows.length) {
+    box.innerHTML = `<div class="dash-empty">${emptyMsg}</div>`;
+    return;
+  }
+  box.innerHTML = rows.map((r) => `
+    <div class="dash-row"${r.goto ? ` data-goto="${r.goto}" style="cursor:pointer"` : ""}>
+      <span class="dash-row-avatar ${r.tint}">${escapeHtml(r.initials)}</span>
+      <span class="dash-row-body">
+        <span class="dash-row-title">${escapeHtml(r.title)}</span>
+        <span class="dash-row-meta">${escapeHtml(r.meta)}</span>
+      </span>
+      ${r.badge ? `<span class="dash-badge ${r.badgeTint}">${escapeHtml(r.badge)}</span>` : ""}
+    </div>`).join("");
+  box.querySelectorAll("[data-goto]").forEach((el) =>
+    el.addEventListener("click", () => showView(el.dataset.goto)));
+}
+
+let _dashLoaded = false;
+async function loadDashboard(force) {
+  if (_dashLoaded && !force) return;
+  _dashLoaded = true;
+  setText("dash-user", senderDisplayName() || _connectedEmail || "同事");
+
+  // Each source is independent — one failing must not blank the others.
+  const [companies, contacts, reports, usage] = await Promise.all([
+    getJSON("/api/companies").catch(() => null),
+    getJSON("/api/contacts").catch(() => null),
+    getJSON("/account-research/api/reports").catch(() => null),
+    getJSON("/api/ai-usage?period=month").catch(() => null),
+  ]);
+
+  const cList = (companies && companies.companies) || [];
+  const pList = (contacts && contacts.contacts) || [];
+  const rList = (reports && reports.reports) || [];
+
+  setText("dash-companies", companies ? nf.format(cList.length) : "—");
+  setText("dash-contacts", contacts ? nf.format(pList.length) : "—");
+  setText("dash-reports", reports ? nf.format(rList.length) : "—");
+  setText("dash-drafts", contacts
+    ? nf.format(pList.reduce((n, c) => n + (Number(c.draft_count) || 0), 0)) : "—");
+
+  const k = usage && usage.kpis;
+  setText("dash-calls", k ? nf.format(Number(k.requests) || 0) : "—");
+  setText("dash-cost", k ? `$${(Number(k.cost_usd) || 0).toFixed(2)}` : "—");
+
+  // ── Recent reports ──
+  // NOTE: /account-research/api/reports aliases its columns to camelCase
+  // (createdAt, companyName, targetZh) — not the snake_case used elsewhere.
+  renderRows("dash-recent-reports", rList.slice(0, 4).map((r) => {
+    const name = r.companyName || r.target || "未命名";
+    return {
+      initials: initialsOf(name), tint: tintFor(name),
+      title: r.targetZh ? `${name} · ${r.targetZh}` : name,
+      meta: [relTime(r.createdAt), r.seller].filter(Boolean).join(" · "),
+      badge: `v${r.version || 1}`, badgeTint: "tint-purple", goto: "account-research",
+    };
+  }), "还没有生成过报告");
+
+  // ── Recent contacts (newest first) ──
+  const recent = pList
+    .filter((c) => c.created_at)
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .slice(0, 4);
+  renderRows("dash-recent-contacts", recent.map((c) => ({
+    initials: initialsOf(c.full_name), tint: tintFor(c.company || c.full_name),
+    title: c.full_name || "(无姓名)",
+    meta: [c.company, c.job_title].filter(Boolean).join(" · ") || relTime(c.created_at),
+    badge: Number(c.draft_count) ? `${c.draft_count} 稿` : "",
+    badgeTint: "tint-green", goto: "crm",
+  })), "还没有联系人");
+
+  // ── Recent AI activity, by feature ──
+  const FEATURE_ZH = {
+    company_research: ["公司研究", "🏢"], email_draft: ["邮件起草", "✉️"],
+    contact_intel: ["联系人情报", "🧭"], product_match: ["产品匹配", "🔗"],
+    attachment_rec: ["附件推荐", "📎"], email_classify: ["邮件分类", "🏷️"],
+    account_research: ["账户研究", "📄"], other: ["其他", "•"],
+  };
+  const feats = (usage && usage.by_feature) || [];
+  renderRows("dash-recent-ai", feats.slice(0, 4).map((f) => {
+    const [zh, icon] = FEATURE_ZH[f.feature] || [f.feature, "•"];
+    const reuses = Number(f.reuses) || 0;
+    return {
+      // An emoji reads better than two CJK glyphs squeezed into a 30px chip.
+      initials: icon, tint: tintFor(f.feature),
+      title: zh,
+      meta: `${nf.format(Number(f.requests) || 0)} 次 · ${nf.format(Number(f.total_tokens) || 0)} tok`
+            + (reuses ? ` · 复用 ${reuses}` : ""),
+      badge: `$${(Number(f.cost_usd) || 0).toFixed(2)}`,
+      badgeTint: "tint-grey", goto: "ai-usage",
+    };
+  }), "本月还没有 AI 调用");
+
+  renderTokenMeter(usage);
+}
+
+// Sidebar token meter. With no monthly budget configured the ring stays empty
+// and the card reports raw usage — it must never imply a cap that isn't set.
+function renderTokenMeter(usage) {
+  const ring = document.getElementById("app-token-ring");
+  const st = usage && usage.budget_status;
+  const cap = usage && usage.budget && Number(usage.budget.monthly_token_budget) || 0;
+  const used = st ? Number(st.month_tokens) || 0 : (usage && usage.kpis ? Number(usage.kpis.total_tokens) || 0 : 0);
+
+  if (!usage) {
+    setText("app-token-pct", "—");
+    setText("app-token-used", "读取失败");
+    setText("app-token-meta", "无法获取用量");
+    return;
+  }
+  if (cap > 0) {
+    const pct = Math.min(100, Math.round((used / cap) * 100));
+    if (ring) ring.style.setProperty("--pct", pct + "%");
+    setText("app-token-pct", pct + "%");
+    setText("app-token-used", `${nf.format(used)} / ${nf.format(cap)}`);
+    setText("app-token-meta", `剩余额度 ${nf.format(Math.max(0, cap - used))}`);
+  } else {
+    if (ring) ring.style.setProperty("--pct", "0%");
+    setText("app-token-pct", "∞");
+    setText("app-token-used", `${nf.format(used)} Tokens`);
+    setText("app-token-meta", "本月已用 · 未设上限");
+  }
 }
 
 // Connected mailbox identity (from /api/email/status); "" until connected.
@@ -82,6 +274,10 @@ function updateUserMenuFromSender() {
     : (_connectedEmail || "Your Profile");
   document.getElementById("app-user-menu-name").textContent = label;
   document.getElementById("app-user-avatar").textContent = name ? name.trim()[0].toUpperCase() : (_connectedEmail ? _connectedEmail[0].toUpperCase() : "U");
+  // The dashboard greeting renders before /api/email/status resolves, so keep
+  // it in step with the identity rather than leaving the initial fallback.
+  const greet = document.getElementById("dash-user");
+  if (greet) greet.textContent = name || _connectedEmail || "同事";
 }
 
 /* ── Modal open/close: single helper for every .modal-overlay, replacing
@@ -2026,7 +2222,7 @@ function renderAiUsage(d) {
 
   // Budget status
   if (b.daily_token_budget || b.monthly_token_budget) {
-    const bar = (pct, over, warn) => `<span style="color:${over ? '#dc2626' : warn ? '#c2410c' : '#059669'};font-weight:600;">${pct}%</span>`;
+    const bar = (pct, over, warn) => `<span style="color:${over ? '#dc2626' : warn ? '#0C579A' : '#059669'};font-weight:600;">${pct}%</span>`;
     html += `<div style="font-size:0.78rem;color:#374151;margin-bottom:12px;">Budget used —
         ${b.daily_token_budget ? `Daily: ${bar(bs.daily_pct, bs.daily_over, bs.daily_warn)} of ${fmtTokens(b.daily_token_budget)}` : ""}
         ${b.daily_token_budget && b.monthly_token_budget ? " · " : ""}
@@ -2307,9 +2503,9 @@ function setScanMode(mode) {
   const isSingle = mode === "single";
   singleScanPanel.style.display = isSingle ? "block" : "none";
   batchScanPanel.style.display = isSingle ? "none" : "block";
-  modeSingleBtn.style.background = isSingle ? "#2563eb" : "#fff";
+  modeSingleBtn.style.background = isSingle ? "#4E2A84" : "#fff";
   modeSingleBtn.style.color = isSingle ? "#fff" : "#555";
-  modeBatchBtn.style.background = isSingle ? "#fff" : "#2563eb";
+  modeBatchBtn.style.background = isSingle ? "#fff" : "#4E2A84";
   modeBatchBtn.style.color = isSingle ? "#555" : "#fff";
 }
 modeSingleBtn.addEventListener("click", () => setScanMode("single"));
@@ -2477,6 +2673,267 @@ async function loadCrmContacts(query, filterPatch) {
     renderCrmFilterSummary();
     autoEnrichCrmPage();
   } catch (e) { /* silent */ }
+}
+
+/* ── Quick Browse: a cascade, not five independent filters ────────────────
+   ① Company → ② Contact → ③ Show → ④ Category → ⑤ Matching companies.
+
+   Each step narrows what the next one offers, and the bottom list is the
+   *result* of the chain rather than another filter. Categories are scoped to
+   the selected show, so adding a second trade show later brings its own
+   taxonomy along instead of pooling everything into one flat list. */
+
+const BOOTH_CATEGORY_META = {
+  customer:   ["目标客户 · Target Customers", "#58a6ff"],
+  competitor: ["竞争对手 · Competitors", "#f85149"],
+  chinese:    ["中国企业 · Chinese Co.", "#f85149"],
+  batmat:     ["电池材料 · Battery Materials", "#ffa657"],
+  elec:       ["电子连接 · Electronics", "#39d353"],
+  test:       ["测试检测 · Testing", "#3fb950"],
+  mfg:        ["制造设备 · Manufacturing", "#f0883e"],
+  line:       ["产线设备 · Assembly Line", "#f85149"],
+  cert:       ["认证机构 · Certification", "#a371f7"],
+  recycle:    ["回收安全 · Recycling", "#56d364"],
+  gov:        ["政府机构 · Government", "#8b949e"],
+  other:      ["其他 · Others", "#6b7280"],
+};
+
+let _crmCompanies = [];        // every company, with contact_count + event_id
+let _crmShows = [];            // [{id, name}]
+let _qbShow = "";              // selected show name ("" = 不限)
+let _qbCats = [];              // selected categories (within _qbShow)
+
+const lc = (v) => String(v || "").trim().toLowerCase();
+
+/* Step ①②: which companies the upstream selections allow through.
+   Selected companies constrain directly; selected contacts constrain via
+   their employer. Both empty ⇒ everything is still on the table. */
+function qbUpstreamCompanies() {
+  const picked = (_crmActiveFilters.accounts || []).map(lc);
+  const contactIds = _crmActiveFilters.contact_ids || [];
+  let list = _crmCompanies;
+  if (picked.length) list = list.filter((c) => picked.includes(lc(c.name)));
+  if (contactIds.length) {
+    const names = new Set(_contactOptions
+      .filter((ct) => contactIds.includes(ct.id))
+      .map((ct) => lc(ct.company)));
+    list = list.filter((c) => names.has(lc(c.name)));
+  }
+  return list;
+}
+
+/* Step ③: only shows actually represented by the upstream companies. */
+function renderQbShows() {
+  const box = document.getElementById("crm-show-list");
+  if (!box) return;
+  const upstream = qbUpstreamCompanies();
+  const byId = new Map(_crmShows.map((s) => [s.id, s.name]));
+  const counts = {};
+  upstream.forEach((c) => {
+    if (!c.event_id) return;
+    const n = byId.get(c.event_id);
+    if (n) counts[n] = (counts[n] || 0) + 1;
+  });
+  const shows = _crmShows.filter((s) => counts[s.name]);
+
+  if (!shows.length) {
+    box.innerHTML = `<div style="padding:6px;font-size:0.7rem;color:#9ca3af;">上游筛选下没有展会数据</div>`;
+    if (_qbShow) { _qbShow = ""; _qbCats = []; }
+    return;
+  }
+  box.innerHTML = shows.map((s) => `
+    <label class="crm-cat-item" title="${escapeHtml(s.name)}">
+      <input type="radio" name="qb-show" value="${escapeHtml(s.name)}" ${_qbShow === s.name ? "checked" : ""} />
+      <span class="crm-cat-label">${escapeHtml(s.name)}</span>
+      <span class="crm-cat-count">${counts[s.name]}</span>
+    </label>`).join("")
+    + `<label class="crm-cat-item"><input type="radio" name="qb-show" value="" ${!_qbShow ? "checked" : ""} />
+       <span class="crm-cat-label" style="color:#6b7280;">不限展会</span></label>`;
+
+  box.querySelectorAll('input[name="qb-show"]').forEach((r) => {
+    r.addEventListener("change", () => {
+      _qbShow = r.value;
+      _qbCats = [];                       // taxonomy is per-show; start clean
+      applyQbFilters();
+    });
+  });
+}
+
+/* Step ④: categories that exist inside the selected show. */
+function renderQbCategories() {
+  const box = document.getElementById("crm-cat-list");
+  const head = document.getElementById("crm-cat-heading");
+  if (!box) return;
+  const upstream = qbUpstreamCompanies();
+  const byId = new Map(_crmShows.map((s) => [s.id, s.name]));
+  const inShow = _qbShow
+    ? upstream.filter((c) => byId.get(c.event_id) === _qbShow)
+    : upstream;
+
+  const counts = {};
+  inShow.forEach((c) => { if (c.booth_category) counts[c.booth_category] = (counts[c.booth_category] || 0) + 1; });
+  const keys = Object.keys(BOOTH_CATEGORY_META).filter((k) => counts[k]);
+
+  if (head) head.textContent = _qbShow ? `④ 分类 · ${_qbShow.replace(/^The\s+/, "")}` : "④ 分类 · Category";
+  if (!keys.length) {
+    box.innerHTML = `<div style="padding:6px;font-size:0.7rem;color:#9ca3af;">${_qbShow ? "该展会下暂无分类" : "先选择一个展会"}</div>`;
+    return;
+  }
+  box.innerHTML = keys.map((k) => {
+    const [label, color] = BOOTH_CATEGORY_META[k];
+    return `<label class="crm-cat-item" title="${escapeHtml(label)}">
+      <input type="checkbox" value="${k}" ${_qbCats.includes(k) ? "checked" : ""} />
+      <span class="crm-cat-dot" style="background:${color}"></span>
+      <span class="crm-cat-label">${escapeHtml(label)}</span>
+      <span class="crm-cat-count">${counts[k]}</span>
+    </label>`;
+  }).join("");
+  box.querySelectorAll("input").forEach((i) => i.addEventListener("change", () => {
+    _qbCats = [...box.querySelectorAll("input:checked")].map((x) => x.value);
+    applyQbFilters();
+  }));
+}
+
+/* Step ⑤: the result set — everything ①–④ agree on. */
+function qbResultCompanies() {
+  const byId = new Map(_crmShows.map((s) => [s.id, s.name]));
+  const term = lc(document.getElementById("crm-co-search")?.value);
+  return qbUpstreamCompanies().filter((c) => {
+    if (_qbShow && byId.get(c.event_id) !== _qbShow) return false;
+    if (_qbCats.length && !_qbCats.includes(c.booth_category)) return false;
+    if (term && !lc(`${c.name} ${c.chinese_name || ""}`).includes(term)) return false;
+    return true;
+  });
+}
+
+function renderCrmCompanyList() {
+  const box = document.getElementById("crm-co-list");
+  const countEl = document.getElementById("crm-co-count");
+  if (!box) return;
+  const list = qbResultCompanies();
+  if (countEl) countEl.textContent = String(list.length);
+
+  if (!list.length) {
+    box.innerHTML = `<div style="padding:10px 6px;font-size:0.72rem;color:#9ca3af;">没有匹配的公司</div>`;
+    return;
+  }
+  const shown = list.slice(0, 250);
+  box.innerHTML = shown.map((c) => {
+    const n = Number(c.contact_count) || 0;
+    return `
+      <div class="crm-co-item" data-cid="${c.id}" title="${escapeHtml(c.name)}${c.booth ? " · 展位 " + escapeHtml(c.booth) : ""}">
+        <div class="crm-co-top">
+          <span class="crm-co-name">${escapeHtml(c.chinese_name || c.name)}</span>
+          ${c.booth ? `<span class="crm-co-booth">${escapeHtml(c.booth)}</span>` : ""}
+          <span class="crm-co-n ${n ? "has" : "none"}">${n}</span>
+        </div>
+        <div class="crm-co-tools">
+          ${c.booth ? `<button class="crm-co-tool" data-act="map" data-cid="${c.id}" title="在展位图中定位">🗺</button>` : ""}
+          <button class="crm-co-tool" data-act="fill" data-cid="${c.id}" title="填入搜索框">⬆</button>
+          ${n ? `<button class="crm-co-tool" data-act="view" data-cid="${c.id}" title="查看 ${n} 位联系人">👥</button>` : ""}
+        </div>
+      </div>`;
+  }).join("") + (list.length > shown.length
+    ? `<div style="padding:6px;font-size:0.68rem;color:#9ca3af;">仅显示前 ${shown.length} 家，请用上方查找缩小范围</div>`
+    : "");
+
+  const find = (el) => _crmCompanies.find((c) => c.id === Number(el.dataset.cid));
+  // Row click = open the booth, per the result-list semantics.
+  box.querySelectorAll(".crm-co-item").forEach((el) => el.addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    const co = find(el);
+    if (co) openCompanyOnMap(co);
+  }));
+  box.querySelectorAll("button[data-act]").forEach((b) => b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const co = find(b);
+    if (!co) return;
+    if (b.dataset.act === "map") openCompanyOnMap(co);
+    else if (b.dataset.act === "fill") fillCompanyIntoSearch(co);
+    else accountSelect.selectByKeys([co.name]);
+  }));
+}
+
+// Switches to the floor plan and centres on this company's booth. jumpTo()
+// lives inside the booth-map iframe; it needs the map's canvas to exist, so
+// give a cold iframe a moment to boot before calling in.
+function openCompanyOnMap(co) {
+  if (!co.booth) { showToast?.(`${co.name} 没有展位号`); return; }
+  showView("booth-map");
+  const frame = document.getElementById("bm-frame");
+  let tries = 0;
+  const go = () => {
+    tries++;
+    const w = frame && frame.contentWindow;
+    if (w && typeof w.jumpTo === "function" && w.document.getElementById("cv")) {
+      w.jumpTo(String(co.booth));
+      return;
+    }
+    if (tries < 40) setTimeout(go, 250);
+  };
+  setTimeout(go, 300);
+}
+
+function applyQbFilters() {
+  renderQbShows();
+  renderQbCategories();
+  renderCrmCompanyList();
+  // The contact table follows the same chain.
+  _crmActiveFilters.show_event = _qbShow || "";
+  _crmActiveFilters.booth_categories = _qbCats;
+  if (accountSelect) accountSelect.refreshOptions();
+  loadCrmContacts(document.getElementById("crm-search-input").value.trim());
+}
+
+async function initCrmCategoryFilter() {
+  const box = document.getElementById("crm-cat-list");
+  if (!box || box.dataset.ready) return;
+  box.dataset.ready = "1";
+
+  try {
+    const d = await getJSON("/api/events");
+    _crmShows = d.events || d || [];
+  } catch (e) { _crmShows = []; }
+
+  const clear = document.getElementById("crm-cat-clearall");
+  if (clear) clear.addEventListener("click", () => { _qbCats = []; applyQbFilters(); });
+  const coSearch = document.getElementById("crm-co-search");
+  if (coSearch) coSearch.addEventListener("input", renderCrmCompanyList);
+
+  await refreshCrmCompanies();
+  renderQbShows();
+  renderQbCategories();
+}
+
+async function refreshCrmCompanies() {
+  try {
+    const d = await getJSON("/api/companies");
+    _crmCompanies = d.companies || [];
+  } catch (e) { _crmCompanies = _crmCompanies || []; }
+  renderCrmCompanyList();
+}
+
+// Drops the company into the existing Search Companies box rather than firing
+// Apollo directly — you stay in control of when a search (and its credits) runs,
+// and it reuses the pipeline that already handles dedupe and company linking.
+function fillCompanyIntoSearch(co) {
+  const input = document.getElementById("company-input");
+  if (!input) return;
+  // That box treats commas as the separator between companies, so a name that
+  // contains one ("AGC Chemicals Americas, Inc.") has to be flattened first —
+  // otherwise the tail is searched, and filed, as a company of its own.
+  const clean = co.name.replace(/,/g, " ").replace(/\s+/g, " ").trim();
+  const existing = input.value.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!existing.some((e) => lc(e) === lc(clean))) {
+    existing.push(clean);
+    input.value = existing.join(", ");
+  }
+  input.scrollIntoView({ behavior: "smooth", block: "center" });
+  input.focus();
+  input.style.transition = "box-shadow .2s, border-color .2s";
+  input.style.boxShadow = "0 0 0 3px rgba(78,42,132,0.25)";
+  input.style.borderColor = "var(--color-primary)";
+  setTimeout(() => { input.style.boxShadow = ""; input.style.borderColor = ""; }, 1400);
 }
 
 function renderCrmFilterSummary() {
@@ -2795,15 +3252,19 @@ let _selectedAccountsForMerge = [];
 const accountSelect = createMultiSelect({
   inputId: "crm-sel-account-input", dropdownId: "crm-sel-account-dropdown",
   chipsId: "crm-sel-account-chips", clearAllId: "crm-sel-account-clearall",
+  // ① is the head of the cascade — it offers every company and narrows what
+  // comes after it, never the other way round.
   getItems: () => _accountOptions,
   keyOf: (it) => it.name,
   matchText: (it) => it.name || "",
   renderOptionLabel: (it) => `${escapeHtml(it.name)} <span class="crm-sel-sub">(${it.contact_count})</span>`,
   renderChipLabel: (it) => it.name,
   onChange: (items) => {
-    loadCrmContacts(document.getElementById("crm-search-input").value, { accounts: items.map((it) => it.name) });
+    _crmActiveFilters.accounts = items.map((it) => it.name);
     _selectedAccountsForMerge = items;
     document.getElementById("crm-merge-accounts-btn").style.display = items.length >= 2 ? "" : "none";
+    if (contactSelect) contactSelect.refreshOptions();   // ② narrows to these companies
+    applyQbFilters();                                     // ③④⑤ recompute
   },
 });
 
@@ -2856,13 +3317,20 @@ document.getElementById("merge-accounts-ok").addEventListener("click", async () 
 const contactSelect = createMultiSelect({
   inputId: "crm-sel-contact-input", dropdownId: "crm-sel-contact-dropdown",
   chipsId: "crm-sel-contact-chips", clearAllId: "crm-sel-contact-clearall",
-  getItems: () => _contactOptions,
+  // ② is scoped by ① — picking a company should shrink this list, not leave
+  // you scrolling contacts who work somewhere else.
+  getItems: () => {
+    const picked = (_crmActiveFilters.accounts || []).map((a) => String(a).trim().toLowerCase());
+    if (!picked.length) return _contactOptions;
+    return _contactOptions.filter((ct) => picked.includes(String(ct.company || "").trim().toLowerCase()));
+  },
   keyOf: (it) => it.id,
   matchText: (it) => `${it.full_name || ""} ${it.company || ""}`,
   renderOptionLabel: (it) => `${escapeHtml(it.full_name || "Unnamed")}<br><span class="crm-sel-sub">${escapeHtml(it.company || "")}</span>`,
   renderChipLabel: (it) => `${it.full_name || "Unnamed"}${it.company ? " — " + it.company : ""}`,
   onChange: (items) => {
-    loadCrmContacts(document.getElementById("crm-search-input").value, { contact_ids: items.map((it) => it.id) });
+    _crmActiveFilters.contact_ids = items.map((it) => it.id);
+    applyQbFilters();                                     // ③④⑤ recompute
   },
 });
 
@@ -2904,8 +3372,9 @@ function clearDeptSeniorityFilters() {
 
 async function loadBrowseSelectors() {
   try {
-    const [accRes, contactRes] = await Promise.all([
+    const [accRes, contactRes, compRes] = await Promise.all([
       fetch("/api/accounts/grouped"), fetch("/api/contacts/names"),
+      fetch("/api/companies").catch(() => null),
     ]);
     const accData = await accRes.json();
     const contactData = await contactRes.json();
@@ -3352,7 +3821,7 @@ document.getElementById("import-email-submit-btn").addEventListener("click", asy
     const matchedEl = document.getElementById("import-matched-contact");
     if (d.contact_name) {
       matchedEl.textContent = d.contact_name + (d.company_name ? ` · ${d.company_name}` : '');
-      matchedEl.style.color = d.review_needed ? "#ea580c" : "#111827";
+      matchedEl.style.color = d.review_needed ? "#0F6CBD" : "#111827";
       if (d.review_needed) {
         matchedEl.textContent += " (new stub — please verify)";
       }
@@ -3723,7 +4192,7 @@ function initIntelligenceView() {
   const navItem = document.querySelector('.app-nav-item[data-nav-view="intelligence"]');
   if (navItem) navItem.addEventListener("click", intelEnsureLoaded);
   let activeView = "search";
-  try { activeView = localStorage.getItem("app_active_view") || "search"; } catch (e) { /* ignore */ }
+  try { activeView = localStorage.getItem("app_active_view") || "home"; } catch (e) { /* ignore */ }
   if (activeView === "intelligence") intelEnsureLoaded();
 }
 
@@ -3804,7 +4273,7 @@ function renderCompanyIntel(intel, panelId = "intel-panel") {
   // ── Status line (DB-first: shows what's saved and how fresh it is) ──
   let statusBadge, statusStyle;
   if (!st.analyzed) { statusBadge = "Not analyzed"; statusStyle = "background:#f3f4f6;color:#6b7280;"; }
-  else if (st.stale) { statusBadge = "Analysis stale"; statusStyle = "background:#fff7ed;color:#c2410c;"; }
+  else if (st.stale) { statusBadge = "Analysis stale"; statusStyle = "background:#fff7ed;color:#0C579A;"; }
   else if (st.confirmed_count > 0) { statusBadge = "Saved · reviewed"; statusStyle = "background:#ecfdf5;color:#047857;"; }
   else { statusBadge = "Saved · needs review"; statusStyle = "background:#fffbeb;color:#b45309;"; }
 
@@ -3854,7 +4323,7 @@ function renderCompanyIntel(intel, panelId = "intel-panel") {
       <div class="intel-legend" style="margin-bottom:12px;">
         <span><span class="dot" style="background:#fffbeb;border-color:#fcd34d;"></span>AI suggested</span>
         <span><span class="dot" style="background:#ecfdf5;border-color:#6ee7b7;"></span>Confirmed</span>
-        <span><span class="dot" style="background:#eff6ff;border-color:#93c5fd;"></span>Manual</span>
+        <span><span class="dot" style="background:#EDE9F7;border-color:#93c5fd;"></span>Manual</span>
         <span><span class="dot" style="background:#fff7ed;border-color:#fdba74;"></span>Needs review</span>
         <span><span class="dot" style="background:#f3f4f6;border-color:#d1d5db;"></span>Rejected</span>
       </div>`;
@@ -4547,7 +5016,7 @@ function initAiUsageDashboard() {
       el.addEventListener("click", () => { showView("ai-usage"); loadAiUsage(); });
     }
   });
-  let active = "search"; try { active = localStorage.getItem("app_active_view") || "search"; } catch (e) { /* ignore */ }
+  let active = "search"; try { active = localStorage.getItem("app_active_view") || "home"; } catch (e) { /* ignore */ }
   if (active === "ai-usage") loadAiUsage();
 }
 
@@ -4629,7 +5098,7 @@ function renderAiUsageDashboard(d) {
   if (b.daily_cost_budget || b.monthly_cost_budget || b.daily_token_budget || b.monthly_token_budget) {
     const chip = (label, pct) => {
       const over = pct >= 100, warn = pct >= (bs.warn_threshold_pct || 80);
-      const col = over ? "#dc2626" : warn ? "#c2410c" : "#059669";
+      const col = over ? "#dc2626" : warn ? "#0C579A" : "#059669";
       return `<span style="font-size:0.78rem;color:#374151;margin-right:16px;">${label}: <b style="color:${col};">${pct}%</b></span>`;
     };
     html += `<div style="border:1px solid #eef2f7;background:#f9fafb;border-radius:8px;padding:8px 12px;margin-bottom:16px;">
@@ -4645,7 +5114,7 @@ function renderAiUsageDashboard(d) {
   const ch = (title, svg) => `<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;">
       <div style="font-size:0.78rem;font-weight:600;color:#374151;margin-bottom:8px;">${escapeHtml(title)}</div>${svg}</div>`;
   html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
-    ${ch("Total tokens over time", svgBars(d.timeseries, "total_tokens", "#2563eb", fmtTokens))}
+    ${ch("Total tokens over time", svgBars(d.timeseries, "total_tokens", "#4E2A84", fmtTokens))}
     ${ch("AI cost over time", svgBars(d.timeseries, "cost_usd", "#7c3aed", (v) => usd(v)))}
     ${ch("Requests over time (new vs reuse)", svgBars(d.timeseries, "requests", "#0891b2", fmtTokens))}
     ${ch("Tokens saved over time", svgBars(d.timeseries, "saved_total", "#059669", fmtTokens))}
@@ -4679,7 +5148,7 @@ function renderAiUsageDashboard(d) {
 
   // Request audit log container
   html += `<h3 style="font-size:0.9rem;margin:6px 0 6px;display:flex;justify-content:space-between;align-items:center;">
-      <span>Request log ${_aiuFeatureFilter ? `— <span style="color:#2563eb;">${escapeHtml(AIU_FEATURE_LABELS[_aiuFeatureFilter] || _aiuFeatureFilter)}</span> <a href="#" id="aiu-clear-feature" style="font-size:0.74rem;">(clear)</a>` : ""}</span>
+      <span>Request log ${_aiuFeatureFilter ? `— <span style="color:#4E2A84;">${escapeHtml(AIU_FEATURE_LABELS[_aiuFeatureFilter] || _aiuFeatureFilter)}</span> <a href="#" id="aiu-clear-feature" style="font-size:0.74rem;">(clear)</a>` : ""}</span>
       <span style="font-size:0.74rem;font-weight:400;color:#9ca3af;">no prompts or email content shown</span>
     </h3>
     <div id="aiu-audit"><div style="color:#9ca3af;font-size:0.8rem;">Loading requests…</div></div>`;
@@ -4812,7 +5281,7 @@ function renderDuplicateCompanies(rows) {
       <table class="intel-matrix-table" style="margin-bottom:8px;"><thead><tr><th>Row</th><th>Tags</th><th>Contacts</th><th></th></tr></thead><tbody>`;
     g.forEach((r) => {
       const isTarget = r.id === target.id;
-      html += `<tr><td>#${r.id} ${escapeHtml(r.name)}${isTarget ? ' <span style="color:#2563eb;font-weight:600;">← keep (has contacts)</span>' : ''}</td>
+      html += `<tr><td>#${r.id} ${escapeHtml(r.name)}${isTarget ? ' <span style="color:#4E2A84;font-weight:600;">← keep (has contacts)</span>' : ''}</td>
         <td>${r.tag_count}</td><td>${r.contact_count}</td>
         <td>${isTarget ? '' : `<button class="btn-sm btn-ghost" data-merge-from="${r.id}" data-merge-to="${target.id}">Merge → #${target.id}</button>`}</td></tr>`;
     });
@@ -5401,7 +5870,7 @@ async function loadEmailSendStatus() {
       // one-click jump into Settings → My Email Account.
       el.style.background = ""; el.style.color = "";
       el.innerHTML = "✉️ " + esc(d.message) +
-        ' <a href="#" id="email-setup-link" style="color:#1d4ed8;font-weight:600;text-decoration:underline;margin-left:6px;">Complete Email Setup →</a>';
+        ' <a href="#" id="email-setup-link" style="color:#3D1E6E;font-weight:600;text-decoration:underline;margin-left:6px;">Complete Email Setup →</a>';
       el.style.display = "";
       const link = document.getElementById("email-setup-link");
       if (link) link.addEventListener("click", (ev) => { ev.preventDefault(); openEmailSetup(); });

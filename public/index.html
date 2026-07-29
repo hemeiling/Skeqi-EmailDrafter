@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Apollo Leadership Contact Search</title>
+  <title>SKQ CRM System · AI 驱动的智能销售与客户关系管理平台</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%23101c33'/%3E%3Ctext x='50' y='68' font-size='58' text-anchor='middle' fill='%23ea580c' font-family='Arial, sans-serif' font-weight='bold'%3EA%3C/text%3E%3C/svg%3E" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -14,38 +14,45 @@
        not touch component rules below.
        ══════════════════════════════════════════════════════════════════ */
     :root {
-      --color-primary: #2563eb;
-      --color-primary-hover: #1d4ed8;
-      --color-primary-soft: #eff6ff;
-      --color-primary-border: #bfdbfe;
-      --color-accent: #ea580c;
-      --color-accent-hover: #c2410c;
-      --color-success: #16a34a;
-      --color-success-hover: #15803d;
-      --color-success-soft: #f0fdf4;
-      --color-success-border: #86efac;
-      --color-success-text: #166534;
-      --color-danger: #dc2626;
-      --color-danger-hover: #b91c1c;
-      --color-danger-soft: #fef2f2;
-      --color-danger-border: #fecaca;
-      --color-danger-text: #991b1b;
-      --color-warn-soft: #fffbeb;
-      --color-warn-border: #fde68a;
-      --color-warn-text: #92400e;
+      /* ── SKQ brand palette (Northwestern Purple) ───────────────────────
+         主色贯穿导航/按钮/图标；辅色仅用于数据可视化；中性色承担文本与
+         分割线。改这里即可整体换肤 —— 组件规则一律引用变量，不写死值。 */
+      --color-primary: #4E2A84;          /* Northwestern Purple · 主色 */
+      --color-primary-hover: #3D1E6E;    /* 深紫 · 强调/悬停 */
+      --color-primary-soft: #EDE9F7;     /* 浅紫 · 辅助底色 */
+      --color-primary-border: #CFC4E8;   /* 浅紫描边（由主色调淡） */
+      --color-primary-text: #3D1E6E;     /* 浅紫底上的可读文字 */
+      --color-accent: #0F6CBD;           /* 辅色-蓝 · 信息可视化 */
+      --color-accent-hover: #0C579A;
+      --color-success: #198754;
+      --color-success-hover: #146c43;
+      --color-success-soft: #E8F3EE;
+      --color-success-border: #A9D5C0;
+      --color-success-text: #0F5132;
+      --color-danger: #DC3545;
+      --color-danger-hover: #BB2D3B;
+      --color-danger-soft: #FCEBED;
+      --color-danger-border: #F3B7BE;
+      --color-danger-text: #A21D2A;
+      --color-warn: #F4B400;
+      --color-warn-soft: #FEF6E0;
+      --color-warn-border: #F7DC91;
+      --color-warn-text: #8A6400;
 
-      --color-bg: #f6f7f9;
-      --color-surface: #ffffff;
-      --color-surface-alt: #f9fafb;
-      --color-border: #e2e5eb;
-      --color-border-soft: #eef0f4;
+      --color-bg: #F7F7F7;               /* 背景色 */
+      --color-surface: #FFFFFF;          /* 卡片/表面色 */
+      --color-surface-alt: #FAFAFB;
+      --color-border: #E5E5EA;
+      --color-border-soft: #F0F0F3;
 
-      --color-text: #101828;
-      --color-text-secondary: #475467;
-      --color-text-tertiary: #98a2b3;
+      --color-text: #1F2937;             /* 中性-深灰 */
+      --color-text-secondary: #4B5563;
+      --color-text-tertiary: #6B7280;    /* 中性-灰 */
 
-      --color-navy: #101c33;
-      --color-navy-soft: #8ba3c0;
+      /* 侧边栏为品牌紫渐变，不再是海军蓝 */
+      --color-navy: #4E2A84;
+      --color-navy-soft: #C3B4DF;
+      --sidebar-gradient: linear-gradient(168deg, #4E2A84 0%, #43226F 55%, #3D1E6E 100%);
 
       --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
       --space-5: 20px; --space-6: 24px; --space-8: 32px;
@@ -79,38 +86,81 @@
     .app-shell { min-height: 100vh; }
     .app-sidebar {
       position: fixed; top: 0; left: 0; bottom: 0; width: var(--sidebar-width);
-      background: var(--color-navy); color: #cdd8e6; z-index: 300;
+      background: var(--sidebar-gradient); color: var(--color-navy-soft); z-index: 300;
       display: flex; flex-direction: column; transition: width 0.18s ease;
       overflow-x: hidden;
     }
     body.sidebar-collapsed .app-sidebar { width: var(--sidebar-width-collapsed); }
+
+    /* Brand lockup: wordmark over descriptor, matching the SKQ logo. The mark
+       stands in for the wordmark when the rail is collapsed. */
     .app-sidebar-brand {
-      display: flex; align-items: center; gap: 10px; padding: 16px 18px;
-      font-weight: 700; font-size: 0.95rem; color: #fff; white-space: nowrap;
-      border-bottom: 1px solid rgba(255,255,255,0.08); min-height: var(--topbar-height);
+      display: flex; align-items: center; gap: 11px; padding: 14px 18px;
+      color: #fff; white-space: nowrap; min-height: 64px;
+      border-bottom: 1px solid rgba(255,255,255,0.12);
     }
     .app-sidebar-brand-mark {
-      width: 28px; height: 28px; border-radius: var(--radius-sm); flex-shrink: 0;
-      background: linear-gradient(135deg, var(--color-accent), #f97316);
-      display: flex; align-items: center; justify-content: center; font-size: 15px;
+      width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+      background: #fff; color: var(--color-primary);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 800; letter-spacing: -0.02em;
     }
-    .app-sidebar-nav { flex: 1; padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+    .app-brand-label { display: flex; flex-direction: column; gap: 1px; line-height: 1.15; }
+    .app-brand-name { font-size: 1.05rem; font-weight: 800; letter-spacing: 0.01em; }
+    .app-brand-sub { font-size: 0.66rem; font-weight: 500; color: rgba(255,255,255,0.62); letter-spacing: 0.04em; }
+
+    .app-sidebar-nav { flex: 1; padding: 12px 10px; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; }
     .app-nav-item {
-      display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: var(--radius-sm);
-      color: #b9c6d9; font-size: 0.86rem; font-weight: 500; cursor: pointer; white-space: nowrap;
+      display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: var(--radius-md);
+      color: rgba(255,255,255,0.76); font-size: 0.86rem; font-weight: 500; cursor: pointer; white-space: nowrap;
       transition: background 0.12s, color 0.12s; user-select: none;
     }
     .app-nav-item .app-nav-icon { font-size: 1rem; width: 20px; text-align: center; flex-shrink: 0; }
-    .app-nav-item:hover { background: rgba(255,255,255,0.06); color: #fff; }
-    .app-nav-item.active { background: rgba(37,99,235,0.25); color: #fff; }
+    .app-nav-item:hover { background: rgba(255,255,255,0.10); color: #fff; }
+    /* Active = solid light-purple pill, the inverse of the rail: highest
+       contrast available without introducing a colour outside the palette. */
+    .app-nav-item.active { background: var(--color-primary-soft); color: var(--color-primary-hover); font-weight: 600; }
     body.sidebar-collapsed .app-nav-item span.app-nav-label,
-    body.sidebar-collapsed .app-sidebar-brand span.app-brand-label { display: none; }
-    .app-sidebar-footer { padding: 10px 8px 14px; border-top: 1px solid rgba(255,255,255,0.08); }
+    body.sidebar-collapsed .app-sidebar-brand .app-brand-label { display: none; }
+    body.sidebar-collapsed .app-sidebar-token { display: none; }
+
+    /* ── Monthly token meter ── real numbers from /api/ai-usage, not a mock. */
+    .app-sidebar-token {
+      margin: 8px 10px 4px; padding: 12px 13px; border-radius: var(--radius-lg);
+      background: rgba(255,255,255,0.09); border: 1px solid rgba(255,255,255,0.14);
+    }
+    .app-token-head {
+      display: flex; align-items: center; gap: 5px; font-size: 0.7rem; font-weight: 600;
+      color: rgba(255,255,255,0.76); margin-bottom: 10px; white-space: nowrap;
+    }
+    .app-token-body { display: flex; align-items: center; gap: 12px; }
+    .app-token-ring {
+      width: 54px; height: 54px; border-radius: 50%; flex-shrink: 0; position: relative;
+      background: conic-gradient(#fff var(--pct, 0%), rgba(255,255,255,0.18) 0);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .app-token-ring::after {
+      content: ""; position: absolute; inset: 6px; border-radius: 50%; background: #4A2780;
+    }
+    .app-token-pct { position: relative; z-index: 1; font-size: 0.8rem; font-weight: 800; color: #fff; }
+    .app-token-nums { min-width: 0; }
+    .app-token-used { font-size: 0.72rem; color: rgba(255,255,255,0.92); font-weight: 600; }
+    .app-token-meta { font-size: 0.66rem; color: rgba(255,255,255,0.58); margin-top: 3px; line-height: 1.45; }
+    .app-token-link {
+      display: block; width: 100%; margin-top: 10px; padding: 6px 8px; border-radius: var(--radius-sm);
+      background: rgba(255,255,255,0.14); border: none; color: #fff; font-size: 0.72rem; font-weight: 600;
+      text-align: center;
+    }
+    .app-token-link:hover { background: rgba(255,255,255,0.24); }
+
+    /* Extra bottom padding clears the fixed #usage-bar, which spans the full
+       viewport width and would otherwise sit on top of the collapse button. */
+    .app-sidebar-footer { padding: 10px 10px 44px; border-top: 1px solid rgba(255,255,255,0.12); }
     .app-sidebar-collapse-btn {
-      width: 100%; background: transparent; color: #8ba3c0; border: 1px solid rgba(255,255,255,0.12);
+      width: 100%; background: transparent; color: rgba(255,255,255,0.66); border: 1px solid rgba(255,255,255,0.18);
       padding: 7px 10px; font-size: 0.78rem; display: flex; align-items: center; gap: 8px;
     }
-    .app-sidebar-collapse-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
+    .app-sidebar-collapse-btn:hover { background: rgba(255,255,255,0.10); color: #fff; }
 
     .app-main { margin-left: var(--sidebar-width); transition: margin-left 0.18s ease; min-height: 100vh; }
     body.sidebar-collapsed .app-main { margin-left: var(--sidebar-width-collapsed); }
@@ -129,18 +179,38 @@
       width: 100%; padding: 7px 12px 7px 32px; border: 1px solid var(--color-border); border-radius: var(--radius-full);
       background: var(--color-surface-alt); font-size: 0.82rem;
     }
-    .app-topbar-search input:focus { outline: none; border-color: var(--color-primary); background: var(--color-surface); box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+    .app-topbar-search input:focus { outline: none; border-color: var(--color-primary); background: var(--color-surface); box-shadow: 0 0 0 3px rgba(78,42,132,0.1); }
     .app-topbar-search::before { content: "🔎"; position: absolute; left: 11px; top: 50%; transform: translateY(-50%); font-size: 0.78rem; opacity: 0.5; }
-    .app-topbar-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+    .app-topbar-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
     .app-icon-btn {
       background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm);
       padding: 6px 8px; font-size: 1rem; color: var(--color-text-secondary); position: relative; line-height: 1;
     }
-    .app-icon-btn:hover { background: var(--color-surface-alt); border-color: var(--color-border); }
+    .app-icon-btn:hover { background: var(--color-primary-soft); border-color: var(--color-primary-border); }
     .app-icon-btn .app-notif-dot {
       position: absolute; top: 3px; right: 4px; width: 7px; height: 7px; border-radius: 50%;
-      background: var(--color-accent); border: 1.5px solid var(--color-surface);
+      background: var(--color-danger); border: 1.5px solid var(--color-surface);
     }
+    /* Count badge — replaces the bare dot once a number is known. */
+    .app-notif-count {
+      position: absolute; top: 0; right: 0; min-width: 16px; height: 16px; padding: 0 4px;
+      border-radius: var(--radius-full); background: var(--color-danger); color: #fff;
+      font-size: 0.62rem; font-weight: 700; line-height: 16px; text-align: center;
+      border: 1.5px solid var(--color-surface);
+    }
+    /* Hamburger — the sidebar toggle the mockup puts at the top-left. */
+    .app-menu-btn {
+      background: transparent; border: none; color: var(--color-text-secondary);
+      font-size: 1.05rem; padding: 6px 8px; border-radius: var(--radius-sm); line-height: 1;
+    }
+    .app-menu-btn:hover { background: var(--color-primary-soft); color: var(--color-primary); }
+    .app-topbar-title { font-size: 0.95rem; font-weight: 700; color: var(--color-text); white-space: nowrap; }
+    .app-usage-pill {
+      display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius-full);
+      background: var(--color-primary-soft); border: 1px solid var(--color-primary-border);
+      color: var(--color-primary-hover); font-size: 0.78rem; font-weight: 600; white-space: nowrap;
+    }
+    .app-usage-pill:hover { background: #E2DBF4; }
     .app-user-menu { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 4px; border-radius: var(--radius-full); cursor: pointer; }
     .app-user-menu:hover { background: var(--color-surface-alt); }
     .app-user-avatar {
@@ -159,11 +229,126 @@
        active, it simply steps aside and the element's own display rules apply. */
     [data-view].view-hidden { display: none !important; }
 
+    /* ══════════════════════════════════════════════════════════════════
+       首页概览 (Home dashboard)
+       Every number here is fetched from the real APIs — there are no
+       placeholder figures. A metric that can't be sourced shows "—".
+       ══════════════════════════════════════════════════════════════════ */
+    .dash { display: flex; flex-direction: column; gap: 22px; }
+    .dash-hello-name { font-size: 1.5rem; font-weight: 800; color: var(--color-text); letter-spacing: -0.01em; }
+    .dash-hello-sub { font-size: 0.85rem; color: var(--color-text-tertiary); margin-top: 4px; }
+
+    .dash-section-title {
+      font-size: 1rem; font-weight: 700; color: var(--color-text); margin-bottom: 12px;
+    }
+
+    /* Quick actions — four entry points, each opening a view. */
+    .dash-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 14px; }
+    .dash-action {
+      display: flex; align-items: center; gap: 13px; padding: 16px 17px; cursor: pointer;
+      background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-xs); transition: box-shadow 0.14s, border-color 0.14s, transform 0.14s;
+    }
+    .dash-action:hover {
+      box-shadow: var(--shadow-md); border-color: var(--color-primary-border); transform: translateY(-1px);
+    }
+    .dash-action-icon {
+      width: 40px; height: 40px; border-radius: 10px; flex-shrink: 0; font-size: 1.15rem;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .dash-action-body { min-width: 0; flex: 1; }
+    /* These are <span>s inside a flex row — without display:block the name and
+       description collapse onto one line. */
+    .dash-action-name { display: block; font-size: 0.88rem; font-weight: 650; color: var(--color-text); }
+    .dash-action-desc {
+      display: block; font-size: 0.74rem; color: var(--color-text-tertiary); margin-top: 3px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .dash-action-arrow { color: var(--color-text-tertiary); font-size: 0.95rem; flex-shrink: 0; }
+    .dash-action:hover .dash-action-arrow { color: var(--color-primary); }
+
+    /* Stat tiles */
+    .dash-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
+    .dash-stat {
+      background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+      padding: 15px 16px; box-shadow: var(--shadow-xs); display: flex; align-items: center; gap: 12px;
+    }
+    .dash-stat-icon {
+      width: 36px; height: 36px; border-radius: 9px; flex-shrink: 0; font-size: 1rem;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .dash-stat-body { min-width: 0; }
+    .dash-stat-label { display: block; font-size: 0.72rem; color: var(--color-text-tertiary); font-weight: 500; }
+    .dash-stat-value {
+      font-size: 1.4rem; font-weight: 800; color: var(--color-text); line-height: 1.2; margin-top: 2px;
+      letter-spacing: -0.02em;
+    }
+    .dash-stat-unit { font-size: 0.68rem; color: var(--color-text-tertiary); font-weight: 500; margin-left: 3px; }
+
+    /* Icon tints — drawn only from the palette's accent set. */
+    .tint-purple { background: var(--color-primary-soft); color: var(--color-primary); }
+    .tint-blue   { background: #E4F0FA; color: var(--color-accent); }
+    .tint-green  { background: var(--color-success-soft); color: var(--color-success); }
+    .tint-amber  { background: var(--color-warn-soft); color: #A87C00; }
+    .tint-red    { background: var(--color-danger-soft); color: var(--color-danger); }
+    .tint-grey   { background: #F1F1F4; color: var(--color-text-tertiary); }
+
+    /* Recent-activity panels */
+    .dash-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(305px, 1fr)); gap: 16px; }
+    .dash-panel {
+      background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-xs); display: flex; flex-direction: column; overflow: hidden;
+    }
+    .dash-panel-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 14px 16px 11px; border-bottom: 1px solid var(--color-border-soft);
+    }
+    .dash-panel-title { font-size: 0.86rem; font-weight: 700; color: var(--color-text); }
+    .dash-panel-link {
+      font-size: 0.74rem; color: var(--color-primary); font-weight: 600; cursor: pointer;
+      background: none; border: none; padding: 0;
+    }
+    .dash-panel-link:hover { text-decoration: underline; }
+    .dash-panel-body { padding: 6px 8px 8px; display: flex; flex-direction: column; }
+    .dash-row {
+      display: flex; align-items: center; gap: 11px; padding: 9px 8px; border-radius: var(--radius-sm);
+    }
+    .dash-row:hover { background: var(--color-surface-alt); }
+    .dash-row-avatar {
+      width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.6rem; font-weight: 700; letter-spacing: -0.02em; overflow: hidden;
+    }
+    .dash-row-body { min-width: 0; flex: 1; overflow: hidden; }
+    .dash-row-title {
+      display: block; font-size: 0.8rem; font-weight: 600; color: var(--color-text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .dash-row-meta {
+      display: block; font-size: 0.7rem; color: var(--color-text-tertiary); margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .dash-badge {
+      flex-shrink: 0; font-size: 0.66rem; font-weight: 600; padding: 3px 8px;
+      border-radius: var(--radius-full); white-space: nowrap;
+    }
+    .dash-empty {
+      padding: 22px 12px; text-align: center; font-size: 0.78rem; color: var(--color-text-tertiary);
+    }
+    /* Skeleton shimmer while the dashboard's fetches are in flight. */
+    .dash-skel {
+      height: 11px; border-radius: 4px; margin: 11px 8px;
+      background: linear-gradient(90deg, #F0F0F3 25%, #F7F7F9 50%, #F0F0F3 75%);
+      background-size: 200% 100%; animation: dash-shimmer 1.3s infinite;
+    }
+    @keyframes dash-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
     @media (max-width: 860px) {
       .app-sidebar { width: var(--sidebar-width-collapsed); }
       .app-main { margin-left: var(--sidebar-width-collapsed); }
-      .app-sidebar .app-nav-label, .app-sidebar .app-brand-label { display: none; }
+      .app-sidebar .app-nav-label, .app-sidebar .app-brand-label, .app-sidebar-token { display: none; }
       .app-topbar-search { display: none; }
+      .app-topbar-title, .app-usage-pill span.pill-label { display: none; }
     }
 
     header.legacy-header { display: none; }
@@ -204,7 +389,7 @@
     }
     input[type="text"]:focus, input[type="date"]:focus, input[type="number"]:focus, select:focus, textarea:focus {
       outline: none; border-color: var(--color-primary);
-      box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+      box-shadow: 0 0 0 3px rgba(78,42,132,0.1);
     }
     :focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
 
@@ -232,8 +417,72 @@
     #crm-sidebar {
       width: 230px; flex-shrink: 0;
       background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;
-      max-height: 640px; display: flex; flex-direction: column; overflow: hidden;
+      /* Fill the viewport instead of a fixed 640px box, so long company and
+         contact lists show many more rows before needing to scroll. */
+      max-height: calc(100vh - 96px); display: flex; flex-direction: column; overflow: hidden;
       position: sticky; top: 16px;
+    }
+    /* Booth-map category checkboxes — same buckets the floor plan uses. */
+    .crm-cat-list { display: flex; flex-direction: column; gap: 1px; max-height: 210px; overflow-y: auto; }
+    .crm-cat-item {
+      display: flex; align-items: center; gap: 7px; font-size: 0.75rem; color: #374151;
+      padding: 4px 6px; border-radius: 4px; cursor: pointer; white-space: nowrap;
+    }
+    .crm-cat-item:hover { background: #eef0f4; }
+    .crm-cat-item input { width: 13px; height: 13px; margin: 0; flex-shrink: 0; accent-color: var(--color-primary); }
+    .crm-cat-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+    .crm-cat-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .crm-cat-count { font-size: 0.66rem; font-weight: 700; color: #9ca3af; flex-shrink: 0; }
+    .crm-show-toggle {
+      display: flex; align-items: center; gap: 7px; font-size: 0.75rem; color: #374151;
+      padding: 6px; border-radius: 4px; cursor: pointer; background: #fff;
+      border: 1px solid #e5e7eb;
+    }
+    .crm-show-toggle:hover { border-color: var(--color-primary-border); background: var(--color-primary-soft); }
+    .crm-show-toggle input { width: 13px; height: 13px; margin: 0; accent-color: var(--color-primary); }
+
+    /* Companies matching the active filters, with an inline Apollo lookup. */
+    .crm-co-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
+    .crm-co-item {
+      border: 1px solid transparent; border-radius: 6px; padding: 6px 7px; cursor: pointer;
+      background: #fff; transition: border-color .12s, background .12s;
+    }
+    .crm-co-item:hover { border-color: var(--color-primary-border); background: var(--color-primary-soft); }
+    .crm-co-item.open { border-color: var(--color-primary); background: var(--color-primary-soft); }
+    .crm-co-top { display: flex; align-items: center; gap: 6px; }
+    .crm-co-name {
+      flex: 1; min-width: 0; font-size: 0.75rem; font-weight: 600; color: #374151;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .crm-co-booth {
+      flex-shrink: 0; font-size: 0.62rem; font-weight: 700; color: var(--color-text-tertiary);
+      background: #f1f1f4; padding: 1px 5px; border-radius: 3px;
+    }
+    /* Contact count doubles as the "needs prospecting" signal. */
+    .crm-co-n { flex-shrink: 0; font-size: 0.64rem; font-weight: 700; padding: 1px 6px; border-radius: 999px; }
+    .crm-co-n.has { background: var(--color-success-soft); color: var(--color-success-text); }
+    .crm-co-n.none { background: #f1f1f4; color: #9ca3af; }
+    /* Tools stay hidden until hover so the result list reads as a list, not a
+       wall of buttons — the row itself is the primary action (open the booth). */
+    .crm-co-tools {
+      display: none; gap: 4px; margin-top: 5px; padding-top: 5px;
+      border-top: 1px dashed var(--color-border);
+    }
+    .crm-co-item:hover .crm-co-tools { display: flex; }
+    .crm-co-tool {
+      flex: 1; padding: 3px 0; font-size: 0.74rem; line-height: 1.2;
+      background: #fff; border: 1px solid var(--color-border); border-radius: 4px;
+      color: var(--color-text-secondary); cursor: pointer;
+    }
+    .crm-co-tool:hover { background: var(--color-primary-soft); border-color: var(--color-primary-border); }
+    /* Result header reads as an outcome, not another filter. */
+    .crm-result-head {
+      display: flex; justify-content: space-between; align-items: center;
+      color: var(--color-primary) !important;
+    }
+    .crm-result-count {
+      font-size: 0.72rem; font-weight: 800; color: var(--color-primary-hover);
+      background: var(--color-primary-soft); padding: 1px 8px; border-radius: 999px;
     }
     .crm-sb-inner  { overflow-y: auto; padding: 12px 12px 14px; flex: 1; }
     .crm-sb-title  { font-weight: 600; font-size: 0.8rem; color: #374151; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid #e5e7eb; }
@@ -256,23 +505,23 @@
     }
     .crm-sel-dropdown.open { display: block; }
     .crm-sel-opt { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; padding: 6px 8px; cursor: pointer; color: #374151; }
-    .crm-sel-opt:hover { background: #eff6ff; }
-    .crm-sel-opt.selected { background: #eff6ff; font-weight: 600; }
+    .crm-sel-opt:hover { background: #EDE9F7; }
+    .crm-sel-opt.selected { background: #EDE9F7; font-weight: 600; }
     .crm-sel-opt input[type="checkbox"] { flex-shrink: 0; margin: 0; }
     .crm-sel-opt .crm-sel-sub { font-size: 0.68rem; color: #9ca3af; font-weight: 400; }
     .crm-sel-empty { font-size: 0.72rem; color: #9ca3af; padding: 6px 8px; }
     .crm-sel-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
     .crm-sel-chip {
       display: inline-flex; align-items: center; gap: 6px;
-      background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe;
+      background: #EDE9F7; color: #3D1E6E; border: 1px solid #CFC4E8;
       border-radius: 5px; padding: 3px 7px; font-size: 0.72rem; max-width: 100%;
     }
     .crm-sel-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .crm-sel-chip button {
-      background: none; border: none; color: #1d4ed8; cursor: pointer;
+      background: none; border: none; color: #3D1E6E; cursor: pointer;
       font-size: 0.85rem; padding: 0; line-height: 1; flex-shrink: 0;
     }
-    .crm-sel-clearall { font-size: 0.68rem; color: #2563eb; cursor: pointer; font-weight: 600; text-transform: none; letter-spacing: 0; display: none; }
+    .crm-sel-clearall { font-size: 0.68rem; color: #4E2A84; cursor: pointer; font-weight: 600; text-transform: none; letter-spacing: 0; display: none; }
     .crm-sel-clearall.active { display: inline; }
     #crm-filter-summary { font-size: 0.78rem; color: #6b7280; margin-bottom: 8px; }
     /* Contact Discovery: search + search settings, feeding directly into the CRM below */
@@ -294,7 +543,7 @@
     }
     /* Email category badges */
     .badge-category { display:inline-block;padding:1px 7px;border-radius:10px;font-size:0.68rem;font-weight:600;white-space:nowrap; }
-    .cat-cold_outreach       { background:#dbeafe;color:#1e40af; }
+    .cat-cold_outreach       { background:#DDD5F0;color:#3D1E6E; }
     .cat-follow_up           { background:#fef9c3;color:#713f12; }
     .cat-conference_outreach { background:#ede9fe;color:#5b21b6; }
     .cat-partnership_discussion { background:#d1fae5;color:#065f46; }
@@ -346,7 +595,7 @@
       background: #f8fafc;
     }
     .upload-zone:hover, .upload-zone.drag-over {
-      border-color: #2563eb; background: #eff6ff;
+      border-color: #4E2A84; background: #EDE9F7;
     }
     .upload-zone input[type="file"] { display: none; }
     .upload-icon { font-size: 2rem; margin-bottom: 8px; color: #94a3b8; }
@@ -383,7 +632,7 @@
       background: #e5e7eb; border-radius: 4px; height: 8px; overflow: hidden;
     }
     .progress-bar-fill {
-      background: #2563eb; height: 100%;
+      background: #4E2A84; height: 100%;
       border-radius: 4px; transition: width 0.3s;
     }
     .progress-label { font-size: 0.8rem; color: #555; margin-bottom: 4px; }
@@ -397,7 +646,7 @@
       display: flex; align-items: center; gap: 8px;
     }
     @keyframes msg-slide-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
-    .msg-info { background: var(--color-primary-soft); border: 1px solid var(--color-primary-border); color: #1e40af; }
+    .msg-info { background: var(--color-primary-soft); border: 1px solid var(--color-primary-border); color: #3D1E6E; }
     .msg-warn { background: var(--color-warn-soft); border: 1px solid var(--color-warn-border); color: var(--color-warn-text); }
     .msg-error { background: var(--color-danger-soft); border: 1px solid var(--color-danger-border); color: var(--color-danger-text); }
     .msg-cache { background: var(--color-success-soft); border: 1px solid var(--color-success-border); color: var(--color-success-text); }
@@ -456,7 +705,7 @@
       display: inline-block; padding: 2px 8px;
       border-radius: 12px; font-size: 0.72rem; font-weight: 600;
     }
-    .badge-dm { background: #dbeafe; color: #1e40af; }
+    .badge-dm { background: #DDD5F0; color: #3D1E6E; }
     .badge-eb { background: #dcfce7; color: #166534; }
     .badge-ti { background: #fef3c7; color: #92400e; }
     .badge-ch { background: #f3e8ff; color: #6b21a8; }
@@ -466,7 +715,7 @@
     .conf-track { width: 56px; height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; }
     .conf-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, #22c55e, #84cc16); }
     .conf-fill.med { background: linear-gradient(90deg, #f59e0b, #eab308); }
-    .conf-fill.low { background: linear-gradient(90deg, #ef4444, #f97316); }
+    .conf-fill.low { background: linear-gradient(90deg, #ef4444, #2E86D8); }
     .conf-num { font-size: 0.75rem; color: #555; min-width: 24px; }
 
     .linkedin-link { color: #0a66c2; text-decoration: none; font-size: 0.8rem; }
@@ -483,7 +732,7 @@
     /* ── Spinner ── */
     .spinner {
       display: inline-block; width: 18px; height: 18px;
-      border: 2px solid #e5e7eb; border-top-color: #2563eb;
+      border: 2px solid #e5e7eb; border-top-color: #4E2A84;
       border-radius: 50%; animation: spin 0.6s linear infinite;
       vertical-align: middle; margin-right: 6px;
     }
@@ -537,7 +786,7 @@
       border-radius: 6px; padding: 9px 12px; font-size: 0.88rem; line-height: 1.5;
       font-family: inherit; resize: vertical;
     }
-    .draft-field:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.1); }
+    .draft-field:focus { outline: none; border-color: #4E2A84; box-shadow: 0 0 0 2px rgba(78,42,132,0.1); }
     .draft-meta-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; padding-bottom: 10px; border-bottom: 1px solid #e5e7eb; }
     .draft-status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
     .status-draft { background: #f3f4f6; color: #6b7280; }
@@ -567,7 +816,7 @@
       font-size: 0.82rem; padding: 6px 8px; border-radius: 5px; cursor: pointer; color: #374151;
     }
     .draft-library-item:hover { background: #f3f4f6; }
-    .draft-library-item.active { background: #eff6ff; font-weight: 600; }
+    .draft-library-item.active { background: #EDE9F7; font-weight: 600; }
     .draft-library-check { width: 16px; flex-shrink: 0; text-align: center; }
     .draft-library-check.exists { color: #16a34a; }
     .draft-library-check.missing { color: #d1d5db; }
@@ -587,19 +836,19 @@
     }
     .viewfinder img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .viewfinder .placeholder { color: #94a3b8; font-size: 0.82rem; text-align: center; padding: 0 20px; }
-    .corner { position: absolute; width: 20px; height: 20px; border: 2px solid #ea580c; opacity: 0.9; }
+    .corner { position: absolute; width: 20px; height: 20px; border: 2px solid #0F6CBD; opacity: 0.9; }
     .corner.tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
     .corner.tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
     .corner.bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
     .corner.br { bottom: 8px; right: 8px; border-left: none; border-top: none; }
     .scanline {
       position: absolute; left: 0; right: 0; height: 2px;
-      background: linear-gradient(90deg, transparent, #ea580c, transparent);
-      box-shadow: 0 0 10px 2px #ea580c; top: 0; display: none;
+      background: linear-gradient(90deg, transparent, #0F6CBD, transparent);
+      box-shadow: 0 0 10px 2px #0F6CBD; top: 0; display: none;
     }
     .scanning .scanline { display: block; animation: sweep 1.5s ease-in-out infinite; }
     @keyframes sweep { 0% { top: 6%; } 50% { top: 92%; } 100% { top: 6%; } }
-    .scan-status-line { font-size: 0.8rem; color: #ea580c; margin-bottom: 10px; min-height: 16px; }
+    .scan-status-line { font-size: 0.8rem; color: #0F6CBD; margin-bottom: 10px; min-height: 16px; }
     .scan-actions { display: flex; gap: 10px; margin-bottom: 16px; }
     .review-form { display: none; }
     .review-form.visible { display: block; }
@@ -632,25 +881,25 @@
     /* ── Usage bar (fixed bottom) ── */
     #usage-bar {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 500;
-      background: #1a2e4a; color: #c8d8eb;
+      background: #2E1550; color: #D6CCEA;
       padding: 7px 24px; font-size: 0.76rem;
       display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
-      border-top: 1px solid #243d5c;
+      border-top: 1px solid rgba(255,255,255,0.10);
     }
-    #usage-bar .u-label { color: #8ba3c0; font-weight: 700; text-transform: uppercase; font-size: 0.68rem; letter-spacing: 0.06em; margin-right: 2px; }
-    #usage-bar .u-cost  { color: #4ade80; font-weight: 700; }
-    #usage-bar .u-sep   { color: #3d5a7a; }
+    #usage-bar .u-label { color: #A794C9; font-weight: 700; text-transform: uppercase; font-size: 0.68rem; letter-spacing: 0.06em; margin-right: 2px; }
+    #usage-bar .u-cost  { color: #5FD79B; font-weight: 700; }
+    #usage-bar .u-sep   { color: #543A7A; }
     #usage-bar .u-reset {
-      margin-left: auto; background: none; border: 1px solid #3d5a7a;
-      color: #8ba3c0; padding: 3px 10px; border-radius: 4px;
+      margin-left: auto; background: none; border: 1px solid #543A7A;
+      color: #A794C9; padding: 3px 10px; border-radius: 4px;
       font-size: 0.72rem; cursor: pointer; transition: background 0.15s;
     }
-    #usage-bar .u-reset:hover { background: #243d5c; color: #fff; }
+    #usage-bar .u-reset:hover { background: #3F2168; color: #fff; }
 
     /* ── Customer Intelligence view ── */
     .intel-tabs { display:flex; gap:6px; border-bottom:1px solid #e5e7eb; margin-bottom:16px; }
     .intel-tab { background:none; border:none; padding:8px 14px; font-size:0.9rem; color:#6b7280; cursor:pointer; border-bottom:2px solid transparent; }
-    .intel-tab.active { color:#2563eb; border-bottom-color:#2563eb; font-weight:600; }
+    .intel-tab.active { color:#4E2A84; border-bottom-color:#4E2A84; font-weight:600; }
     .intel-section { border:1px solid #e5e7eb; border-radius:8px; padding:14px 16px; margin-bottom:14px; }
     .intel-section h3 { font-size:0.9rem; margin:0 0 10px; color:#111827; }
     .intel-cat { margin-bottom:12px; }
@@ -660,7 +909,7 @@
     .intel-chip button { border:none; background:none; cursor:pointer; font-size:0.74rem; color:#6b7280; padding:0 1px; line-height:1; }
     .intel-chip button:hover { color:#111827; }
     .intel-chip.src-user_confirmed { background:#ecfdf5; border-color:#6ee7b7; }
-    .intel-chip.src-manual { background:#eff6ff; border-color:#93c5fd; }
+    .intel-chip.src-manual { background:#EDE9F7; border-color:#93c5fd; }
     .intel-chip.src-ai_suggested { background:#fffbeb; border-color:#fcd34d; }
     .intel-chip.src-needs_review { background:#fff7ed; border-color:#fdba74; }
     .intel-chip.src-rejected { background:#f3f4f6; border-color:#d1d5db; color:#9ca3af; text-decoration:line-through; }
@@ -675,7 +924,7 @@
     /* inline CRM Company Intelligence sub-tabs */
     .intel-subtabs { display:flex; gap:4px; flex-wrap:wrap; margin:10px 0 0; }
     .intel-subtab { display:inline-flex; align-items:center; gap:8px; padding:5px 12px; border:1px solid #d1d5db; border-bottom:none; border-radius:8px 8px 0 0; background:#f3f4f6; cursor:pointer; font-size:0.82rem; color:#374151; }
-    .intel-subtab.active { background:#fff; color:#2563eb; font-weight:600; border-color:#2563eb; position:relative; top:1px; }
+    .intel-subtab.active { background:#fff; color:#4E2A84; font-weight:600; border-color:#4E2A84; position:relative; top:1px; }
     .intel-subtab .st-close { color:#9ca3af; font-size:0.95rem; line-height:1; }
     .intel-subtab .st-close:hover { color:#ef4444; }
     #crm-intel-panel { border:1px solid #e5e7eb; border-radius:0 8px 8px 8px; padding:14px; background:#fdfdfd; }
@@ -690,7 +939,7 @@
     .em-subtitle { font-size:0.78rem; font-weight:600; color:#6b7280; text-transform:uppercase; letter-spacing:.03em; margin:14px 0 4px; }
     .em-badge { font-size:0.72rem; font-weight:600; padding:3px 9px; border-radius:12px; white-space:nowrap; }
     .em-badge.gray { background:#f3f4f6; color:#6b7280; } .em-badge.green { background:#ecfdf5; color:#047857; }
-    .em-badge.amber { background:#fffbeb; color:#b45309; } .em-badge.red { background:#fee2e2; color:#b91c1c; } .em-badge.blue { background:#eff6ff; color:#2563eb; }
+    .em-badge.amber { background:#fffbeb; color:#b45309; } .em-badge.red { background:#fee2e2; color:#b91c1c; } .em-badge.blue { background:#EDE9F7; color:#4E2A84; }
     .em-result { font-size:0.78rem; margin-top:8px; }
     /* Simplified OAuth wizard + status card */
     .em-wizard { display:flex; flex-direction:column; gap:16px; max-width:520px; margin-top:6px; }
@@ -717,16 +966,16 @@
     .em-check-item .k { min-width:150px; color:#374151; }
     .em-check-item.done .k { color:#111827; }
     .em-check-item .v { color:#6b7280; }
-    .em-nextstep { font-size:0.88rem; font-weight:600; color:#1d4ed8; background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; padding:9px 12px; margin:8px 0 12px; }
+    .em-nextstep { font-size:0.88rem; font-weight:600; color:#3D1E6E; background:#EDE9F7; border:1px solid #CFC4E8; border-radius:8px; padding:9px 12px; margin:8px 0 12px; }
     .em-nextstep:empty { display:none; }
-    .em-badge.amber-blue { background:#eff6ff; color:#1d4ed8; }
+    .em-badge.amber-blue { background:#EDE9F7; color:#3D1E6E; }
     /* ── Phase 1: Compose header, chips, sticky action bar ── */
     .compose-header { border:1px solid #e5e7eb; border-radius:10px; overflow:hidden; margin:10px 0; }
     .compose-row { display:flex; align-items:center; gap:10px; padding:7px 12px; border-bottom:1px solid #f0f0f0; }
     .compose-row:last-child { border-bottom:none; }
     .compose-row > label { flex:0 0 54px; font-size:0.78rem; color:#6b7280; font-weight:600; }
     .compose-from { font-size:0.9rem; color:#111827; font-weight:600; }
-    .compose-from-email { color:#2563eb; font-weight:600; }
+    .compose-from-email { color:#4E2A84; font-weight:600; }
     .compose-from-warn { color:#b45309; font-weight:500; font-size:0.82rem; }
     .compose-subject { flex:1; border:none; outline:none; font-size:0.95rem; font-weight:600; color:#111827; background:transparent; padding:2px 0; }
     .chip-input { flex:1; display:flex; flex-wrap:wrap; gap:5px; align-items:center; min-height:26px; }
@@ -738,7 +987,7 @@
     /* delivery status badges */
     .draft-status-badge.del-green { background:#ecfdf5; color:#047857; }
     .draft-status-badge.del-amber { background:#fffbeb; color:#b45309; }
-    .draft-status-badge.del-blue { background:#eff6ff; color:#2563eb; }
+    .draft-status-badge.del-blue { background:#EDE9F7; color:#4E2A84; }
     .draft-status-badge.del-red { background:#fee2e2; color:#b91c1c; }
     /* sticky action bar */
     .draft-actionbar { position:sticky; bottom:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap;
@@ -748,8 +997,8 @@
     .ab-btn { border:1px solid #d1d5db; background:#fff; color:#374151; border-radius:8px; padding:8px 14px; font-size:0.85rem; font-weight:600; cursor:pointer; }
     .ab-btn:hover { background:#f9fafb; }
     .ab-btn:disabled { opacity:0.6; cursor:default; }
-    .ab-send { background:#ea580c; border-color:#ea580c; color:#fff; padding:8px 20px; }
-    .ab-send:hover { background:#c2410c; }
+    .ab-send { background:#0F6CBD; border-color:#0F6CBD; color:#fff; padding:8px 20px; }
+    .ab-send:hover { background:#0C579A; }
     /* preview */
     .preview-email { border:1px solid #e5e7eb; border-radius:10px; padding:16px; }
     .preview-line { display:flex; gap:10px; font-size:0.84rem; padding:2px 0; }
@@ -792,42 +1041,73 @@
 <div class="app-shell">
   <aside class="app-sidebar" id="app-sidebar">
     <div class="app-sidebar-brand">
-      <span class="app-sidebar-brand-mark">📇</span>
-      <span class="app-brand-label">Apollo CRM</span>
+      <span class="app-sidebar-brand-mark">SKQ</span>
+      <span class="app-brand-label">
+        <span class="app-brand-name">SKQ</span>
+        <span class="app-brand-sub">CRM System</span>
+      </span>
     </div>
     <nav class="app-sidebar-nav">
-      <div class="app-nav-item" data-nav-view="search" title="Search &amp; Scan">
-        <span class="app-nav-icon">🔍</span><span class="app-nav-label">Search &amp; Scan</span>
+      <div class="app-nav-item" data-nav-view="home" title="首页概览 · Home">
+        <span class="app-nav-icon">🏠</span><span class="app-nav-label">首页概览</span>
       </div>
-      <div class="app-nav-item" data-nav-view="crm" title="CRM">
-        <span class="app-nav-icon">🗂️</span><span class="app-nav-label">CRM</span>
+      <div class="app-nav-item" data-nav-view="booth-map" title="展会地图 · Battery Show 2026">
+        <span class="app-nav-icon">🗺️</span><span class="app-nav-label">展会地图</span>
       </div>
-      <div class="app-nav-item" data-nav-view="intelligence" title="Customer Intelligence">
-        <span class="app-nav-icon">🧭</span><span class="app-nav-label">Intelligence</span>
+      <div class="app-nav-item" data-nav-view="account-research" title="账户研究报告 · Account Intelligence Report">
+        <span class="app-nav-icon">📄</span><span class="app-nav-label">账户研究报告</span>
       </div>
-      <div class="app-nav-item" data-nav-view="ai-usage" title="AI Usage & Cost">
-        <span class="app-nav-icon">📊</span><span class="app-nav-label">AI Usage</span>
+      <div class="app-nav-item" data-nav-view="search" title="AI 邮件起草 · Search &amp; Scan">
+        <span class="app-nav-icon">✉️</span><span class="app-nav-label">AI 邮件起草</span>
       </div>
-      <div class="app-nav-item" data-nav-view="settings" title="Settings">
-        <span class="app-nav-icon">⚙️</span><span class="app-nav-label">Settings</span>
+      <div class="app-nav-item" data-nav-view="crm" title="CRM 管理 · Contacts &amp; Companies">
+        <span class="app-nav-icon">👥</span><span class="app-nav-label">CRM 管理</span>
+      </div>
+      <div class="app-nav-item" data-nav-view="intelligence" title="客户情报 · Customer Intelligence">
+        <span class="app-nav-icon">🧭</span><span class="app-nav-label">客户情报</span>
+      </div>
+      <div class="app-nav-item" data-nav-view="ai-usage" title="数据分析 · AI Usage &amp; Cost">
+        <span class="app-nav-icon">📊</span><span class="app-nav-label">数据分析</span>
+      </div>
+      <div class="app-nav-item" data-nav-view="settings" title="设置中心 · Settings">
+        <span class="app-nav-icon">⚙️</span><span class="app-nav-label">设置中心</span>
       </div>
     </nav>
+
+    <div class="app-sidebar-token" id="app-token-card">
+      <div class="app-token-head">本月 Token 使用情况</div>
+      <div class="app-token-body">
+        <div class="app-token-ring" id="app-token-ring" style="--pct:0%;">
+          <span class="app-token-pct" id="app-token-pct">—</span>
+        </div>
+        <div class="app-token-nums">
+          <div class="app-token-used" id="app-token-used">—</div>
+          <div class="app-token-meta" id="app-token-meta">读取中…</div>
+        </div>
+      </div>
+      <button class="app-token-link" id="app-token-link">查看详情 →</button>
+    </div>
+
     <div class="app-sidebar-footer">
       <button class="app-sidebar-collapse-btn" id="app-sidebar-collapse-btn" title="Collapse sidebar">
-        <span id="app-sidebar-collapse-icon">◀</span><span class="app-nav-label">Collapse</span>
+        <span id="app-sidebar-collapse-icon">◀</span><span class="app-nav-label">收起侧栏</span>
       </button>
     </div>
   </aside>
 
   <div class="app-main">
     <header class="app-topbar">
-      <div class="app-breadcrumb">Apollo CRM <span>›</span> <b id="app-breadcrumb-current">Search &amp; Scan</b></div>
+      <button class="app-menu-btn" id="app-menu-btn" title="收起/展开侧栏">☰</button>
+      <span class="app-topbar-title">SKQ CRM System</span>
+      <div class="app-breadcrumb"><span>›</span> <b id="app-breadcrumb-current">首页概览</b></div>
       <div class="app-topbar-search">
-        <input type="text" id="app-global-search" placeholder="Search contacts, companies…" />
+        <input type="text" id="app-global-search" placeholder="搜索联系人、公司、报告、邮件…" />
       </div>
       <div class="app-topbar-actions">
-        <button class="btn-scan-card" id="open-scan-modal-btn">📇 Scan Business Card</button>
-        <button class="app-icon-btn" id="app-notifications-btn" title="Notifications">🔔<span class="app-notif-dot" id="app-notif-dot" style="display:none;"></span></button>
+        <button class="btn-scan-card" id="open-scan-modal-btn">📇 扫描名片</button>
+        <button class="app-icon-btn" id="app-notifications-btn" title="通知">🔔<span class="app-notif-dot" id="app-notif-dot" style="display:none;"></span></button>
+        <button class="app-icon-btn" id="app-help-btn" title="帮助">❔</button>
+        <button class="app-usage-pill" id="app-usage-pill" title="AI 使用与成本">📊 <span class="pill-label">AI 使用</span></button>
         <div class="app-user-menu" id="app-user-menu" title="Account">
           <span class="app-user-avatar" id="app-user-avatar">U</span>
           <span class="app-user-menu-name" id="app-user-menu-name">Your Profile</span>
@@ -836,6 +1116,133 @@
     </header>
 
 <div class="container app-view-container">
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       首页概览 · Home dashboard
+       Cards are inert markup; renderDashboard() in app.js fills every
+       figure from the live APIs. Nothing here is hard-coded sample data.
+       ══════════════════════════════════════════════════════════════════ -->
+  <div class="view-hidden dash" data-view="home">
+
+    <div>
+      <div class="dash-hello-name">欢迎回来，<span id="dash-user">…</span> 👋</div>
+      <div class="dash-hello-sub">这是您今天的工作概览</div>
+    </div>
+
+    <div class="dash-actions">
+      <div class="dash-action" data-goto="booth-map">
+        <span class="dash-action-icon tint-purple">🗺️</span>
+        <span class="dash-action-body">
+          <span class="dash-action-name">展会地图</span>
+          <span class="dash-action-desc">查看展位，规划行程</span>
+        </span>
+        <span class="dash-action-arrow">→</span>
+      </div>
+      <div class="dash-action" data-goto="account-research">
+        <span class="dash-action-icon tint-blue">📄</span>
+        <span class="dash-action-body">
+          <span class="dash-action-name">账户研究报告</span>
+          <span class="dash-action-desc">AI 生成账户研究报告</span>
+        </span>
+        <span class="dash-action-arrow">→</span>
+      </div>
+      <div class="dash-action" data-goto="search">
+        <span class="dash-action-icon tint-purple">✉️</span>
+        <span class="dash-action-body">
+          <span class="dash-action-name">AI 邮件起草</span>
+          <span class="dash-action-desc">撰写和管理邮件</span>
+        </span>
+        <span class="dash-action-arrow">→</span>
+      </div>
+      <div class="dash-action" data-goto="crm">
+        <span class="dash-action-icon tint-green">👥</span>
+        <span class="dash-action-body">
+          <span class="dash-action-name">CRM 管理</span>
+          <span class="dash-action-desc">管理联系人与公司</span>
+        </span>
+        <span class="dash-action-arrow">→</span>
+      </div>
+    </div>
+
+    <div>
+      <div class="dash-section-title">工作概览</div>
+      <div class="dash-stats">
+        <div class="dash-stat">
+          <span class="dash-stat-icon tint-purple">🏢</span>
+          <span class="dash-stat-body">
+            <span class="dash-stat-label">公司总数</span>
+            <div class="dash-stat-value" id="dash-companies">—</div>
+          </span>
+        </div>
+        <div class="dash-stat">
+          <span class="dash-stat-icon tint-blue">👤</span>
+          <span class="dash-stat-body">
+            <span class="dash-stat-label">联系人</span>
+            <div class="dash-stat-value" id="dash-contacts">—</div>
+          </span>
+        </div>
+        <div class="dash-stat">
+          <span class="dash-stat-icon tint-green">📄</span>
+          <span class="dash-stat-body">
+            <span class="dash-stat-label">已生成报告</span>
+            <div class="dash-stat-value" id="dash-reports">—</div>
+          </span>
+        </div>
+        <div class="dash-stat">
+          <span class="dash-stat-icon tint-amber">✉️</span>
+          <span class="dash-stat-body">
+            <span class="dash-stat-label">邮件草稿</span>
+            <div class="dash-stat-value" id="dash-drafts">—</div>
+          </span>
+        </div>
+        <div class="dash-stat">
+          <span class="dash-stat-icon tint-purple">🤖</span>
+          <span class="dash-stat-body">
+            <span class="dash-stat-label">AI 调用（本月）</span>
+            <div class="dash-stat-value" id="dash-calls">—</div>
+          </span>
+        </div>
+        <div class="dash-stat">
+          <span class="dash-stat-icon tint-grey">💲</span>
+          <span class="dash-stat-body">
+            <span class="dash-stat-label">本月成本</span>
+            <div class="dash-stat-value" id="dash-cost">—</div>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="dash-panels">
+      <div class="dash-panel">
+        <div class="dash-panel-head">
+          <span class="dash-panel-title">最近生成的报告</span>
+          <button class="dash-panel-link" data-goto="account-research">查看全部</button>
+        </div>
+        <div class="dash-panel-body" id="dash-recent-reports">
+          <div class="dash-skel"></div><div class="dash-skel"></div><div class="dash-skel"></div>
+        </div>
+      </div>
+      <div class="dash-panel">
+        <div class="dash-panel-head">
+          <span class="dash-panel-title">最近添加的联系人</span>
+          <button class="dash-panel-link" data-goto="crm">查看全部</button>
+        </div>
+        <div class="dash-panel-body" id="dash-recent-contacts">
+          <div class="dash-skel"></div><div class="dash-skel"></div><div class="dash-skel"></div>
+        </div>
+      </div>
+      <div class="dash-panel">
+        <div class="dash-panel-head">
+          <span class="dash-panel-title">最近 AI 活动</span>
+          <button class="dash-panel-link" data-goto="ai-usage">查看全部</button>
+        </div>
+        <div class="dash-panel-body" id="dash-recent-ai">
+          <div class="dash-skel"></div><div class="dash-skel"></div><div class="dash-skel"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
 
   <!-- ── Sender profile card ── -->
   <div class="card view-hidden" data-view="settings">
@@ -1241,7 +1648,7 @@
             <div class="crm-sb-title">Quick Browse</div>
 
             <div class="crm-sb-section" style="display:flex;justify-content:space-between;align-items:center;">
-              <span>Browse by Company</span>
+              <span>① 公司 · Company</span>
               <span id="crm-sel-account-clearall" class="crm-sel-clearall">Clear all</span>
             </div>
             <div class="crm-sel-wrap">
@@ -1252,7 +1659,7 @@
             <button type="button" class="btn-sm btn-ghost" id="crm-merge-accounts-btn" style="display:none;margin-top:6px;width:100%;">Merge Selected</button>
 
             <div class="crm-sb-section" style="display:flex;justify-content:space-between;align-items:center;">
-              <span>Browse by Contact Name</span>
+              <span>② 联系人 · Contact</span>
               <span id="crm-sel-contact-clearall" class="crm-sel-clearall">Clear all</span>
             </div>
             <div class="crm-sel-wrap">
@@ -1260,6 +1667,27 @@
               <div id="crm-sel-contact-dropdown" class="crm-sel-dropdown"></div>
             </div>
             <div id="crm-sel-contact-chips" class="crm-sel-chips"></div>
+
+            <!-- ③ Show — company-level membership. Picking one scopes the
+                 categories below to that show's taxonomy. -->
+            <div class="crm-sb-section">③ 展会 · Show</div>
+            <div id="crm-show-list" class="crm-cat-list" style="max-height:120px;"></div>
+
+            <!-- ④ Categories, scoped to the selected show -->
+            <div class="crm-sb-section" style="display:flex;justify-content:space-between;align-items:center;">
+              <span id="crm-cat-heading">④ 分类 · Category</span>
+              <span id="crm-cat-clearall" class="crm-sel-clearall">Clear all</span>
+            </div>
+            <div id="crm-cat-list" class="crm-cat-list"></div>
+
+            <!-- ⑤ Result of ①–④, not another filter. Clicking a row opens that
+                 company's booth on the floor plan. -->
+            <div class="crm-sb-section crm-result-head">
+              <span>⑤ 匹配公司 · Results</span>
+              <span id="crm-co-count" class="crm-result-count">—</span>
+            </div>
+            <input type="text" id="crm-co-search" class="crm-sel-input" placeholder="在结果中查找…" autocomplete="off" style="margin-bottom:6px;" />
+            <div id="crm-co-list" class="crm-co-list"></div>
           </div>
         </aside>
 
@@ -1305,6 +1733,23 @@
       </div>
       <div id="intel-duplicates"><div style="color:#9ca3af;font-size:0.85rem;">Loading…</div></div>
     </div>
+  </div>
+
+  <!-- ── Battery Show booth map view (ported Skeqi) ── -->
+  <div class="card view-hidden" data-view="booth-map" style="padding:0;overflow:hidden;">
+    <iframe id="bm-frame" title="Battery Show 2026 Booth Map"
+            style="display:block;width:100%;height:calc(100vh - 132px);border:0;"
+            referrerpolicy="same-origin"></iframe>
+  </div>
+
+  <!-- ── Account Intelligence Report view (ported Skeqi-AccountResearch) ── -->
+  <!-- No .card wrapper here: this module supplies its own page ground and
+       white cards, so an outer white card would double-frame it. The Booth
+       Map keeps its card because its own chrome is white. -->
+  <div class="view-hidden" data-view="account-research" style="margin-bottom:20px;">
+    <iframe id="ar-frame" title="Account Intelligence Report"
+            style="display:block;width:100%;height:calc(100vh - 112px);border:0;background:transparent;"
+            referrerpolicy="same-origin"></iframe>
   </div>
 
   <!-- ── AI Usage dashboard view ── -->
@@ -1643,7 +2088,7 @@
       <div id="modal-intel-header" style="display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;flex-wrap:wrap;">
         <span style="font-weight:600;font-size:0.86rem;color:#374151;">
           Company Intelligence &amp; Tags
-          <span id="modal-intel-badge" style="font-weight:600;color:#2563eb;font-size:0.76rem;margin-left:6px;"></span>
+          <span id="modal-intel-badge" style="font-weight:600;color:#4E2A84;font-size:0.76rem;margin-left:6px;"></span>
         </span>
         <span style="display:flex;gap:8px;align-items:center;">
           <button class="btn-sm btn-ghost" id="modal-intel-viewedit" type="button">View / Edit Tags</button>
@@ -1843,7 +2288,7 @@
 
     <!-- ── Mode toggle ── -->
     <div class="tabs" style="display:flex;gap:6px;margin-bottom:16px;">
-      <button class="tab-btn active" id="mode-single-btn" style="flex:1;padding:9px;border-radius:6px;border:1px solid #d1d5db;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;">Single Card (Camera)</button>
+      <button class="tab-btn active" id="mode-single-btn" style="flex:1;padding:9px;border-radius:6px;border:1px solid #d1d5db;background:#4E2A84;color:#fff;font-weight:600;cursor:pointer;">Single Card (Camera)</button>
       <button class="tab-btn" id="mode-batch-btn" style="flex:1;padding:9px;border-radius:6px;border:1px solid #d1d5db;background:#fff;color:#555;font-weight:600;cursor:pointer;">Batch Upload</button>
     </div>
 

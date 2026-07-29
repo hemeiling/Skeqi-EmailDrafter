@@ -7,3 +7,16 @@ contacts.db-*
 !.env.example
 .DS_Store
 .venv/
+
+# 展会数据刷新的中间产物与备份
+out/
+
+# 文档成品与截图：体积大且可由 docs/build/ 的脚本重新生成，
+# 进版本库只会让 git 历史膨胀（.docx 27M + 截图 24M + 图表 5M）
+docs/screenshots/
+docs/*.docx
+docs/diagrams/
+docs/diagrams2/
+
+# 从会话临时目录抢救出的早期文档快照 —— 非最终版，待人工确认后再决定是否入库
+docs/_recovered/

@@ -236,7 +236,10 @@ async function searchPeople(company, apiKey, page = 1, titleFilters) {
     body: JSON.stringify(primaryPayload)
   });
   recordApolloPeopleCall();
-  const data = res.ok ? await res.json() : {};
+  // Parse the body even on failure — Apollo puts the actionable reason there
+  // (plan restriction vs bad key vs rate limit) and discarding it leaves the
+  // caller with nothing but a status code to guess from.
+  const data = await res.json().catch(() => ({}));
   if (res.ok && data.people && data.people.length) {
     return { status: res.status, data };
   }
@@ -253,7 +256,7 @@ async function searchPeople(company, apiKey, page = 1, titleFilters) {
     body: JSON.stringify(fallbackPayload)
   });
   recordApolloPeopleCall();
-  const data2 = res2.ok ? await res2.json() : {};
+  const data2 = await res2.json().catch(() => ({}));
   return { status: res2.status, data: data2 };
 }
 
@@ -319,7 +322,16 @@ async function doCompanySearch(company, apiKey, options = {}) {
     return { contacts, orgs: [], total: totalEntries, page };
   }
 
-  const fallbackMsg = `People search returned HTTP ${firstPageResult.status} (often indicates a free-plan restriction). Showing org-level results instead.`;
+  // Apollo states the reason plainly in the body ("…not included in your Free
+  // plan…"), so pass that through instead of guessing from the status code —
+  // a plan block and a bad key look identical otherwise, and only one of them
+  // is worth spending time on.
+  const apolloSaid = (firstPageResult.data
+    && (firstPageResult.data.error || firstPageResult.data.error_message
+        || firstPageResult.data.error_code)) || '';
+  const fallbackMsg = apolloSaid
+    ? `Apollo 人员搜索不可用（HTTP ${firstPageResult.status}）：${String(apolloSaid).slice(0, 220)} — 已改为返回公司级结果。`
+    : `Apollo 人员搜索返回 HTTP ${firstPageResult.status}，已改为返回公司级结果。`;
   let orgResult;
   try {
     orgResult = await searchOrgs(company, apiKey);
