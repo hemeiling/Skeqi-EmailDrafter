@@ -172,15 +172,6 @@
     }
     .app-breadcrumb { font-size: 0.8rem; color: var(--color-text-tertiary); display: flex; align-items: center; gap: 6px; }
     .app-breadcrumb b { color: var(--color-text); font-weight: 600; }
-    .app-topbar-search {
-      flex: 1; max-width: 420px; position: relative; margin-left: 8px;
-    }
-    .app-topbar-search input {
-      width: 100%; padding: 7px 12px 7px 32px; border: 1px solid var(--color-border); border-radius: var(--radius-full);
-      background: var(--color-surface-alt); font-size: 0.82rem;
-    }
-    .app-topbar-search input:focus { outline: none; border-color: var(--color-primary); background: var(--color-surface); box-shadow: 0 0 0 3px rgba(78,42,132,0.1); }
-    .app-topbar-search::before { content: "🔎"; position: absolute; left: 11px; top: 50%; transform: translateY(-50%); font-size: 0.78rem; opacity: 0.5; }
     .app-topbar-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
     .app-icon-btn {
       background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm);
@@ -347,7 +338,6 @@
       .app-sidebar { width: var(--sidebar-width-collapsed); }
       .app-main { margin-left: var(--sidebar-width-collapsed); }
       .app-sidebar .app-nav-label, .app-sidebar .app-brand-label, .app-sidebar-token { display: none; }
-      .app-topbar-search { display: none; }
       .app-topbar-title, .app-usage-pill span.pill-label { display: none; }
     }
 
@@ -362,6 +352,10 @@
     .btn-scan-card:hover { background: var(--color-accent-hover); }
 
     .container { max-width: 1280px; margin: 0 auto; padding: 24px 32px; }
+    /* List views are data surfaces, not reading surfaces: 1280px is a
+       comfortable column for forms and a waste of ~480px on a 1920 display
+       when the content is a filter rail plus an eight-column table. */
+    body.view-wide .container { max-width: 1680px; }
 
     .card {
       background: var(--color-surface); border: 1px solid var(--color-border);
@@ -411,16 +405,201 @@
     .btn-saved:hover:not(:disabled) { background: var(--color-success-hover); }
     .btn-danger { background: var(--color-danger); color: #fff; }
     .btn-danger:hover:not(:disabled) { background: var(--color-danger-hover); }
-    /* CRM layout */
-    .crm-flex-wrap { display: flex; gap: 16px; align-items: flex-start; }
-    .crm-main-col  { flex: 1; min-width: 0; }
+    /* ══════════════════════════════════════════════════════════════════
+       CRM workspace — one object (contacts), one filter rail, one table.
+
+       Layout follows the Salesforce/HubSpot list-view convention: a page
+       header owning the primary actions, a persistent filter rail, and the
+       record table as the only competitor for attention. Acquisition
+       (Apollo search) and account qualification (Company Intelligence) are
+       separate jobs and live in a modal and a drawer respectively, so the
+       working surface stays a working surface.
+       ══════════════════════════════════════════════════════════════════ */
+
+    /* ── Page header ── */
+    .crm-page-head {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .crm-page-title {
+      font-size: 1.32rem; font-weight: 700; letter-spacing: -0.01em;
+      color: var(--color-text); margin: 0;
+    }
+    .crm-count-pill {
+      font-size: 0.74rem; font-weight: 600; color: var(--color-text-secondary);
+      background: var(--color-surface-alt); border: 1px solid var(--color-border);
+      border-radius: var(--radius-full); padding: 2px 10px; white-space: nowrap;
+    }
+    .crm-head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+    /* ── Two-pane body: filter rail + record table ── */
+    .crm-layout {
+      display: grid; grid-template-columns: 268px minmax(0, 1fr); gap: 18px;
+      align-items: start;
+    }
+    .crm-main-col { min-width: 0; }
+
+    /* Filter rail. Sticky so filters stay reachable while paging a long
+       table — the single most-repeated interaction on this page. */
     #crm-sidebar {
-      width: 230px; flex-shrink: 0;
-      background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;
-      /* Fill the viewport instead of a fixed 640px box, so long company and
-         contact lists show many more rows before needing to scroll. */
-      max-height: calc(100vh - 96px); display: flex; flex-direction: column; overflow: hidden;
-      position: sticky; top: 16px;
+      background: var(--color-surface); border: 1px solid var(--color-border);
+      border-radius: var(--radius-md); box-shadow: var(--shadow-xs);
+      max-height: calc(100vh - var(--topbar-height) - 32px);
+      display: flex; flex-direction: column; overflow: hidden;
+      position: sticky; top: calc(var(--topbar-height) + 16px);
+    }
+    .crm-rail-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 12px 14px; border-bottom: 1px solid var(--color-border);
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--color-text-secondary); flex-shrink: 0;
+    }
+    .crm-rail-clear {
+      background: none; border: none; padding: 0; font-size: 0.7rem; font-weight: 600;
+      color: var(--color-primary); text-transform: none; letter-spacing: 0;
+    }
+    .crm-rail-clear:hover { text-decoration: underline; background: none; }
+    .crm-rail-body { overflow-y: auto; padding: 12px 14px 14px; flex: 1; }
+    .crm-rail-group + .crm-rail-group { margin-top: 15px; }
+    .crm-rail-label {
+      display: flex; align-items: center; justify-content: space-between; gap: 6px;
+      font-size: 0.72rem; font-weight: 600; color: var(--color-text-secondary);
+      margin-bottom: 5px;
+    }
+    /* Results block is pinned to the rail's foot: it is an output of the
+       filters above it, not another input, so it must not scroll away
+       among them. */
+    .crm-rail-results {
+      border-top: 1px solid var(--color-border); padding: 11px 14px 12px;
+      background: #fafafa; flex-shrink: 0;
+    }
+    .crm-rail-results .crm-rail-label { margin-bottom: 6px; }
+    /* Bounded so the results block can never crowd the filters it derives
+       from; the list scrolls internally. */
+    .crm-rail-results .crm-co-list { max-height: 210px; }
+    .crm-rail-hint { font-size: 0.66rem; color: var(--color-text-tertiary); font-weight: 400; }
+
+    /* "More filters" disclosure — fields used occasionally, one click away. */
+    .crm-more { margin-top: 16px; border-top: 1px solid var(--color-border); padding-top: 12px; }
+    .crm-more > summary {
+      list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px;
+      font-size: 0.72rem; font-weight: 600; color: var(--color-text-secondary); user-select: none;
+    }
+    .crm-more > summary::-webkit-details-marker { display: none; }
+    .crm-more > summary::before { content: "▸"; font-size: 0.62rem; color: var(--color-text-tertiary); transition: transform .12s; }
+    .crm-more[open] > summary::before { transform: rotate(90deg); }
+    .crm-more-body { margin-top: 12px; }
+    .crm-more-body .crm-rail-group + .crm-rail-group { margin-top: 12px; }
+    .crm-more-body input[type="text"], .crm-more-body select {
+      width: 100%; box-sizing: border-box; font-size: 12px; padding: 6px 8px;
+      border: 1px solid #d1d5db; border-radius: var(--radius-sm); background: #fff;
+    }
+
+    /* ── Table toolbar ── */
+    .crm-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .crm-toolbar-search { position: relative; flex: 1; min-width: 0; }
+    .crm-toolbar-search input {
+      width: 100%; box-sizing: border-box; padding: 8px 12px 8px 32px;
+      border: 1px solid #d1d5db; border-radius: var(--radius-md); font-size: 0.86rem;
+    }
+    .crm-toolbar-search::before {
+      content: "🔍"; position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+      font-size: 0.78rem; opacity: 0.5; pointer-events: none;
+    }
+
+    /* Active-filter chips: the single honest answer to "what is narrowing
+       this table right now?" — previously split across two panels that
+       never agreed. */
+    #crm-filter-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+    #crm-filter-summary:empty { display: none; }
+    .crm-fchip {
+      display: inline-flex; align-items: center; gap: 6px; max-width: 300px;
+      background: var(--color-primary-soft); color: #3D1E6E; border: 1px solid #CFC4E8;
+      border-radius: var(--radius-full); padding: 3px 6px 3px 10px; font-size: 0.72rem;
+    }
+    .crm-fchip b { font-weight: 600; }
+    .crm-fchip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .crm-fchip button {
+      background: none; border: none; color: #3D1E6E; font-size: 0.9rem; line-height: 1;
+      padding: 0 3px; flex-shrink: 0; opacity: 0.65;
+    }
+    .crm-fchip button:hover { opacity: 1; background: none; }
+
+    /* ── Two-line table cells: same information, half the columns ── */
+    .cell-primary { font-size: 0.82rem; color: var(--color-text); line-height: 1.35; }
+    .cell-sub { font-size: 0.71rem; color: var(--color-text-tertiary); line-height: 1.35; margin-top: 2px; }
+    .col-actions { width: 1%; white-space: nowrap; }
+
+    /* ── Contextual bulk bar (Gmail/Linear pattern): appears on selection,
+       so drafting controls never occupy space at rest. ── */
+    .crm-bulkbar {
+      position: fixed; bottom: 54px; left: calc(var(--sidebar-width) + 24px); right: 24px;
+      z-index: 240; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      background: #241338; color: #fff; border-radius: var(--radius-lg);
+      padding: 10px 14px; box-shadow: var(--shadow-lg);
+      transition: left 0.18s ease;
+    }
+    body.sidebar-collapsed .crm-bulkbar { left: calc(var(--sidebar-width-collapsed) + 24px); }
+    .crm-bulkbar[hidden] { display: none; }
+    .crm-bulk-count { font-size: 0.8rem; font-weight: 700; white-space: nowrap; }
+    .crm-bulkbar select, .crm-bulkbar input[type="text"] {
+      background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.22); color: #fff;
+      border-radius: var(--radius-sm); padding: 6px 9px; font-size: 0.78rem;
+    }
+    .crm-bulkbar select { max-width: 230px; }
+    .crm-bulkbar select option { color: #1a1a1a; }
+    .crm-bulkbar input[type="text"] { flex: 1; min-width: 150px; }
+    .crm-bulkbar input::placeholder { color: rgba(255,255,255,0.5); }
+    .crm-bulk-dismiss {
+      background: none; border: none; color: rgba(255,255,255,0.7); font-size: 0.76rem; padding: 4px 6px;
+    }
+    .crm-bulk-dismiss:hover { color: #fff; background: rgba(255,255,255,0.12); }
+
+
+    /* ── Account hub: recommended next step ── */
+    .intel-next {
+      display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap;
+      margin: 14px 0; padding: 13px 15px; border-radius: var(--radius-md);
+      border: 1px solid var(--color-primary-border, #CFC4E8); background: var(--color-primary-soft);
+    }
+    .intel-next-body { flex: 1; min-width: 200px; }
+    .intel-next-label {
+      font-size: 0.62rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.09em;
+      color: #6d4fa8; margin-bottom: 3px;
+    }
+    .intel-next-title { font-size: 0.92rem; font-weight: 700; color: #3D1E6E; margin-bottom: 3px; }
+    .intel-next-why { font-size: 0.76rem; color: #4b3a6b; line-height: 1.55; }
+    .intel-next-action { flex-shrink: 0; padding-top: 12px; }
+    /* A finished account shouldn't shout for attention like an unfinished one. */
+    .intel-next-ready { background: #F0FDF4; border-color: #BBF7D0; }
+    .intel-next-ready .intel-next-label { color: #047857; }
+    .intel-next-ready .intel-next-title { color: #065F46; }
+    .intel-next-ready .intel-next-why { color: #3f6b57; }
+
+    /* ── Account hub: contact coverage ── */
+    .ic-stats { display: flex; gap: 16px; flex-wrap: wrap; font-size: 0.8rem; color: var(--color-text-secondary); }
+    .ic-stat b { color: var(--color-text); font-weight: 700; }
+    .ic-stat-soft { color: var(--color-text-tertiary); }
+    .ic-empty { padding: 2px 0 4px; }
+    .ic-empty-title { font-size: 0.85rem; font-weight: 600; color: var(--color-text); margin-bottom: 3px; }
+    .ic-empty-hint { font-size: 0.78rem; color: var(--color-text-tertiary); line-height: 1.55; }
+    .ic-import { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--color-border); }
+    .ic-import-label { display: block; font-size: 0.72rem; font-weight: 600; color: var(--color-text-secondary); margin-bottom: 5px; }
+    .ic-import-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .ic-import-row .ic-target { width: 90px; padding: 6px 8px; font-size: 0.82rem; border: 1px solid #d1d5db; border-radius: var(--radius-sm); }
+    .ic-plan:empty { display: none; }
+    .ic-plan { margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--color-surface-alt); border: 1px solid var(--color-border); }
+    .ic-plan-line { font-size: 0.78rem; color: var(--color-text-secondary); line-height: 1.6; }
+    .ic-plan-line b { color: var(--color-text); }
+    .ic-plan-get { color: var(--color-primary); }
+    .ic-plan-row { display: flex; gap: 8px; margin-top: 9px; flex-wrap: wrap; }
+    #crm-intel-hint { display: block; font-size: 0.8rem; color: var(--color-text-tertiary); line-height: 1.5; }
+
+    /* Narrower screens: rail above the table rather than a cramped column. */
+    @media (max-width: 1180px) {
+      .crm-layout { grid-template-columns: minmax(0, 1fr); }
+      #crm-sidebar { position: static; max-height: none; }
+      .crm-bulkbar { left: 16px; right: 16px; }
     }
     /* Booth-map category checkboxes — same buckets the floor plan uses. */
     .crm-cat-list { display: flex; flex-direction: column; gap: 1px; max-height: 210px; overflow-y: auto; }
@@ -449,6 +628,12 @@
     }
     .crm-co-item:hover { border-color: var(--color-primary-border); background: var(--color-primary-soft); }
     .crm-co-item.open { border-color: var(--color-primary); background: var(--color-primary-soft); }
+    /* The company the contact table is currently scoped to. */
+    .crm-co-item.active {
+      border-color: var(--color-primary); background: var(--color-primary-soft);
+      box-shadow: inset 3px 0 0 var(--color-primary);
+    }
+    .crm-co-item.active .crm-co-name { font-weight: 700; color: #3D1E6E; }
     .crm-co-top { display: flex; align-items: center; gap: 6px; }
     .crm-co-name {
       flex: 1; min-width: 0; font-size: 0.75rem; font-weight: 600; color: #374151;
@@ -484,13 +669,6 @@
       font-size: 0.72rem; font-weight: 800; color: var(--color-primary-hover);
       background: var(--color-primary-soft); padding: 1px 8px; border-radius: 999px;
     }
-    .crm-sb-inner  { overflow-y: auto; padding: 12px 12px 14px; flex: 1; }
-    .crm-sb-title  { font-weight: 600; font-size: 0.8rem; color: #374151; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid #e5e7eb; }
-    .crm-sb-section { font-size: 0.68rem; font-weight: 700; color: #9ca3af; text-transform: uppercase; letter-spacing: .05em; margin: 14px 0 4px; }
-    .crm-sb-section:first-of-type { margin-top: 0; }
-    .crm-sb-list   { display: flex; flex-direction: column; gap: 1px; }
-    .crm-sb-item   { font-size: 0.75rem; padding: 5px 6px; border-radius: 4px; cursor: pointer; color: #374151; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .crm-sb-item:hover { background: #e5e7eb; }
     /* Searchable Browse-by selectors */
     .crm-sel-wrap { position: relative; }
     .crm-sel-input {
@@ -523,12 +701,145 @@
     }
     .crm-sel-clearall { font-size: 0.68rem; color: #4E2A84; cursor: pointer; font-weight: 600; text-transform: none; letter-spacing: 0; display: none; }
     .crm-sel-clearall.active { display: inline; }
-    #crm-filter-summary { font-size: 0.78rem; color: #6b7280; margin-bottom: 8px; }
-    /* Contact Discovery: search + search settings, feeding directly into the CRM below */
-    .discovery-row { display: flex; gap: 16px; align-items: stretch; margin-bottom: 20px; }
-    .card-sub { flex: 1; min-width: 0; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 16px; }
-    .card-sub-title { font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; margin-bottom: 10px; }
+    /* Contact discovery — now inside the Find-contacts modal. */
     .search-hint { font-size: 0.74rem; color: #9ca3af; margin-top: 6px; }
+    .crm-force-row {
+      display: flex; align-items: center; gap: 7px; margin-top: 10px;
+      font-size: 0.76rem; color: var(--color-text-secondary); cursor: pointer;
+    }
+    .crm-force-row input { margin: 0; accent-color: var(--color-primary); }
+    /* Import size sits in the main modal flow, not behind a disclosure. */
+    .crm-import-size {
+      margin-top: 16px; padding: 12px 14px; border: 1px solid var(--color-border);
+      border-radius: var(--radius-md); background: var(--color-surface-alt);
+    }
+    .crm-import-size .search-settings-grid { margin-bottom: 0; }
+    .crm-field-hint { font-size: 0.7rem; color: var(--color-text-tertiary); margin-top: 4px; line-height: 1.45; }
+    .crm-mode-row {
+      display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px;
+      padding-top: 11px; border-top: 1px solid var(--color-border);
+    }
+    .crm-mode-opt { display: flex; align-items: center; gap: 7px; font-size: 0.76rem; color: var(--color-text-secondary); cursor: pointer; }
+    .crm-mode-opt input { margin: 0; accent-color: var(--color-primary); }
+    .crm-mode-opt b { color: var(--color-text); font-weight: 600; }
+
+    /* ── Import plan: what pressing Search will actually do ── */
+    .crm-plan { margin-top: 14px; border: 1px solid var(--color-border); border-radius: var(--radius-md); overflow: hidden; }
+    .crm-plan[hidden] { display: none; }
+    .crm-plan-head {
+      padding: 8px 14px; background: var(--color-surface-alt); border-bottom: 1px solid var(--color-border);
+      font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--color-text-secondary);
+    }
+    .crm-plan-row { padding: 11px 14px; border-bottom: 1px solid var(--color-border-soft); }
+    .crm-plan-row:last-child { border-bottom: none; }
+    .crm-plan-co { font-size: 0.85rem; font-weight: 600; color: var(--color-text); margin-bottom: 7px; }
+    .crm-plan-co .crm-plan-new { font-weight: 500; color: var(--color-text-tertiary); font-size: 0.74rem; margin-left: 6px; }
+    /* The arithmetic, spelled out: have → target → retrieving. */
+    .crm-plan-math { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; font-size: 0.78rem; }
+    .crm-plan-num { display: inline-flex; align-items: baseline; gap: 5px; }
+    .crm-plan-num b { font-size: 0.95rem; font-weight: 700; color: var(--color-text); }
+    .crm-plan-num span { font-size: 0.7rem; color: var(--color-text-tertiary); }
+    .crm-plan-op { color: var(--color-text-tertiary); font-size: 0.8rem; }
+    .crm-plan-get b { color: var(--color-primary); }
+    .crm-plan-cost { margin-top: 7px; font-size: 0.71rem; color: var(--color-text-tertiary); line-height: 1.5; }
+    .crm-plan-warn { margin-top: 6px; font-size: 0.72rem; color: var(--color-warn-text, #8A6400); }
+    .crm-plan-none { margin-top: 6px; font-size: 0.72rem; color: var(--color-text-tertiary); }
+    .crm-plan-foot {
+      padding: 9px 14px; background: var(--color-surface-alt); border-top: 1px solid var(--color-border);
+      font-size: 0.75rem; color: var(--color-text-secondary);
+    }
+    .crm-plan-foot b { color: var(--color-text); }
+
+    /* ── The single search bar: page-level, above the object tabs, so it
+       visibly governs the whole workspace rather than one table. ── */
+    .crm-search-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+    .crm-search-bar .crm-toolbar-search { flex: 1; }
+    .crm-search-bar input { padding: 10px 14px 10px 34px; font-size: 0.9rem; }
+    .crm-toolbar-actions { justify-content: flex-end; }
+
+    /* ── CRM object tabs ── */
+    .crm-subtabs {
+      display: flex; gap: 4px; align-items: flex-end;
+      border-bottom: 1px solid var(--color-border); margin-bottom: 16px;
+    }
+    .crm-subtab {
+      background: none; border: none; border-bottom: 2px solid transparent;
+      padding: 9px 16px; font-size: 0.88rem; font-weight: 500;
+      color: var(--color-text-tertiary); display: flex; align-items: center; gap: 7px;
+      border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+    }
+    .crm-subtab:hover { background: var(--color-surface-alt); color: var(--color-text); }
+    .crm-subtab.active {
+      color: var(--color-primary); border-bottom-color: var(--color-primary);
+      font-weight: 700; background: none;
+    }
+    .crm-subtab-count {
+      font-size: 0.7rem; font-weight: 700; color: var(--color-text-tertiary);
+      background: var(--color-surface-alt); border: 1px solid var(--color-border);
+      border-radius: var(--radius-full); padding: 1px 7px;
+    }
+    .crm-subtab-count:empty { display: none; }
+    .crm-subtab.active .crm-subtab-count { color: var(--color-primary-hover); background: var(--color-primary-soft); border-color: var(--color-primary-border, #CFC4E8); }
+
+    /* ── Companies list view ── */
+    .crm-acct-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+    .crm-acct-filter {
+      background: var(--color-surface); border: 1px solid var(--color-border);
+      border-radius: var(--radius-full); padding: 4px 12px; font-size: 0.75rem;
+      color: var(--color-text-secondary);
+    }
+    .crm-acct-filter:hover { border-color: var(--color-primary-border, #CFC4E8); background: var(--color-primary-soft); }
+    .crm-acct-filter.active {
+      background: var(--color-primary); border-color: var(--color-primary); color: #fff; font-weight: 600;
+    }
+    .crm-acct-table { table-layout: fixed; width: 100%; }
+    .crm-acct-table th, .crm-acct-table td { vertical-align: top; }
+    .crm-acct-table td { padding-top: 11px; padding-bottom: 11px; }
+    .crm-acct-table col.ca-name     { width: 26%; }
+    .crm-acct-table col.ca-industry { width: 22%; }
+    .crm-acct-table col.ca-contacts { width: 10%; }
+    .crm-acct-table col.ca-analysis { width: 15%; }
+    .crm-acct-table col.ca-tags     { width: 14%; }
+    .crm-acct-table col.ca-next     { width: 13%; }
+    .crm-acct-row { cursor: pointer; }
+    .crm-acct-row:hover { background: var(--color-primary-soft); }
+    .ca-ok   { color: #047857; font-weight: 600; font-size: 0.8rem; }
+    .ca-none { color: var(--color-text-tertiary); }
+    .ca-step {
+      display: inline-block; font-size: 0.71rem; font-weight: 600;
+      padding: 2px 9px; border-radius: var(--radius-full); white-space: nowrap;
+    }
+    .ca-step-analyze  { background: #EFF6FF; color: #1D4ED8; }
+    .ca-step-contacts { background: var(--color-primary-soft); color: #3D1E6E; }
+    .ca-step-review   { background: #FFFBEB; color: #B45309; }
+    .ca-step-ready    { background: #ECFDF5; color: #047857; }
+
+    /* ── Account record page ── */
+    .crm-record-head {
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+      margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--color-border);
+    }
+    .crm-record-back {
+      background: none; border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+      padding: 5px 12px; font-size: 0.8rem; color: var(--color-text-secondary); font-weight: 500;
+    }
+    .crm-record-back:hover { background: var(--color-primary-soft); border-color: var(--color-primary-border, #CFC4E8); color: var(--color-primary-hover); }
+    .crm-record-head .intel-subtabs { margin: 0; }
+    /* The record is a page now, not a 620px drawer — let it breathe, but keep
+       the prose column readable rather than stretching it to 1680px. */
+    .crm-record-body { max-width: 1080px; }
+
+    /* Single-company context bar, above the table. */
+    .crm-co-bar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin-bottom: 10px; padding: 9px 13px; border-radius: var(--radius-md);
+      border: 1px solid var(--color-primary-border, #CFC4E8); background: var(--color-primary-soft);
+    }
+    .crm-co-bar[hidden] { display: none; }
+    .crm-co-bar-name { font-size: 0.85rem; font-weight: 700; color: #3D1E6E; }
+    .crm-co-bar-meta { font-size: 0.76rem; color: #4b3a6b; }
+    .crm-co-bar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
     .search-settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
     .search-settings-grid label { display: block; font-size: 0.76rem; color: #555; margin-bottom: 3px; }
     .search-settings-grid input[type="number"] { width: 100%; box-sizing: border-box; font-size: 12px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
@@ -536,9 +847,6 @@
     .search-checkbox-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px 10px; max-height: 140px; overflow-y: auto; }
     .search-checkbox-grid label { display: flex; align-items: center; gap: 5px; font-size: 0.75rem; color: #374151; cursor: pointer; font-weight: 400; }
     @media (max-width: 860px) {
-      .crm-flex-wrap { flex-direction: column; }
-      #crm-sidebar { width: 100%; max-height: none; position: static; order: -1; }
-      .discovery-row { flex-direction: column; }
       .search-checkbox-grid { grid-template-columns: 1fr 1fr; }
     }
     /* Email category badges */
@@ -617,6 +925,35 @@
 
     .company-table td, .company-table th { font-size: 0.82rem; }
     .company-table .col-check { width: 32px; }
+
+    /* ── CRM contact table ──
+       Fixed layout with a declared budget per column. Auto layout let the
+       email column take whatever it wanted and squeezed names into
+       two-line wraps, and pushed the action buttons off the right edge
+       into a horizontal scroll. Long titles clamp to two lines instead. */
+    .crm-table { table-layout: fixed; width: 100%; }
+    .crm-table th, .crm-table td { vertical-align: top; }
+    .crm-table td { padding-top: 10px; padding-bottom: 10px; }
+    .crm-table col.c-check   { width: 34px; }
+    .crm-table col.c-contact { width: 18%; }
+    .crm-table col.c-company { width: 13%; }
+    .crm-table col.c-email   { width: 20%; }
+    .crm-table col.c-activity{ width: 13%; }
+    .crm-table col.c-tags    { width: 9%;  }
+    .crm-table col.c-status  { width: 12%; }
+    .crm-table col.c-actions { width: 15%; }
+    .crm-table .cell-primary, .crm-table .cell-sub { overflow-wrap: anywhere; }
+    .crm-table .cell-sub {
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .crm-table .cell-nowrap { white-space: nowrap; }
+    .crm-table .crm-tags-input, .crm-table .crm-status-select { width: 100%; box-sizing: border-box; }
+    .crm-table .col-actions { white-space: normal; }
+    .crm-table .col-actions .btn-sm { margin: 0 3px 3px 0; padding: 3px 8px; }
+    /* Draft state sits under its own buttons rather than buying a column
+       that only ever repeats what those buttons already say. */
+    .crm-table .crm-draft-state { font-size: 0.7rem; margin-top: 1px; }
     .company-table .col-prio { width: 70px; text-align: center; }
     .company-table .col-booth { width: 60px; }
     .company-table .col-opp { max-width: 280px; }
@@ -928,6 +1265,9 @@
     .intel-subtab .st-close { color:#9ca3af; font-size:0.95rem; line-height:1; }
     .intel-subtab .st-close:hover { color:#ef4444; }
     #crm-intel-panel { border:1px solid #e5e7eb; border-radius:0 8px 8px 8px; padding:14px; background:#fdfdfd; }
+    /* An empty panel is an empty bordered box that reads as a broken input;
+       the drawer's own empty state carries the message instead. */
+    #crm-intel-panel:empty { display: none; }
     /* settings email forms */
     .em-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:6px; }
     .em-grid.two { grid-template-columns:repeat(2,1fr); }
@@ -1100,9 +1440,6 @@
       <button class="app-menu-btn" id="app-menu-btn" title="收起/展开侧栏">☰</button>
       <span class="app-topbar-title">SKQ CRM System</span>
       <div class="app-breadcrumb"><span>›</span> <b id="app-breadcrumb-current">首页概览</b></div>
-      <div class="app-topbar-search">
-        <input type="text" id="app-global-search" placeholder="搜索联系人、公司、报告、邮件…" />
-      </div>
       <div class="app-topbar-actions">
         <button class="btn-scan-card" id="open-scan-modal-btn">📇 扫描名片</button>
         <button class="app-icon-btn" id="app-notifications-btn" title="通知">🔔<span class="app-notif-dot" id="app-notif-dot" style="display:none;"></span></button>
@@ -1498,201 +1835,399 @@
     </div>
   </div>
 
-  <!-- ── CRM: saved contacts & companies ── -->
-  <div class="card view-hidden" data-view="crm">
-    <div class="card-title" id="crm-toggle">
-      CRM — Saved Contacts &amp; Companies
+  <!-- ══════════════════════════════════════════════════════════════════
+       CRM workspace.
+
+       One job per surface, rather than four stacked in one card:
+         · acquiring contacts (Apollo)      → "Find Contacts" modal
+         · qualifying an account (tags)     → Company Intelligence drawer
+         · narrowing the list               → the filter rail (one system)
+         · working the list                 → the table + contextual bulk bar
+       ══════════════════════════════════════════════════════════════════ -->
+  <div class="view-hidden" data-view="crm">
+
+    <!-- Page header: identity on the left, the actions that create records
+         on the right. #crm-toggle is retained as the scroll anchor other
+         flows jump to; it is no longer a collapse control, because
+         collapsing the entire contents of a dedicated nav view is a
+         leftover from the single-page era. -->
+    <div class="crm-page-head" id="crm-toggle">
+      <h1 class="crm-page-title">CRM</h1>
+      <span class="crm-count-pill" id="crm-count">—</span>
       <span id="crm-review-badge" style="display:none;"></span>
-      <span class="toggle-icon" id="crm-toggle-icon">▼</span>
+      <span class="toggle-icon" id="crm-toggle-icon" hidden></span>
+      <div class="crm-head-actions">
+        <button class="btn-primary btn-sm" id="crm-find-btn">Find contacts</button>
+        <button class="btn-ghost btn-sm" id="crm-add-contact-btn">Add contact</button>
+        <button class="btn-ghost btn-sm" id="crm-import-email-btn">Import email</button>
+      </div>
     </div>
-    <div id="crm-body">
 
-      <!-- ── Contact Discovery: search feeds directly into the CRM below ── -->
-      <div class="discovery-row">
-        <div class="discovery-search card-sub">
-          <div class="card-sub-title">Search Companies</div>
-          <div class="search-row">
-            <div class="input-wrap">
-              <label for="company-input">Company name(s) <span style="color:#9ca3af">(comma-separated for multiple)</span></label>
-              <input type="text" id="company-input" placeholder="e.g. CATL, BYD, Tesla" />
-            </div>
-            <button class="btn-primary" id="search-btn">Search</button>
-          </div>
-          <div class="search-hint">Searching saves contacts to your CRM below for review — it does not draft emails automatically.</div>
-        </div>
-        <div class="discovery-settings card-sub">
-          <div class="card-sub-title">Search Settings</div>
-          <div class="search-settings-grid">
-            <div>
-              <label for="search-per-company-limit">Contacts per company</label>
-              <input type="number" id="search-per-company-limit" value="25" min="1" max="500" />
-            </div>
-            <div>
-              <label for="search-max-total">Maximum total contacts</label>
-              <input type="number" id="search-max-total" value="100" min="1" max="2000" />
-            </div>
-          </div>
-          <div class="search-dept-label">Target Departments <span style="color:#9ca3af;font-weight:400;">(optional — leave blank for the default executive + specialist set)</span></div>
-          <div id="search-dept-checkboxes" class="search-checkbox-grid"></div>
-        </div>
+    <!-- ── Object tabs ───────────────────────────────────────────────────
+         Two objects, two list views — the Salesforce/HubSpot convention,
+         where tabs name records rather than features. Company Intelligence
+         is not a peer of Contacts: it is the record page for one account,
+         reached by opening a company from the Companies list.
+
+         Both panes stay mounted and are only hidden, so switching tabs
+         keeps each one's filters, paging, selection and scroll position.
+         Neither view re-fetches or re-renders on a switch. -->
+    <!-- ── The one place text is typed ──────────────────────────────────
+         Search used to be scattered across five inputs: above the table,
+         two in the filter rail, one inside Matching Companies, one on the
+         Companies tab. A new user had no way to know which to use.
+
+         There is now exactly one. It drives whichever object tab is
+         active, and simultaneously narrows Matching Companies, so a term
+         never has to be typed twice. Everything else on the page filters
+         or navigates — it does not search. -->
+    <div class="crm-search-bar">
+      <div class="crm-toolbar-search">
+        <input type="text" id="crm-search-input"
+               placeholder="Search contacts and companies — name, company, job title, email or tag…"
+               autocomplete="off">
       </div>
+      <button class="btn-ghost btn-sm" id="crm-refresh-btn">Refresh</button>
+    </div>
 
-      <!-- ── Company Intelligence: per searched/selected company, below search & above filters ── -->
-      <div id="crm-intel" class="card-sub" style="margin-bottom:16px;">
-        <div class="card-sub-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-          <span>Company Intelligence</span>
-          <span style="display:flex;align-items:center;gap:8px;">
-            <select id="crm-intel-add" class="intel-add" title="Add a company to review">
-              <option value="">+ add company…</option>
-            </select>
-            <span id="crm-intel-hint" style="font-size:0.72rem;color:#9ca3af;font-weight:400;">Search or add a company to review its profile</span>
-          </span>
-        </div>
-        <div id="crm-intel-subtabs" class="intel-subtabs"></div>
-        <div id="crm-intel-panel"><div style="color:#9ca3af;font-size:0.85rem;">No company selected. Search a company above, or use “+ add company”, then review and confirm its tags here before working the contacts.</div></div>
-      </div>
+    <nav class="crm-subtabs" role="tablist">
+      <button type="button" class="crm-subtab active" data-crm-tab="contacts" role="tab" aria-selected="true">
+        Contacts <span class="crm-subtab-count" id="crm-tabcount-contacts"></span>
+      </button>
+      <button type="button" class="crm-subtab" data-crm-tab="companies" role="tab" aria-selected="false">
+        Companies <span class="crm-subtab-count" id="crm-tabcount-companies"></span>
+      </button>
+    </nav>
 
-      <div class="crm-flex-wrap">
+    <div id="crm-body" data-crm-pane="contacts">
+      <div class="crm-layout">
 
-        <!-- ── Main CRM column ── -->
-        <div class="crm-main-col">
-          <div class="search-row" style="margin-bottom:14px;">
-            <div class="input-wrap">
-              <label for="crm-search-input">Look up existing contacts or companies</label>
-              <input type="text" id="crm-search-input" placeholder="Search by name, company, email, or tag…" />
-            </div>
-            <button class="btn-ghost" id="crm-refresh-btn">Refresh</button>
-            <button class="btn-ghost" id="crm-add-contact-btn" style="white-space:nowrap;">+ Add Contact</button>
-            <button class="btn-ghost" id="crm-import-email-btn" style="white-space:nowrap;">+ Import Email</button>
+        <!-- ── Filter rail: ONE filter system ─────────────────────────────
+             Previously the page had two — a grid above the table that
+             needed "Apply", and a sidebar cascade that applied instantly —
+             both writing into the same filter state with no shared summary.
+             They are merged here: the cascade (Company → Contact → Show →
+             Category) stays primary because it is what a trade-show list
+             is actually browsed by; the occasional fields sit behind
+             "More filters"; everything applies immediately. ── -->
+        <aside id="crm-sidebar">
+          <div class="crm-rail-head">
+            <span>Filters</span>
+            <button type="button" class="crm-rail-clear" id="crm-clear-filters-btn">Clear all</button>
           </div>
 
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
-            <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Event</label><input type="text" id="crm-filter-event" placeholder="e.g. Battery Show" style="font-size:12px;padding:6px 8px;" /></div>
-            <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Industry</label><input type="text" id="crm-filter-industry" placeholder="e.g. Battery" style="font-size:12px;padding:6px 8px;" /></div>
-            <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Follow-up status</label>
-              <select id="crm-filter-status" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;background:#fff;">
-                <option value="">Any</option>
-                <option value="not_contacted">Not contacted</option>
-                <option value="contacted">Contacted</option>
-                <option value="replied">Replied</option>
-                <option value="meeting_scheduled">Meeting scheduled</option>
-                <option value="closed">Closed</option>
-              </select>
-            </div>
-            <div><label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Salesperson</label><input type="text" id="crm-filter-owner" placeholder="Salesperson name" style="font-size:12px;padding:6px 8px;" /></div>
-            <div>
-              <label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Department <span id="crm-sel-dept-clearall" class="crm-sel-clearall">Clear all</span></label>
-              <div class="crm-sel-wrap">
-                <input type="text" id="crm-sel-dept-input" class="crm-sel-input" placeholder="Filter by department…" autocomplete="off" />
-                <div id="crm-sel-dept-dropdown" class="crm-sel-dropdown"></div>
-              </div>
-              <div id="crm-sel-dept-chips" class="crm-sel-chips"></div>
-            </div>
-            <div>
-              <label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Seniority <span id="crm-sel-seniority-clearall" class="crm-sel-clearall">Clear all</span></label>
-              <div class="crm-sel-wrap">
-                <input type="text" id="crm-sel-seniority-input" class="crm-sel-input" placeholder="Filter by seniority…" autocomplete="off" />
-                <div id="crm-sel-seniority-dropdown" class="crm-sel-dropdown"></div>
-              </div>
-              <div id="crm-sel-seniority-chips" class="crm-sel-chips"></div>
-            </div>
-          </div>
-          <button class="btn-sm btn-ghost" id="crm-apply-filters-btn" style="margin-bottom:14px;">Apply filters</button>
-          <button class="btn-sm btn-ghost" id="crm-clear-filters-btn" style="margin-bottom:14px;">Clear</button>
+          <div class="crm-rail-body">
+            <!-- Company and Contact were searchable multi-selects here. Both
+                 were search inputs, not filters: the global search above now
+                 covers finding a person or a company, and Matching Companies
+                 below is how a company is selected. The merge action stays,
+                 since it operates on the selected accounts. -->
+            <button type="button" class="btn-sm btn-ghost" id="crm-merge-accounts-btn" style="display:none;width:100%;margin-bottom:14px;">Merge selected</button>
 
+            <!-- Show scopes the taxonomy below it: picking a show decides
+                 which category list is meaningful. -->
+            <div class="crm-rail-group">
+              <div class="crm-rail-label"><span>Trade show</span></div>
+              <div id="crm-show-list" class="crm-cat-list" style="max-height:120px;"></div>
+            </div>
+
+            <div class="crm-rail-group">
+              <div class="crm-rail-label">
+                <span id="crm-cat-heading">Category</span>
+                <span id="crm-cat-clearall" class="crm-sel-clearall">Clear</span>
+              </div>
+              <div id="crm-cat-list" class="crm-cat-list"></div>
+            </div>
+
+            <!-- Occasional fields. Open by default only when something in
+                 here is already applied (set by initCrmWorkspace). -->
+            <details class="crm-more" id="crm-more-filters">
+              <summary>More filters</summary>
+              <div class="crm-more-body">
+                <div class="crm-rail-group">
+                  <div class="crm-rail-label"><span>Event</span></div>
+                  <input type="text" id="crm-filter-event" placeholder="e.g. Battery Show" />
+                </div>
+                <div class="crm-rail-group">
+                  <div class="crm-rail-label"><span>Industry</span></div>
+                  <input type="text" id="crm-filter-industry" placeholder="e.g. Battery" />
+                </div>
+                <div class="crm-rail-group">
+                  <div class="crm-rail-label"><span>Follow-up status</span></div>
+                  <select id="crm-filter-status">
+                    <option value="">Any</option>
+                    <option value="not_contacted">Not contacted</option>
+                    <option value="contacted">Contacted</option>
+                    <option value="replied">Replied</option>
+                    <option value="meeting_scheduled">Meeting scheduled</option>
+                    <option value="closed">Closed</option>
+                  </select>
+                </div>
+                <div class="crm-rail-group">
+                  <div class="crm-rail-label"><span>Salesperson</span></div>
+                  <input type="text" id="crm-filter-owner" placeholder="Salesperson name" />
+                </div>
+                <div class="crm-rail-group">
+                  <div class="crm-rail-label">
+                    <span>Department</span>
+                    <span id="crm-sel-dept-clearall" class="crm-sel-clearall">Clear</span>
+                  </div>
+                  <div class="crm-sel-wrap">
+                    <input type="text" id="crm-sel-dept-input" class="crm-sel-input" placeholder="Filter by department…" autocomplete="off" />
+                    <div id="crm-sel-dept-dropdown" class="crm-sel-dropdown"></div>
+                  </div>
+                  <div id="crm-sel-dept-chips" class="crm-sel-chips"></div>
+                </div>
+                <div class="crm-rail-group">
+                  <div class="crm-rail-label">
+                    <span>Seniority</span>
+                    <span id="crm-sel-seniority-clearall" class="crm-sel-clearall">Clear</span>
+                  </div>
+                  <div class="crm-sel-wrap">
+                    <input type="text" id="crm-sel-seniority-input" class="crm-sel-input" placeholder="Filter by seniority…" autocomplete="off" />
+                    <div id="crm-sel-seniority-dropdown" class="crm-sel-dropdown"></div>
+                  </div>
+                  <div id="crm-sel-seniority-chips" class="crm-sel-chips"></div>
+                </div>
+                <!-- Filters now apply on change; this stays as the single
+                     place that logic lives, triggered programmatically. -->
+                <button type="button" id="crm-apply-filters-btn" hidden>Apply filters</button>
+              </div>
+            </details>
+          </div>
+
+          <!-- Output of the filters above, not another filter — labelled and
+               separated so the difference is visible rather than implied by
+               a circled number. -->
+          <div class="crm-rail-results">
+            <div class="crm-rail-label">
+              <span>Matching companies <span class="crm-rail-hint">· click to scope the table</span></span>
+              <span id="crm-co-count">—</span>
+            </div>
+            <!-- No search box: this list is narrowed by the global search and
+                 the filters above it. Clicking a row is navigation. -->
+            <div id="crm-co-list" class="crm-co-list"></div>
+          </div>
+        </aside>
+
+        <!-- ── The record table ── -->
+        <section class="crm-main-col">
           <div id="crm-filter-summary"></div>
-          <div class="csv-header">
-            <div class="csv-count" id="crm-count"></div>
-            <div class="csv-actions">
-              <label style="font-size:0.8rem;color:#555;cursor:pointer">
-                <input type="checkbox" id="crm-select-all"> Select all on page
-              </label>
-            </div>
-          </div>
 
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
-            <div>
-              <label style="display:block;font-size:0.8rem;color:#555;margin-bottom:4px;">Draft purpose/context</label>
-              <select id="crm-mode-select" style="width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff;"></select>
-            </div>
-            <div>
-              <label style="display:block;font-size:0.8rem;color:#555;margin-bottom:4px;">Additional instructions <span style="color:#9ca3af">(optional)</span></label>
-              <input type="text" id="crm-extra-instructions" placeholder="e.g. mention our new automation line" />
-            </div>
-          </div>
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
-            <button class="btn-orange btn-sm" id="crm-bulk-draft-btn" disabled>Draft Emails for Selected</button>
-            <button class="btn-danger btn-sm" id="crm-bulk-delete-btn" disabled>Delete Selected</button>
-            <span id="crm-selected-count" style="font-size:0.76rem;color:#6b7280;"></span>
-          </div>
+          <!-- Appears whenever the list is scoped to a single company: the
+               moment the user is actually looking at "CATL, 23 contacts" is
+               the moment to let them say "make it 40". -->
+          <div class="crm-co-bar" id="crm-company-bar" hidden></div>
 
+          <!-- 9 columns, down from 13: title, phone, source and interaction
+               count now ride as secondary lines on the record they belong
+               to, which is how Salesforce/HubSpot list views read. -->
           <div class="table-wrap">
-            <table class="company-table">
+            <table class="company-table crm-table">
+              <colgroup>
+                <col class="c-check"><col class="c-contact"><col class="c-company"><col class="c-email">
+                <col class="c-activity"><col class="c-tags"><col class="c-status"><col class="c-actions">
+              </colgroup>
               <thead>
                 <tr>
-                  <th class="col-check"></th>
-                  <th>Name</th><th>Title</th><th>Company</th><th>Email</th><th>Phone</th>
-                  <th>Last Activity</th><th>Interactions</th>
-                  <th>Source</th><th>Tags</th><th>Status</th><th>Draft</th><th></th>
+                  <th class="col-check"><input type="checkbox" id="crm-select-all" title="Select all on this page"></th>
+                  <th>Contact</th>
+                  <th>Company</th>
+                  <th>Email</th>
+                  <th>Activity</th>
+                  <th>Tags</th>
+                  <th>Status</th>
+                  <th class="col-actions">Draft</th>
                 </tr>
               </thead>
               <tbody id="crm-tbody"></tbody>
             </table>
           </div>
           <div id="crm-pagination"></div>
-        </div><!-- /crm-main-col -->
+        </section>
 
-        <!-- ── Quick Browse sidebar ── -->
-        <aside id="crm-sidebar">
-          <div class="crm-sb-inner">
-            <div class="crm-sb-title">Quick Browse</div>
+      </div><!-- /crm-layout -->
+    </div><!-- /crm-body -->
 
-            <div class="crm-sb-section" style="display:flex;justify-content:space-between;align-items:center;">
-              <span>① 公司 · Company</span>
-              <span id="crm-sel-account-clearall" class="crm-sel-clearall">Clear all</span>
-            </div>
-            <div class="crm-sel-wrap">
-              <input type="text" id="crm-sel-account-input" class="crm-sel-input" placeholder="Search companies…" autocomplete="off" />
-              <div id="crm-sel-account-dropdown" class="crm-sel-dropdown"></div>
-            </div>
-            <div id="crm-sel-account-chips" class="crm-sel-chips"></div>
-            <button type="button" class="btn-sm btn-ghost" id="crm-merge-accounts-btn" style="display:none;margin-top:6px;width:100%;">Merge Selected</button>
+    <!-- ══════════════════════════════════════════════════════════════════
+         Companies pane: an object list view, and the account record page
+         it opens into. Both live here, so returning from a record lands
+         back on the same list, scrolled and filtered as it was left.
+         ══════════════════════════════════════════════════════════════════ -->
+    <div data-crm-pane="companies" hidden>
 
-            <div class="crm-sb-section" style="display:flex;justify-content:space-between;align-items:center;">
-              <span>② 联系人 · Contact</span>
-              <span id="crm-sel-contact-clearall" class="crm-sel-clearall">Clear all</span>
-            </div>
-            <div class="crm-sel-wrap">
-              <input type="text" id="crm-sel-contact-input" class="crm-sel-input" placeholder="Search contacts…" autocomplete="off" />
-              <div id="crm-sel-contact-dropdown" class="crm-sel-dropdown"></div>
-            </div>
-            <div id="crm-sel-contact-chips" class="crm-sel-chips"></div>
+      <!-- List view -->
+      <section id="crm-acct-list">
+        <!-- Filtered by the global search above; this toolbar holds actions
+             only. -->
+        <div class="crm-toolbar crm-toolbar-actions">
+          <button class="btn-primary btn-sm" id="crm-acct-new-btn">New company</button>
+          <button class="btn-ghost btn-sm" id="crm-acct-refresh">Refresh</button>
+        </div>
 
-            <!-- ③ Show — company-level membership. Picking one scopes the
-                 categories below to that show's taxonomy. -->
-            <div class="crm-sb-section">③ 展会 · Show</div>
-            <div id="crm-show-list" class="crm-cat-list" style="max-height:120px;"></div>
+        <!-- Saved-view filters, the enterprise convention for slicing a list
+             without a modal. These describe account state, which is exactly
+             what the record page is there to resolve. -->
+        <div class="crm-acct-filters" id="crm-acct-filters">
+          <button type="button" class="crm-acct-filter active" data-acct-filter="all">All</button>
+          <button type="button" class="crm-acct-filter" data-acct-filter="no-contacts">No contacts</button>
+          <button type="button" class="crm-acct-filter" data-acct-filter="not-analyzed">Not analyzed</button>
+          <button type="button" class="crm-acct-filter" data-acct-filter="needs-review">Tags need review</button>
+          <button type="button" class="crm-acct-filter" data-acct-filter="ready">Ready</button>
+        </div>
 
-            <!-- ④ Categories, scoped to the selected show -->
-            <div class="crm-sb-section" style="display:flex;justify-content:space-between;align-items:center;">
-              <span id="crm-cat-heading">④ 分类 · Category</span>
-              <span id="crm-cat-clearall" class="crm-sel-clearall">Clear all</span>
-            </div>
-            <div id="crm-cat-list" class="crm-cat-list"></div>
+        <div class="table-wrap">
+          <table class="company-table crm-acct-table">
+            <colgroup>
+              <col class="ca-name"><col class="ca-industry"><col class="ca-contacts">
+              <col class="ca-analysis"><col class="ca-tags"><col class="ca-next">
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Company</th><th>Industry</th><th>Contacts</th>
+                <th>AI analysis</th><th>Tags</th><th>Next step</th>
+              </tr>
+            </thead>
+            <tbody id="crm-acct-tbody"></tbody>
+          </table>
+        </div>
+        <div id="crm-acct-pagination"></div>
+      </section>
 
-            <!-- ⑤ Result of ①–④, not another filter. Clicking a row opens that
-                 company's booth on the floor plan. -->
-            <div class="crm-sb-section crm-result-head">
-              <span>⑤ 匹配公司 · Results</span>
-              <span id="crm-co-count" class="crm-result-count">—</span>
-            </div>
-            <input type="text" id="crm-co-search" class="crm-sel-input" placeholder="在结果中查找…" autocomplete="off" style="margin-bottom:6px;" />
-            <div id="crm-co-list" class="crm-co-list"></div>
-          </div>
-        </aside>
-
-      </div><!-- /crm-flex-wrap -->
+      <!-- Record page for one account -->
+      <section id="crm-acct-record" hidden>
+        <div class="crm-record-head">
+          <button type="button" class="crm-record-back" id="crm-acct-back">← Companies</button>
+          <div id="crm-intel-subtabs" class="intel-subtabs"></div>
+        </div>
+        <div class="crm-record-body">
+          <span id="crm-intel-hint" hidden></span>
+          <div id="crm-intel-panel"></div>
+        </div>
+      </section>
     </div>
+
+    <!-- ── Contextual bulk bar: drafting controls exist only while rows are
+         selected, instead of two permanently-disabled buttons and two
+         inputs sitting above the data. ── -->
+    <div class="crm-bulkbar" id="crm-bulkbar" hidden>
+      <span class="crm-bulk-count" id="crm-selected-count"></span>
+      <select id="crm-mode-select" title="Draft purpose/context"></select>
+      <input type="text" id="crm-extra-instructions" placeholder="Additional instructions (optional)" />
+      <button class="btn-orange btn-sm" id="crm-bulk-draft-btn" disabled>Draft emails</button>
+      <button class="btn-danger btn-sm" id="crm-bulk-delete-btn" disabled>Delete</button>
+      <button type="button" class="crm-bulk-dismiss" id="crm-bulk-clear">Clear selection</button>
+    </div>
+
+    <!-- ── Find contacts (Apollo discovery) ──────────────────────────────
+         Moved out of the list view: it is an occasional, credit-spending
+         action, and its 14 department checkboxes were permanently occupying
+         the space directly above the data they were meant to produce. ── -->
+    <div class="modal-overlay" id="crm-discover-modal">
+      <div class="modal modal-wide">
+        <button class="modal-close" data-crm-discover-close>&times;</button>
+        <h2>Find contacts</h2>
+        <div class="contact-info">
+          Searches Apollo and saves matching contacts into your CRM for review — it does not draft emails.
+        </div>
+
+        <div class="search-row">
+          <div class="input-wrap">
+            <label for="company-input">Company name(s) <span style="color:#9ca3af">(comma-separated for multiple)</span></label>
+            <input type="text" id="company-input" placeholder="e.g. CATL, BYD, Tesla" />
+          </div>
+          <button class="btn-primary" id="search-btn">Search</button>
+        </div>
+
+        <!-- Import size sits in the main flow, next to a live preview of what
+             pressing Search will actually do. The target is per company and
+             counts what you already hold, so the decision "I want 40 of these"
+             is expressed directly instead of being inferred from a batch size. -->
+        <div class="crm-import-size">
+          <div class="search-settings-grid">
+            <div>
+              <label for="search-per-company-limit">Target contacts per company</label>
+              <input type="number" id="search-per-company-limit" value="25" min="1" max="500" />
+              <div class="crm-field-hint">How many you want to end up with. Contacts you already have count toward it.</div>
+            </div>
+            <div>
+              <label for="search-max-total">Maximum new contacts (all companies)</label>
+              <input type="number" id="search-max-total" value="100" min="1" max="2000" />
+              <div class="crm-field-hint">Safety cap on this one run.</div>
+            </div>
+          </div>
+
+          <div class="crm-mode-row" role="radiogroup" aria-label="Import mode">
+            <label class="crm-mode-opt">
+              <input type="radio" name="crm-import-mode" value="append" checked>
+              <span><b>Append</b> — keep everything, add only what's missing</span>
+            </label>
+            <label class="crm-mode-opt">
+              <input type="radio" name="crm-import-mode" value="replace">
+              <span><b>Full refresh</b> — re-query Apollo for contacts already saved</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- The plan: filled from /api/leads/plan as the company or target
+             changes. Read-only and free — it never calls Apollo. -->
+        <div class="crm-plan" id="crm-plan" hidden></div>
+
+        <!-- Kept as the value doSearch() reads; the visible control is the
+             Append / Full refresh radio pair above. -->
+        <input type="checkbox" id="crm-force-refresh" hidden>
+
+        <div id="batch-progress" style="margin-top:14px;">
+          <div class="progress-label" id="progress-label">Searching…</div>
+          <div class="progress-bar-wrap">
+            <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+          </div>
+        </div>
+
+        <details class="crm-more" id="crm-discover-settings" style="margin-top:16px;">
+          <summary>Target departments</summary>
+          <div class="crm-more-body">
+            <div class="search-dept-label">Leave all unchecked for the default executive + specialist set. Checking any department <strong>replaces</strong> that default with only those titles.</div>
+            <div id="search-dept-checkboxes" class="search-checkbox-grid"></div>
+          </div>
+        </details>
+      </div>
+    </div>
+
+    <!-- ── New company ───────────────────────────────────────────────────
+         A CRM has to let you name an account the moment you hear of it,
+         rather than waiting for an import to invent it. -->
+    <div class="modal-overlay" id="crm-newco-modal">
+      <div class="modal">
+        <button class="modal-close" data-newco-close>&times;</button>
+        <h2>New company</h2>
+        <div class="contact-info">Creates a CRM account you can analyze and staff with contacts straight away.</div>
+        <div class="input-wrap" style="margin-bottom:10px;">
+          <label for="newco-name">Company name <span style="color:#9ca3af">(required)</span></label>
+          <input type="text" id="newco-name" placeholder="e.g. Acme Battery Materials" autocomplete="off">
+        </div>
+        <div class="search-settings-grid">
+          <div>
+            <label for="newco-zh">Chinese name <span style="color:#9ca3af">(optional)</span></label>
+            <input type="text" id="newco-zh" autocomplete="off">
+          </div>
+          <div>
+            <label for="newco-industry">Industry <span style="color:#9ca3af">(optional)</span></label>
+            <input type="text" id="newco-industry" autocomplete="off">
+          </div>
+        </div>
+        <div class="input-wrap" style="margin-top:10px;">
+          <label for="newco-website">Website <span style="color:#9ca3af">(optional — helps the AI research it)</span></label>
+          <input type="text" id="newco-website" placeholder="acme.com" autocomplete="off">
+        </div>
+        <div id="newco-error" class="msg-error" style="display:none;margin-top:10px;"></div>
+        <div class="modal-actions">
+          <button class="btn-primary btn-sm" id="newco-create">Create and open</button>
+          <button class="btn-ghost btn-sm" data-newco-close>Cancel</button>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <!-- ── Customer Intelligence view ── -->
@@ -2000,13 +2535,9 @@
     </div>
   </div>
 
-  <!-- ── Batch progress ── -->
-  <div id="batch-progress" data-view="search">
-    <div class="progress-label" id="progress-label">Searching…</div>
-    <div class="progress-bar-wrap">
-      <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
-    </div>
-  </div>
+  <!-- Batch progress now lives inside the Find-contacts modal: it used to
+       carry data-view="search", so a search launched from the CRM view
+       reported its enrichment progress into a hidden element. -->
 
   <!-- ── Status messages (global -- visible regardless of active view) ── -->
   <div id="messages"></div>

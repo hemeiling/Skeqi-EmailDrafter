@@ -295,8 +295,17 @@ async function doCompanySearch(company, apiKey, options = {}) {
 
   if (firstPageResult.status === 200) {
     let rawPeople = firstPageResult.data.people || [];
+    // mixed_people/api_search returns total_entries at the TOP level, not
+    // inside a `pagination` object. Reading only pagination.total_entries
+    // made this fall back to rawPeople.length — i.e. exactly one page — so
+    // the loop below could never run and every company was silently capped
+    // at 25 contacts no matter what perCompanyLimit was set to. (Tesla:
+    // Apollo reports 6069 matches; the app concluded there were 25.)
+    // Both spellings are accepted in case an endpoint does nest it.
     const pagination = firstPageResult.data.pagination || {};
-    const totalEntries = pagination.total_entries || rawPeople.length;
+    const totalEntries = pagination.total_entries
+      || firstPageResult.data.total_entries
+      || rawPeople.length;
 
     // Fetch additional pages (same Apollo per_page chunk size) until we hit
     // the caller's per-company limit, run out of pages, or Apollo has no

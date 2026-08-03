@@ -1022,13 +1022,51 @@ async function markIntelligenceReviewed(companyId) {
 
 // Everything the Customer Intelligence panel needs for one company, including
 // the analysis freshness so the UI can be DB-first (reuse) vs. offer a refresh.
+// Contact coverage for one company: what the Contact Engine has actually
+// delivered for this account. Company Intelligence is the hub for an account,
+// and "do I have anyone to talk to here yet?" is part of its state — not a
+// separate page the user has to go and check.
+// Reported at the ACCOUNT level, because that is the unit the Contact Engine
+// imports into: /api/leads/search resolves a company name to its account, and
+// the import planner counts the same way. Reporting the company row's own
+// count as the headline instead would put two different numbers for the same
+// thing on one screen ("47 contacts" beside "49 now → 60 target").
+// `own_count` is kept so an account spanning several legal-entity rows
+// ("Tesla", "Tesla Automation GmbH") can still say so.
+async function getCompanyContactStats(companyId, accountId) {
+  const scope = accountId
+    ? { where: `comp.account_id = $1`, param: accountId }
+    : { where: `c.company_id = $1`, param: companyId };
+
+  const [stats, own] = await Promise.all([
+    q1(`
+      SELECT COUNT(DISTINCT c.id)::int AS count,
+             COUNT(DISTINCT c.id) FILTER (WHERE COALESCE(c.email, '') <> '')::int AS with_email,
+             MAX(c.created_at) AS last_added_at,
+             MAX(c.updated_at) AS last_updated_at
+      FROM contacts c JOIN companies comp ON comp.id = c.company_id
+      WHERE ${scope.where}
+    `, [scope.param]),
+    q1(`SELECT COUNT(*)::int AS count FROM contacts WHERE company_id = $1`, [companyId]),
+  ]);
+
+  return {
+    count: stats ? stats.count : 0,
+    with_email: stats ? stats.with_email : 0,
+    own_count: own ? own.count : 0,
+    last_added_at: stats ? stats.last_added_at : null,
+    last_updated_at: stats ? stats.last_updated_at : null,
+  };
+}
+
 async function getCompanyIntelligence(companyId) {
   const company = await getCompany(companyId);
   if (!company) return null;
-  const [tags, sources, reviewDays] = await Promise.all([
+  const [tags, sources, reviewDays, contacts] = await Promise.all([
     listCompanyTags(companyId),
     listResearchSources(companyId),
-    getIntelReviewPeriodDays()
+    getIntelReviewPeriodDays(),
+    getCompanyContactStats(companyId, company.account_id)
   ]);
   const analyzedAt = company.ai_analyzed_at ? new Date(company.ai_analyzed_at) : null;
   const ageDays = analyzedAt ? (Date.now() - analyzedAt.getTime()) / 86400000 : null;
@@ -1043,7 +1081,7 @@ async function getCompanyIntelligence(companyId) {
     tag_count: tags.length,
     confirmed_count: tags.filter((t) => t.source === 'user_confirmed' || t.source === 'manual').length
   };
-  return { company, tags, sources, status };
+  return { company, tags, sources, status, contacts };
 }
 
 // Consolidate one company's intelligence into another (for duplicate rows —
@@ -1181,6 +1219,47 @@ async function getOrCreateAccount(name) {
 
 async function getAccount(id) {
   return q1(`SELECT * FROM accounts WHERE id = $1`, [id]);
+}
+
+// Look up an account WITHOUT creating one. The import planner runs on every
+// keystroke while the user is still typing a company name — it must never
+// leave a trail of empty accounts behind for half-typed words.
+async function findAccountByName(name) {
+  if (!name || !name.trim()) return null;
+  return q1(`SELECT * FROM accounts WHERE LOWER(name) = LOWER($1)`, [name.trim()]);
+}
+
+// Contact counts for several accounts in one round trip, keyed by lowercased
+// account name. The planner is type-ahead: doing this per company meant a
+// separate remote query each, and getAccountContacts() pulls every full
+// contact row (including apollo_raw_json) purely to take its length — enough
+// latency to make the preview visibly lag behind typing.
+// An account with no contacts still appears, with 0; an account that does not
+// exist is simply absent, which is how the caller tells "new" from "empty".
+async function contactCountsByAccountNames(names) {
+  const keys = (names || []).map((n) => String(n || '').trim().toLowerCase()).filter(Boolean);
+  if (!keys.length) return {};
+  const rows = await q(`
+    SELECT LOWER(a.name) AS key, COUNT(DISTINCT c.id)::int AS n
+    FROM accounts a
+    LEFT JOIN companies comp ON comp.account_id = a.id
+    LEFT JOIN contacts c ON c.company_id = comp.id
+    WHERE LOWER(a.name) = ANY($1::text[])
+    GROUP BY LOWER(a.name)
+  `, [keys]);
+  const out = {};
+  rows.forEach((r) => { out[r.key] = r.n; });
+  return out;
+}
+
+// Batched sibling of getCompanySearchCache(), for the same reason.
+async function getCompanySearchCaches(cacheKeys) {
+  const keys = (cacheKeys || []).filter(Boolean);
+  if (!keys.length) return {};
+  const rows = await q(`SELECT * FROM company_search_cache WHERE company_key = ANY($1::text[])`, [keys]);
+  const out = {};
+  rows.forEach((r) => { out[r.company_key] = r; });
+  return out;
 }
 
 async function listAccounts() {
@@ -1343,6 +1422,34 @@ const COMPANY_CONTACT_COUNT = `
     FROM contacts WHERE company_id IS NOT NULL GROUP BY company_id
   ) cc ON cc.company_id = c.id`;
 
+/* Account list view: one row per company with just the columns the list
+   shows, plus the two counts that describe its state.
+
+   Deliberately not listCompanies(), which does SELECT c.* and therefore
+   ships every row's ai_research_summary — several KB each across ~1,100
+   companies. That payload is why the company picker used to take ~4s to
+   populate; a list view must not pay for prose it never displays. */
+async function listCompanySummaries() {
+  return q(`
+    SELECT c.id, c.name, c.chinese_name, c.industry, c.booth, c.priority,
+           c.account_id, c.booth_category,
+           c.ai_analyzed_at, c.intelligence_reviewed_at,
+           (COALESCE(c.ai_research_summary, '') <> '') AS has_summary,
+           COALESCE(cc.contact_count, 0)::int AS contact_count,
+           COALESCE(tg.tag_count, 0)::int AS tag_count,
+           COALESCE(tg.confirmed_count, 0)::int AS confirmed_count
+    FROM companies c
+    ${COMPANY_CONTACT_COUNT}
+    LEFT JOIN (
+      SELECT company_id,
+             COUNT(*)::int AS tag_count,
+             COUNT(*) FILTER (WHERE source IN ('user_confirmed', 'manual'))::int AS confirmed_count
+      FROM company_tags GROUP BY company_id
+    ) tg ON tg.company_id = c.id
+    ORDER BY c.name
+  `);
+}
+
 async function listCompanies(searchTerm) {
   if (searchTerm && searchTerm.trim()) {
     const like = `%${searchTerm.trim().toLowerCase()}%`;
@@ -1454,8 +1561,9 @@ const COMM_STATS_JOIN = `
   ) cs ON cs.contact_id = c.id`;
 
 async function listContacts(limit = 200) {
+  const cols = await contactListColumns();
   return q(`
-    SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id,
+    SELECT ${cols}, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id,
       COALESCE(cs.comm_count,0)::int AS comm_count,
       COALESCE(cs.comm_draft_count,0)::int AS comm_draft_count,
       cs.last_comm_at, cs.last_comm_type
@@ -1664,11 +1772,39 @@ async function upsertContact(c) {
   return { id: await insertContact(c), updated: false };
 }
 
+/* Contact list columns — every column except the Apollo blob.
+
+   apollo_raw_json averages ~5.7 KB per contact and is 4.1 MB of the 4.6 MB
+   contacts table. No list view reads it (only the email-reveal endpoint
+   does, and that loads its row directly), yet every list query selected it.
+   Because the values are large they live in TOAST storage, so `SELECT c.*`
+   paid an out-of-line read per row: searching "Tesla" took ~2.2s for 99
+   rows. Excluding it in SQL — not just dropping it from the JSON — is what
+   removes that cost, and is what lets one global search feel immediate.
+
+   The list is read from the catalogue once per process rather than
+   hardcoded, so a column added later is included automatically instead of
+   silently vanishing from the API. */
+let _contactListCols = null;
+async function contactListColumns() {
+  if (_contactListCols) return _contactListCols;
+  const rows = await q(`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'contacts'
+      AND column_name <> 'apollo_raw_json'
+    ORDER BY ordinal_position
+  `);
+  // Fall back to c.* if the catalogue is unavailable: slower, never wrong.
+  _contactListCols = rows.length ? rows.map((r) => `c."${r.column_name}"`).join(', ') : 'c.*';
+  return _contactListCols;
+}
+
 async function searchContacts(term, limit = 500) {
   if (term && term.trim()) {
     const like = `%${term.trim().toLowerCase()}%`;
+    const cols = await contactListColumns();
     return q(`
-      SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id,
+      SELECT ${cols}, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id,
         COALESCE(cs.comm_count,0)::int AS comm_count,
         COALESCE(cs.comm_draft_count,0)::int AS comm_draft_count,
         cs.last_comm_at, cs.last_comm_type
@@ -1751,8 +1887,9 @@ async function filterContacts(filters = {}, limit = 1000) {
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const orderBy = filters.sortBy === 'last_contacted' ? 'ORDER BY c.last_contacted_at DESC' : 'ORDER BY c.id DESC';
 
+  const cols = await contactListColumns();
   return q(`
-    SELECT c.*, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id,
+    SELECT ${cols}, COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id,
       COALESCE(cs.comm_count,0)::int AS comm_count,
       COALESCE(cs.comm_draft_count,0)::int AS comm_draft_count,
       cs.last_comm_at, cs.last_comm_type
@@ -2962,10 +3099,10 @@ module.exports = {
   // events
   getOrCreateEvent, listEvents,
   // accounts
-  getOrCreateAccount, getAccount, listAccounts, listAccountGroups, getAccountContacts,
+  getOrCreateAccount, getAccount, findAccountByName, contactCountsByAccountNames, listAccounts, listAccountGroups, getAccountContacts,
   listCompaniesForAccount, mergeAccounts,
   // companies
-  upsertCompany, findCompanyByName, getCompany, listCompanies, getCompanyContacts,
+  upsertCompany, findCompanyByName, getCompany, listCompanies, listCompanySummaries, getCompanyContacts,
   // contacts
   insertContact, listContacts, getContact, listContactsByCompany, deleteContact, deleteContacts,
   updateContact, updateContactDraft, findExistingContact, upsertContact, splitName,
@@ -2974,7 +3111,7 @@ module.exports = {
   // business cards
   insertBusinessCard, listBusinessCardsForContact,
   // apollo
-  getApolloCache, setApolloCache, getCompanySearchCache, setCompanySearchCache,
+  getApolloCache, setApolloCache, getCompanySearchCache, getCompanySearchCaches, setCompanySearchCache,
   updateCachedLeadDraft, logApolloResult, listApolloResults,
   // email drafts
   insertEmailDraftVersion, listEmailDraftsForContact, findLatestDraftForContact,

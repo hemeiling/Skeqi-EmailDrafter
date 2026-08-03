@@ -37,6 +37,9 @@ function showView(name) {
     item.classList.toggle("active", item.dataset.navView === name);
   });
   document.getElementById("app-breadcrumb-current").textContent = APP_VIEW_LABELS[name];
+  // The CRM list view gets the full window; form-shaped views keep the
+  // narrower reading column.
+  document.body.classList.toggle("view-wide", name === "crm");
   if (name === "booth-map") ensureFrameLoaded("bm-frame", "/booth-map/");
   if (name === "account-research") ensureFrameLoaded("ar-frame", "/account-research/");
   if (name === "home") loadDashboard();
@@ -83,15 +86,6 @@ function initAppShell() {
   // User-profile menu in the top bar mirrors the sender-profile name/company
   // (already tracked in `_sender`) rather than introducing a separate concept.
   document.getElementById("app-user-menu").addEventListener("click", () => showView("settings"));
-
-  document.getElementById("app-global-search").addEventListener("keydown", (e) => {
-    if (e.key !== "Enter") return;
-    const q = e.target.value.trim();
-    if (!q) return;
-    showView("crm");
-    document.getElementById("crm-search-input").value = q;
-    loadCrmContacts(q);
-  });
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -574,7 +568,10 @@ async function doSearch() {
   document.getElementById("pagination").innerHTML = "";
 
   try {
-    const forceRefresh = document.getElementById("force-refresh")?.checked || false;
+    // Either entry point may set this: the Find-contacts modal (CRM view)
+    // or the CSV panel's own checkbox (AI 邮件起草 view).
+    const forceRefresh = document.getElementById("crm-force-refresh")?.checked
+      || document.getElementById("force-refresh")?.checked || false;
     const r = await fetch("/api/leads/search", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ companies: company, force: forceRefresh, ...getSearchSettingsPayload() }),
@@ -2031,6 +2028,9 @@ async function focusCrmOnAccounts(names) {
   if (!names || !names.length) return;
   await loadBrowseSelectors();
   if (typeof accountSelect !== "undefined" && accountSelect) accountSelect.selectByKeys(names);
+  // The search ran in the Find-contacts modal; its job is done, so hand the
+  // screen back to the list the results just landed in.
+  if (typeof closeCrmDiscoverModal === "function") closeCrmDiscoverModal();
   const crmSection = document.getElementById("crm-toggle");
   if (crmSection) crmSection.scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -2126,13 +2126,18 @@ function renderSearchSummary(summaries) {
     const deptLine = s.departments && s.departments.length
       ? `Departments searched: ${s.departments.map((d) => `✓ ${escapeHtml(d)}`).join(" ")}`
       : "Departments searched: (default executive + specialist set)";
+    // Report the account's before/after, not just this batch: the useful
+    // question after a top-up is "how many do I have now", and "already in
+    // CRM" has to read as preserved rather than discarded.
+    const alreadyHeld = Number(s.alreadyHeldCount) || 0;
     div.innerHTML = `
-      <div class="msg-summary-title">Search completed — ${escapeHtml(s.company)}</div>
+      <div class="msg-summary-title">Search completed — ${escapeHtml(s.company)}${s.forced ? " (full refresh)" : ""}</div>
       <div class="msg-summary-row">${deptLine}</div>
       <div class="msg-summary-stats">
-        <span>Contacts found: <b>${s.foundCount}</b></span>
-        <span>Imported: <b>${s.importedCount}</b></span>
-        <span>Duplicates skipped: <b>${s.duplicatesSkipped}</b></span>
+        <span>Returned by Apollo: <b>${s.foundCount}</b></span>
+        <span>Already in CRM (kept as-is): <b>${alreadyHeld}</b></span>
+        <span>Newly imported: <b>${s.importedCount}</b></span>
+        ${s.totalCount !== undefined ? `<span>Total for this company: <b>${s.totalCount}</b>${s.target ? ` / ${s.target} requested` : ""}</span>` : ""}
       </div>`;
     container.appendChild(div);
   });
@@ -2637,13 +2642,10 @@ let _crmContacts = [];
 let _crmPage = 1;
 const CRM_PAGE_SIZE = 10;
 
-document.getElementById("crm-toggle").addEventListener("click", () => {
-  const body = document.getElementById("crm-body");
-  const icon = document.getElementById("crm-toggle-icon");
-  const hidden = body.style.display === "none";
-  body.style.display = hidden ? "" : "none";
-  icon.textContent = hidden ? "▼" : "▶";
-});
+// The CRM card used to be collapsible, from when every section shared one
+// scrolling page. With a dedicated nav view there is nothing to collapse it
+// *for*, so #crm-toggle is now just the page header (and the scroll anchor
+// other flows still jump to).
 
 function debounce(fn, wait) {
   let t;
@@ -2671,12 +2673,13 @@ async function loadCrmContacts(query, filterPatch) {
     _crmPage = 1;
     renderCrmTable(_crmContacts);
     renderCrmFilterSummary();
+    renderCrmCompanyBar();
     autoEnrichCrmPage();
   } catch (e) { /* silent */ }
 }
 
 /* ── Quick Browse: a cascade, not five independent filters ────────────────
-   ① Company → ② Contact → ③ Show → ④ Category → ⑤ Matching companies.
+   Company → Contact → Trade show → Category → matching companies.
 
    Each step narrows what the next one offers, and the bottom list is the
    *result* of the chain rather than another filter. Categories are scoped to
@@ -2737,7 +2740,7 @@ function renderQbShows() {
   const shows = _crmShows.filter((s) => counts[s.name]);
 
   if (!shows.length) {
-    box.innerHTML = `<div style="padding:6px;font-size:0.7rem;color:#9ca3af;">上游筛选下没有展会数据</div>`;
+    box.innerHTML = `<div style="padding:6px;font-size:0.7rem;color:#9ca3af;">No trade shows under the current filters</div>`;
     if (_qbShow) { _qbShow = ""; _qbCats = []; }
     return;
   }
@@ -2748,7 +2751,7 @@ function renderQbShows() {
       <span class="crm-cat-count">${counts[s.name]}</span>
     </label>`).join("")
     + `<label class="crm-cat-item"><input type="radio" name="qb-show" value="" ${!_qbShow ? "checked" : ""} />
-       <span class="crm-cat-label" style="color:#6b7280;">不限展会</span></label>`;
+       <span class="crm-cat-label" style="color:#6b7280;">All shows · 不限展会</span></label>`;
 
   box.querySelectorAll('input[name="qb-show"]').forEach((r) => {
     r.addEventListener("change", () => {
@@ -2759,7 +2762,7 @@ function renderQbShows() {
   });
 }
 
-/* Step ④: categories that exist inside the selected show. */
+/* Categories that exist inside the selected show. */
 function renderQbCategories() {
   const box = document.getElementById("crm-cat-list");
   const head = document.getElementById("crm-cat-heading");
@@ -2774,9 +2777,9 @@ function renderQbCategories() {
   inShow.forEach((c) => { if (c.booth_category) counts[c.booth_category] = (counts[c.booth_category] || 0) + 1; });
   const keys = Object.keys(BOOTH_CATEGORY_META).filter((k) => counts[k]);
 
-  if (head) head.textContent = _qbShow ? `④ 分类 · ${_qbShow.replace(/^The\s+/, "")}` : "④ 分类 · Category";
+  if (head) head.textContent = _qbShow ? `Category · ${_qbShow.replace(/^The\s+/, "")}` : "Category";
   if (!keys.length) {
-    box.innerHTML = `<div style="padding:6px;font-size:0.7rem;color:#9ca3af;">${_qbShow ? "该展会下暂无分类" : "先选择一个展会"}</div>`;
+    box.innerHTML = `<div style="padding:6px;font-size:0.7rem;color:#9ca3af;">${_qbShow ? "No categories in this show" : "Pick a trade show first"}</div>`;
     return;
   }
   box.innerHTML = keys.map((k) => {
@@ -2794,10 +2797,11 @@ function renderQbCategories() {
   }));
 }
 
-/* Step ⑤: the result set — everything ①–④ agree on. */
+/* The result set — everything the filters above agree on. */
 function qbResultCompanies() {
   const byId = new Map(_crmShows.map((s) => [s.id, s.name]));
-  const term = lc(document.getElementById("crm-co-search")?.value);
+  // Narrowed by the one global search rather than a box of its own.
+  const term = lc(crmSearchTerm());
   return qbUpstreamCompanies().filter((c) => {
     if (_qbShow && byId.get(c.event_id) !== _qbShow) return false;
     if (_qbCats.length && !_qbCats.includes(c.booth_category)) return false;
@@ -2814,14 +2818,17 @@ function renderCrmCompanyList() {
   if (countEl) countEl.textContent = String(list.length);
 
   if (!list.length) {
-    box.innerHTML = `<div style="padding:10px 6px;font-size:0.72rem;color:#9ca3af;">没有匹配的公司</div>`;
+    box.innerHTML = `<div style="padding:10px 6px;font-size:0.72rem;color:#9ca3af;">No matching companies</div>`;
     return;
   }
+  // Which company the table is currently scoped to, so the list shows the
+  // selection rather than leaving the user to infer it from the chip row.
+  const active = new Set((_crmActiveFilters.accounts || []).map(lc));
   const shown = list.slice(0, 250);
   box.innerHTML = shown.map((c) => {
     const n = Number(c.contact_count) || 0;
     return `
-      <div class="crm-co-item" data-cid="${c.id}" title="${escapeHtml(c.name)}${c.booth ? " · 展位 " + escapeHtml(c.booth) : ""}">
+      <div class="crm-co-item${active.has(lc(c.name)) ? " active" : ""}" data-cid="${c.id}" title="${escapeHtml(c.name)}${c.booth ? " · 展位 " + escapeHtml(c.booth) : ""}">
         <div class="crm-co-top">
           <span class="crm-co-name">${escapeHtml(c.chinese_name || c.name)}</span>
           ${c.booth ? `<span class="crm-co-booth">${escapeHtml(c.booth)}</span>` : ""}
@@ -2834,15 +2841,18 @@ function renderCrmCompanyList() {
         </div>
       </div>`;
   }).join("") + (list.length > shown.length
-    ? `<div style="padding:6px;font-size:0.68rem;color:#9ca3af;">仅显示前 ${shown.length} 家，请用上方查找缩小范围</div>`
+    ? `<div style="padding:6px;font-size:0.68rem;color:#9ca3af;">Showing the first ${shown.length} — narrow with the search above</div>`
     : "");
 
   const find = (el) => _crmCompanies.find((c) => c.id === Number(el.dataset.cid));
-  // Row click = open the booth, per the result-list semantics.
+  // Row click scopes the contact table to that company — the list answers
+  // "which companies match?", so selecting one is navigation into it.
+  // Opening the booth map stayed, but as its own button rather than the
+  // meaning of a click on the row.
   box.querySelectorAll(".crm-co-item").forEach((el) => el.addEventListener("click", (e) => {
     if (e.target.closest("button")) return;
     const co = find(el);
-    if (co) openCompanyOnMap(co);
+    if (co) setCrmAccounts([co.name], { toggle: true });
   }));
   box.querySelectorAll("button[data-act]").forEach((b) => b.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -2850,7 +2860,7 @@ function renderCrmCompanyList() {
     if (!co) return;
     if (b.dataset.act === "map") openCompanyOnMap(co);
     else if (b.dataset.act === "fill") fillCompanyIntoSearch(co);
-    else accountSelect.selectByKeys([co.name]);
+    else setCrmAccounts([co.name], { toggle: true });
   }));
 }
 
@@ -2897,8 +2907,6 @@ async function initCrmCategoryFilter() {
 
   const clear = document.getElementById("crm-cat-clearall");
   if (clear) clear.addEventListener("click", () => { _qbCats = []; applyQbFilters(); });
-  const coSearch = document.getElementById("crm-co-search");
-  if (coSearch) coSearch.addEventListener("input", renderCrmCompanyList);
 
   await refreshCrmCompanies();
   renderQbShows();
@@ -2936,13 +2944,94 @@ function fillCompanyIntoSearch(co) {
   setTimeout(() => { input.style.boxShadow = ""; input.style.borderColor = ""; }, 1400);
 }
 
+/* Active-filter chips.
+
+   The old summary reported only the account filter, which meant the table
+   could be narrowed by five other things with nothing on screen saying so —
+   the direct cause of "why am I seeing 26 contacts?". Every applied filter
+   now gets a chip, and every chip can be removed from where it is shown.
+   Chips clear a whole group; the rail is still where individual values are
+   added and removed. */
+const CRM_FILTER_CHIPS = [
+  { key: "accounts",            label: "Company",   list: true,
+    clear: () => { setCrmAccounts([]); return null; } },
+  { key: "show_event",          label: "Show",      clear: () => { _qbShow = ""; _qbCats = []; return null; } },
+  { key: "booth_categories",    label: "Category",  list: true,  clear: () => { _qbCats = []; return null; },
+    describe: (keys) => keys.map((k) => (BOOTH_CATEGORY_META[k] || [k])[0]) },
+  { key: "event",               label: "Event",     input: "crm-filter-event" },
+  { key: "industry",            label: "Industry",  input: "crm-filter-industry" },
+  { key: "follow_up_status",    label: "Status",    input: "crm-filter-status", describe: (v) => [String(v).replace(/_/g, " ")] },
+  { key: "assigned_salesperson", label: "Owner",    input: "crm-filter-owner" },
+  { key: "department_categories", label: "Department", list: true, clear: () => { deptSelect.clearAll(); return { department_categories: [] }; },
+    describe: (keys) => keys.map((k) => (_departmentOptions.find((d) => d.key === k) || {}).label || k) },
+  { key: "seniority_levels",    label: "Seniority", list: true,  clear: () => { senioritySelect.clearAll(); return { seniority_levels: [] }; },
+    describe: (keys) => keys.map((k) => (_seniorityOptions.find((d) => d.key === k) || {}).label || k) },
+];
+
 function renderCrmFilterSummary() {
   const el = document.getElementById("crm-filter-summary");
   if (!el) return;
+
+  const chips = [];
+  CRM_FILTER_CHIPS.forEach((f) => {
+    const raw = _crmActiveFilters[f.key];
+    const values = f.list ? (raw || []) : (raw ? [raw] : []);
+    if (!values.length) return;
+    const shown = f.describe ? f.describe(values) : values;
+    const text = shown.length > 2 ? `${shown[0]} +${shown.length - 1}` : shown.join(", ");
+    chips.push(`<span class="crm-fchip"><b>${escapeHtml(f.label)}:</b><span>${escapeHtml(text)}</span>
+      <button type="button" data-fkey="${f.key}" title="Remove this filter">&times;</button></span>`);
+  });
+
+  el.innerHTML = chips.join("");
+  el.querySelectorAll("button[data-fkey]").forEach((b) => {
+    b.addEventListener("click", () => removeCrmFilter(b.dataset.fkey));
+  });
+}
+
+/* Single-company context bar.
+
+   The import target used to be reachable only by opening a modal and typing
+   the company name again — while the user was already looking at that exact
+   company's list. When the list is scoped to one company this states what
+   they hold and offers to change it, pre-filled. */
+function renderCrmCompanyBar() {
+  const bar = document.getElementById("crm-company-bar");
+  if (!bar) return;
   const accounts = _crmActiveFilters.accounts || [];
-  if (!accounts.length) { el.textContent = ""; return; }
-  const scope = accounts.length === 1 ? accounts[0] : `${accounts.length} selected companies (${accounts.join(", ")})`;
-  el.textContent = `Showing ${_crmContacts.length} contact${_crmContacts.length !== 1 ? "s" : ""} across ${scope}.`;
+  if (accounts.length !== 1) { bar.hidden = true; bar.innerHTML = ""; return; }
+
+  const name = accounts[0];
+  const n = _crmContacts.length;
+  bar.innerHTML = `
+    <span class="crm-co-bar-name">${escapeHtml(name)}</span>
+    <span class="crm-co-bar-meta">${n} contact${n !== 1 ? "s" : ""} in your CRM</span>
+    <span class="crm-co-bar-actions">
+      <button type="button" class="btn-sm btn-primary" id="crm-co-bar-more">Get more contacts</button>
+    </span>`;
+  bar.hidden = false;
+  document.getElementById("crm-co-bar-more")?.addEventListener("click", () => {
+    // Open on a useful target rather than one that would retrieve nothing.
+    const t = document.getElementById("search-per-company-limit");
+    if (t && Number(t.value) <= n) t.value = Math.min(500, n + 25);
+    openCrmDiscoverModal(name);
+  });
+}
+
+function removeCrmFilter(key) {
+  const f = CRM_FILTER_CHIPS.find((x) => x.key === key);
+  if (!f) return;
+  if (f.input) {
+    const el = document.getElementById(f.input);
+    if (el) el.value = "";
+    document.getElementById("crm-apply-filters-btn").click();   // one code path for field filters
+    return;
+  }
+  const patch = f.clear ? f.clear() : null;
+  // Show/category live in the Quick-Browse cascade, which reloads the table
+  // itself; the multi-selects need their filter key explicitly cleared.
+  if (patch) loadCrmContacts(document.getElementById("crm-search-input").value.trim(), patch);
+  else applyQbFilters();
 }
 
 // Background enrichment for contacts on the current CRM page that have
@@ -2992,12 +3081,22 @@ document.getElementById("crm-clear-filters-btn").addEventListener("click", () =>
   document.getElementById("crm-filter-industry").value = "";
   document.getElementById("crm-filter-status").value = "";
   document.getElementById("crm-filter-owner").value = "";
-  clearAccountSelection();
-  clearContactSelection();
   clearDeptSeniorityFilters();
+  const mergeBtn = document.getElementById("crm-merge-accounts-btn");
+  if (mergeBtn) mergeBtn.style.display = "none";
+  _selectedAccountsForMerge = [];
+  // The show/category cascade was never reset here, so "Clear filters" left
+  // the table silently scoped to a trade show and its categories. With every
+  // filter now shown as a chip, that leftover is visible — and wrong.
+  _qbShow = "";
+  _qbCats = [];
+  renderQbShows();
+  renderQbCategories();
+  renderCrmCompanyList();
   loadCrmContacts(document.getElementById("crm-search-input").value, {
     event: "", industry: "", follow_up_status: "", assigned_salesperson: "",
     accounts: [], contact_ids: [], department_categories: [], seniority_levels: [],
+    show_event: "", booth_categories: [],
   });
 });
 
@@ -3013,15 +3112,15 @@ function renderCrmTable(contacts) {
   const pageSlice = contacts.slice(pageStart, pageEnd);
 
   document.getElementById("crm-count").textContent =
-    `${total} contact${total !== 1 ? "s" : ""} in your CRM`;
+    `${total} contact${total !== 1 ? "s" : ""}`;
 
   if (!total) {
     document.getElementById("crm-tbody").innerHTML = `
-      <tr><td colspan="13">
+      <tr><td colspan="8">
         <div class="table-empty-state">
           <div class="tes-icon">🗂️</div>
-          <div class="tes-title">No contacts yet</div>
-          <div class="tes-hint">Search a company above or click "+ Add Contact" to start building your CRM.</div>
+          <div class="tes-title">No contacts match</div>
+          <div class="tes-hint">Clear a filter, or use “Find contacts” to search Apollo and build your CRM.</div>
         </div>
       </td></tr>`;
     document.getElementById("crm-pagination").innerHTML = "";
@@ -3053,33 +3152,45 @@ function renderCrmTable(contacts) {
     const lastType = c.last_comm_type
       ? `<span style="font-size:0.65rem;color:#6b7280;margin-left:3px;">${c.last_comm_type.replace(/_/g," ")}</span>`
       : "";
-    const interactionCell = commCount
-      ? `<span style="font-size:0.75rem;">${commCount} <span style="color:#9ca3af;">(${commDraftCount}d)</span></span>`
-      : `<span style="font-size:0.73rem;color:#9ca3af;">—</span>`;
+    // Two-line cells: the secondary attribute rides with the record it
+    // describes (title under name, phone under email) instead of buying a
+    // column of its own. Same information, four fewer columns to scan.
+    // #crm-email-cell-* stays a dedicated inner element because
+    // autoEnrichCrmPage() replaces its contents wholesale.
     return `<tr>
       <td class="col-check"><input type="checkbox" class="crm-check" data-idx="${i}"></td>
-      <td>${escapeHtml(c.full_name || "Unnamed")}</td>
-      <td>${escapeHtml(c.job_title || "")}</td>
-      <td>${escapeHtml(c.company || "")}</td>
-      <td id="crm-email-cell-${i}">${emailCell}</td>
-      <td style="font-size:0.76rem;color:#374151;">${escapeHtml(c.phone || "")}</td>
-      <td style="font-size:0.76rem;color:#374151;">${lastActivity}${lastType}</td>
-      <td>${interactionCell}</td>
-      <td><span class="badge badge-source">${escapeHtml(c.source || "manual")}</span></td>
+      <td>
+        <div class="cell-primary" style="font-weight:600;">${escapeHtml(c.full_name || "Unnamed")}</div>
+        ${c.job_title ? `<div class="cell-sub">${escapeHtml(c.job_title)}</div>` : ""}
+      </td>
+      <td>
+        <div class="cell-primary">${escapeHtml(c.company || "—")}</div>
+        <div class="cell-sub"><span class="badge badge-source">${escapeHtml(c.source || "manual")}</span></div>
+      </td>
+      <td>
+        <div id="crm-email-cell-${i}">${emailCell}</div>
+        ${c.phone ? `<div class="cell-sub">${escapeHtml(c.phone)}</div>` : ""}
+      </td>
+      <td>
+        <div class="cell-primary cell-nowrap">${lastActivity}${lastType}</div>
+        <div class="cell-sub">${commCount ? `${commCount} interaction${commCount !== 1 ? "s" : ""}${commDraftCount ? ` · ${commDraftCount} draft${commDraftCount !== 1 ? "s" : ""}` : ""}` : "No interactions"}</div>
+      </td>
       <td><input type="text" class="crm-tags-input" data-id="${c.id}" value="${escapeAttr(c.tags || "")}"
-            style="width:100px;font-size:12px;padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;" placeholder="tags…"></td>
+            style="font-size:12px;padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;" placeholder="tags…"></td>
       <td>
         <select class="crm-status-select" data-id="${c.id}" style="font-size:12px;padding:3px 4px;border:1px solid #d1d5db;border-radius:4px;">
           ${FOLLOW_UP_STATUSES.map(s => `<option value="${s}" ${c.follow_up_status === s ? "selected" : ""}>${s.replace(/_/g, " ")}</option>`).join("")}
         </select>
       </td>
-      <td id="crm-draft-status-${i}">${draftStatus}</td>
-      <td id="crm-action-${i}">
-        ${hasDraft
-          ? `<button class="btn-sm btn-saved crm-view-draft-btn" data-idx="${i}">View Draft</button>
-             <button class="btn-sm btn-orange crm-redraft-btn" data-idx="${i}">Redraft</button>`
-          : `<button class="btn-sm btn-primary crm-draft-btn" data-idx="${i}">Draft Email</button>`}
-        <button class="btn-sm btn-ghost crm-details-btn" data-idx="${i}">Details</button>
+      <td class="col-actions">
+        <div id="crm-action-${i}">
+          ${hasDraft
+            ? `<button class="btn-sm btn-saved crm-view-draft-btn" data-idx="${i}" title="View saved draft">View</button>
+               <button class="btn-sm btn-orange crm-redraft-btn" data-idx="${i}" title="Generate a new draft">Redraft</button>`
+            : `<button class="btn-sm btn-primary crm-draft-btn" data-idx="${i}" title="Draft an email to this contact">Draft</button>`}
+          <button class="btn-sm btn-ghost crm-details-btn" data-idx="${i}">Details</button>
+        </div>
+        <div class="crm-draft-state" id="crm-draft-status-${i}">${draftStatus}</div>
       </td>
     </tr>`;
   }).join("");
@@ -3143,6 +3254,11 @@ function createMultiSelect({ inputId, dropdownId, chipsId, clearAllId, getItems,
   const input = document.getElementById(inputId);
   const dropdown = document.getElementById(dropdownId);
   const chipsEl = document.getElementById(chipsId);
+  // A control whose markup this layout doesn't include still has to expose
+  // the API, so callers don't each need a null check.
+  if (!input || !dropdown) {
+    return { clearAll() {}, refreshOptions() {}, selectByKeys() {} };
+  }
   const clearAllEl = document.getElementById(clearAllId);
   if (!input || !dropdown || !chipsEl) return null;
 
@@ -3249,24 +3365,32 @@ function createMultiSelect({ inputId, dropdownId, chipsId, clearAllId, getItems,
 
 let _selectedAccountsForMerge = [];
 
-const accountSelect = createMultiSelect({
-  inputId: "crm-sel-account-input", dropdownId: "crm-sel-account-dropdown",
-  chipsId: "crm-sel-account-chips", clearAllId: "crm-sel-account-clearall",
-  // ① is the head of the cascade — it offers every company and narrows what
-  // comes after it, never the other way round.
-  getItems: () => _accountOptions,
-  keyOf: (it) => it.name,
-  matchText: (it) => it.name || "",
-  renderOptionLabel: (it) => `${escapeHtml(it.name)} <span class="crm-sel-sub">(${it.contact_count})</span>`,
-  renderChipLabel: (it) => it.name,
-  onChange: (items) => {
-    _crmActiveFilters.accounts = items.map((it) => it.name);
-    _selectedAccountsForMerge = items;
-    document.getElementById("crm-merge-accounts-btn").style.display = items.length >= 2 ? "" : "none";
-    if (contactSelect) contactSelect.refreshOptions();   // ② narrows to these companies
-    applyQbFilters();                                     // ③④⑤ recompute
-  },
-});
+/* Account scope is now plain state rather than a searchable multi-select.
+
+   Selecting a company is navigation — you click it in Matching Companies —
+   so the only thing that needed to survive the removal of that control is
+   the filter value itself, which the chip row already displays and clears.
+   Everything that used to call accountSelect.selectByKeys() calls this. */
+function setCrmAccounts(names, { toggle = false } = {}) {
+  const current = _crmActiveFilters.accounts || [];
+  let next = (names || []).filter(Boolean);
+  if (toggle && next.length === 1) {
+    const n = next[0];
+    next = current.some((x) => lc(x) === lc(n))
+      ? current.filter((x) => lc(x) !== lc(n))   // clicking the active one clears it
+      : current.concat([n]);
+  }
+  _crmActiveFilters.accounts = next;
+
+  // Merging operates on the selected accounts, so it follows this state.
+  _selectedAccountsForMerge = _accountOptions.filter((a) => next.some((n) => lc(n) === lc(a.name)));
+  const mergeBtn = document.getElementById("crm-merge-accounts-btn");
+  if (mergeBtn) mergeBtn.style.display = _selectedAccountsForMerge.length >= 2 ? "" : "none";
+
+  applyQbFilters();                                       // recompute the cascade
+}
+
+const accountSelect = { clearAll() {}, refreshOptions() {}, selectByKeys(names) { setCrmAccounts(names); } };
 
 document.getElementById("crm-merge-accounts-btn").addEventListener("click", () => {
   if (_selectedAccountsForMerge.length < 2) return;
@@ -3314,25 +3438,11 @@ document.getElementById("merge-accounts-ok").addEventListener("click", async () 
   }
 });
 
-const contactSelect = createMultiSelect({
-  inputId: "crm-sel-contact-input", dropdownId: "crm-sel-contact-dropdown",
-  chipsId: "crm-sel-contact-chips", clearAllId: "crm-sel-contact-clearall",
-  // ② is scoped by ① — picking a company should shrink this list, not leave
-  // you scrolling contacts who work somewhere else.
-  getItems: () => {
-    const picked = (_crmActiveFilters.accounts || []).map((a) => String(a).trim().toLowerCase());
-    if (!picked.length) return _contactOptions;
-    return _contactOptions.filter((ct) => picked.includes(String(ct.company || "").trim().toLowerCase()));
-  },
-  keyOf: (it) => it.id,
-  matchText: (it) => `${it.full_name || ""} ${it.company || ""}`,
-  renderOptionLabel: (it) => `${escapeHtml(it.full_name || "Unnamed")}<br><span class="crm-sel-sub">${escapeHtml(it.company || "")}</span>`,
-  renderChipLabel: (it) => `${it.full_name || "Unnamed"}${it.company ? " — " + it.company : ""}`,
-  onChange: (items) => {
-    _crmActiveFilters.contact_ids = items.map((it) => it.id);
-    applyQbFilters();                                     // ③④⑤ recompute
-  },
-});
+/* The Browse-by-Contact multi-select is gone: picking one contact out of a
+   dropdown to filter a table down to that same contact is what the global
+   search does directly. The filter key stays supported server-side (the
+   cascade still reads contact_ids) but nothing sets it any more. */
+const contactSelect = { clearAll() {}, refreshOptions() {}, selectByKeys() {} };
 
 let _departmentOptions = [];
 let _seniorityOptions = [];
@@ -3363,8 +3473,8 @@ const senioritySelect = createMultiSelect({
   },
 });
 
-function clearAccountSelection() { if (accountSelect) accountSelect.clearAll(); }
-function clearContactSelection() { if (contactSelect) contactSelect.clearAll(); }
+function clearAccountSelection() { setCrmAccounts([]); }
+function clearContactSelection() { _crmActiveFilters.contact_ids = []; }
 function clearDeptSeniorityFilters() {
   if (deptSelect) deptSelect.clearAll();
   if (senioritySelect) senioritySelect.clearAll();
@@ -3419,12 +3529,14 @@ async function openCrmDraftModal(idx, options) {
   }, options);
 }
 
+// #crm-action-* is the button row *inside* the actions cell, so replacing it
+// leaves the draft-state line below it intact for the update further down.
 function setCrmDraftButtons(idx) {
   const cell = document.getElementById(`crm-action-${idx}`);
   if (!cell) return;
   cell.innerHTML = `
-    <button class="btn-sm btn-saved crm-view-draft-btn" data-idx="${idx}">View Draft</button>
-    <button class="btn-sm btn-orange crm-redraft-btn" data-idx="${idx}">Redraft</button>
+    <button class="btn-sm btn-saved crm-view-draft-btn" data-idx="${idx}" title="View saved draft">View</button>
+    <button class="btn-sm btn-orange crm-redraft-btn" data-idx="${idx}" title="Generate a new draft">Redraft</button>
     <button class="btn-sm btn-ghost crm-details-btn" data-idx="${idx}">Details</button>`;
   cell.querySelector(".crm-view-draft-btn").addEventListener("click", () => openCrmDraftModal(idx));
   cell.querySelector(".crm-redraft-btn").addEventListener("click", () => openCrmDraftModal(idx, { forceRegenerateOnOpen: true }));
@@ -3620,8 +3732,24 @@ async function patchCrmContact(id, fields) {
   } catch (e) { /* silent */ }
 }
 
-document.getElementById("crm-search-input").addEventListener("input", debounce(function () {
-  loadCrmContacts(this.value);
+/* One search, three surfaces.
+
+   A term typed once narrows the contact table, the Matching Companies list
+   and the Companies tab together, so "Tesla" never has to be entered twice.
+
+   Read the term off the event, not `this`: debounce() re-invokes the handler
+   as a plain call, so `this` was globalThis and `this.value` undefined —
+   every keystroke reloaded the *unfiltered* list. */
+function crmSearchTerm() {
+  return (document.getElementById("crm-search-input")?.value || "").trim();
+}
+
+document.getElementById("crm-search-input").addEventListener("input", debounce((e) => {
+  const term = e.target.value.trim();
+  loadCrmContacts(term);          // contact table
+  renderCrmCompanyList();         // Matching companies (rail)
+  _crmAcctPage = 1;
+  renderCrmAccounts();            // Companies tab
 }, 300));
 document.getElementById("crm-refresh-btn").addEventListener("click", () => {
   loadCrmContacts(document.getElementById("crm-search-input").value);
@@ -3632,11 +3760,30 @@ function getCheckedCrmIdxs() {
   return idxs;
 }
 
+// The bulk bar is contextual: it slides in on selection and leaves when the
+// selection is emptied, so drafting controls never sit on the page in a
+// permanently-disabled state above the data (Gmail / Linear pattern).
 function updateCrmSelectionUI() {
   const count = getCheckedCrmIdxs().length;
   document.getElementById("crm-bulk-draft-btn").disabled = count === 0;
   document.getElementById("crm-bulk-delete-btn").disabled = count === 0;
   document.getElementById("crm-selected-count").textContent = count ? `${count} selected` : "";
+  const bar = document.getElementById("crm-bulkbar");
+  if (bar) bar.hidden = count === 0;
+
+  // Keep the header checkbox honest: checked only when the whole page is,
+  // indeterminate on a partial selection.
+  const all = document.querySelectorAll(".crm-check");
+  const master = document.getElementById("crm-select-all");
+  if (master) {
+    master.checked = all.length > 0 && count === all.length;
+    master.indeterminate = count > 0 && count < all.length;
+  }
+}
+
+function clearCrmSelection() {
+  document.querySelectorAll(".crm-check").forEach((c) => { c.checked = false; });
+  updateCrmSelectionUI();
 }
 
 document.getElementById("crm-select-all").addEventListener("change", function () {
@@ -3730,13 +3877,395 @@ document.getElementById("delete-confirm-ok").addEventListener("click", async () 
   }
 });
 
+/* ══════════════════════════════════════════════════════════════════════
+   CRM workspace wiring.
+
+   Three behaviours the redesigned page depends on:
+     1. Discovery (Apollo) opens in a modal instead of living above the list.
+     2. Company Intelligence opens in a right-hand drawer.
+     3. Filters apply on change — no "Apply filters" button to forget. The
+        old button is kept (hidden) as the single implementation of that
+        logic and is triggered programmatically.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── Import planner ──────────────────────────────────────────────────────
+   "Find contacts" used to be a button you pressed and then found out what
+   happened. Every decision it makes — how many you already hold, how many
+   it will pull, what that costs, whether it appends or replaces — is now
+   answered on screen before it runs, and the button states the outcome.
+
+   The plan is read-only and free: /api/leads/plan never calls Apollo. The
+   one figure it can't know for nothing is Apollo's true match count, so
+   that is shown only when a previous search recorded it, with its date. */
+
+function crmImportMode() {
+  const el = document.querySelector('input[name="crm-import-mode"]:checked');
+  return el ? el.value : "append";
+}
+
+function crmPlanInputs() {
+  return {
+    companies: (document.getElementById("company-input")?.value || "")
+      .split(",").map((s) => s.trim()).filter(Boolean),
+    target: Number(document.getElementById("search-per-company-limit")?.value) || 25,
+    maxTotal: Number(document.getElementById("search-max-total")?.value) || 100,
+    mode: crmImportMode(),
+  };
+}
+
+function renderCrmPlan(plans) {
+  const box = document.getElementById("crm-plan");
+  const btn = document.getElementById("search-btn");
+  if (!box) return;
+
+  const totalNew = plans.reduce((n, p) => n + p.willRetrieve, 0);
+  const totalReq = plans.reduce((n, p) => n + p.searchRequests, 0);
+  const totalLookups = plans.reduce((n, p) => n + p.emailLookups, 0);
+  const replacing = plans.some((p) => p.mode === "replace");
+  // In replace mode the retrieved records are mostly ones already held, so
+  // calling them "new" would overstate what actually gets added.
+  const verb = replacing ? "to re-query" : "to retrieve";
+
+  box.innerHTML = `
+    <div class="crm-plan-head">What this will do</div>
+    ${plans.map((p) => {
+      const cost = p.searchRequests
+        ? `~${p.searchRequests} Apollo search request${p.searchRequests !== 1 ? "s" : ""}${p.emailLookups ? `, plus up to ${p.emailLookups} email lookup${p.emailLookups !== 1 ? "s" : ""}` : ""}`
+        : "No Apollo requests — nothing to fetch";
+      const avail = p.apolloTotal
+        ? `Apollo reported <b>${nf.format(p.apolloTotal)}</b> matching people${p.apolloTotalAt ? ` (as of ${new Date(p.apolloTotalAt).toLocaleDateString()})` : ""}.`
+        : `How many more Apollo holds is unknown until the first search.`;
+      return `
+      <div class="crm-plan-row">
+        <div class="crm-plan-co">${escapeHtml(p.company)}${p.known ? "" : `<span class="crm-plan-new">not yet in your CRM</span>`}</div>
+        <div class="crm-plan-math">
+          <span class="crm-plan-num"><b>${p.current}</b><span>now</span></span>
+          <span class="crm-plan-op">→</span>
+          <span class="crm-plan-num"><b>${p.target}</b><span>target</span></span>
+          <span class="crm-plan-op">=</span>
+          <span class="crm-plan-num crm-plan-get"><b>${p.willRetrieve > 0 ? (replacing ? "" : "+") + p.willRetrieve : "0"}</b><span>${verb}</span></span>
+        </div>
+        <div class="crm-plan-cost">${cost}. ${avail}</div>
+        ${p.budgetLimited ? `<div class="crm-plan-warn">Trimmed by your "Maximum new contacts" cap — raise it to pull the rest.</div>` : ""}
+        ${!p.willRetrieve && p.mode === "append" && p.current >= p.target
+          ? `<div class="crm-plan-none">Already at or above the target — this company will be served from your database, costing nothing.</div>` : ""}
+      </div>`;
+    }).join("")}
+    <div class="crm-plan-foot">
+      ${replacing
+        ? `<b>Full refresh.</b> Existing contacts are re-queried and updated in place — drafts, notes, tags, threads and history are kept. Nothing is deleted.`
+        : `<b>Append only.</b> Your ${plans.reduce((n, p) => n + p.current, 0)} existing contact(s) are left untouched — new records are matched against them and only the missing ones are added.`}
+    </div>`;
+  box.hidden = false;
+
+  if (btn && !btn.disabled) {
+    btn.textContent = totalNew > 0
+      ? (replacing
+          ? `Refresh ${totalNew} contact${totalNew !== 1 ? "s" : ""}`
+          : `Import up to ${totalNew} new contact${totalNew !== 1 ? "s" : ""}`)
+      : "Search";
+    btn.title = totalReq
+      ? `About ${totalReq} Apollo search request(s) and up to ${totalLookups} email lookup(s)`
+      : "";
+  }
+}
+
+// Sequence number: editing the company and the target in quick succession
+// fires two lookups, and the slower one must not repaint the plan with the
+// older inputs' answer.
+let _crmPlanSeq = 0;
+
+async function refreshCrmPlan() {
+  const box = document.getElementById("crm-plan");
+  const btn = document.getElementById("search-btn");
+  const { companies, target, maxTotal, mode } = crmPlanInputs();
+  const seq = ++_crmPlanSeq;
+
+  // Keep the checkbox doSearch() reads in step with the visible radios.
+  const force = document.getElementById("crm-force-refresh");
+  if (force) force.checked = mode === "replace";
+
+  if (!companies.length) {
+    if (box) { box.hidden = true; box.innerHTML = ""; }
+    if (btn && !btn.disabled) { btn.textContent = "Search"; btn.title = ""; }
+    return;
+  }
+  try {
+    const d = await getJSON(`/api/leads/plan?companies=${encodeURIComponent(companies.join(","))}`
+      + `&target=${target}&maxTotal=${maxTotal}&mode=${mode}`);
+    if (seq !== _crmPlanSeq) return;      // a newer edit already answered
+    renderCrmPlan(d.plans || []);
+  } catch (e) {
+    if (seq !== _crmPlanSeq) return;
+    if (box) { box.hidden = true; box.innerHTML = ""; }
+  }
+}
+
+function openCrmDiscoverModal(prefillCompany) {
+  const m = document.getElementById("crm-discover-modal");
+  if (!m) return;
+  m.classList.add("open");
+  const input = document.getElementById("company-input");
+  if (input) {
+    if (prefillCompany) input.value = prefillCompany;
+    setTimeout(() => { input.focus(); input.select(); }, 60);
+  }
+  refreshCrmPlan();
+}
+function closeCrmDiscoverModal() {
+  document.getElementById("crm-discover-modal")?.classList.remove("open");
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   CRM object tabs: Contacts · Companies
+
+   Company Intelligence outgrew the drawer it lived in. It is not a peer of
+   the contact list — it is the record page for one account — so it now sits
+   where Salesforce, HubSpot and Dynamics all put it: behind an object list
+   view, opened by selecting a record.
+
+   Both panes are mounted at all times and merely hidden, so switching tabs
+   costs nothing and loses nothing: the contact table keeps its filters,
+   page and selection; the company list keeps its search, filter and scroll.
+   Neither pane re-fetches on a switch — only an explicit Refresh does.
+   ══════════════════════════════════════════════════════════════════════ */
+
+let _crmTab = "contacts";
+
+function showCrmTab(name) {
+  _crmTab = name === "companies" ? "companies" : "contacts";
+  document.querySelectorAll("[data-crm-pane]").forEach((pane) => {
+    pane.hidden = pane.dataset.crmPane !== _crmTab;
+  });
+  document.querySelectorAll("[data-crm-tab]").forEach((tab) => {
+    const on = tab.dataset.crmTab === _crmTab;
+    tab.classList.toggle("active", on);
+    tab.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  // The bulk bar belongs to the contact table; it must not hover over the
+  // company list.
+  const bar = document.getElementById("crm-bulkbar");
+  if (bar && _crmTab !== "contacts") bar.hidden = true;
+  else if (bar && _crmTab === "contacts") updateCrmSelectionUI();
+
+  // Load the company list lazily, once.
+  if (_crmTab === "companies" && !_crmAccounts.length) loadCrmAccounts();
+  try { localStorage.setItem("crm_tab", _crmTab); } catch (e) { /* ignore */ }
+}
+
+/* Opening an account = the Companies tab showing its record instead of the
+   list. Kept as openCrmIntelDrawer()'s replacement, with the old names
+   preserved as thin wrappers so existing call sites (e.g. the draft modal's
+   "view/edit intelligence" link) keep working. */
+function openCrmAccountRecord() {
+  showCrmTab("companies");
+  document.getElementById("crm-acct-list").hidden = true;
+  document.getElementById("crm-acct-record").hidden = false;
+}
+function closeCrmAccountRecord() {
+  document.getElementById("crm-acct-record").hidden = true;
+  document.getElementById("crm-acct-list").hidden = false;
+  // Counts and status may have changed while the record was open.
+  loadCrmAccounts();
+}
+function openCrmIntelDrawer() { openCrmAccountRecord(); }
+function closeCrmIntelDrawer() { /* records are navigated away from, not dismissed */ }
+
+/* ── Companies list view ──────────────────────────────────────────────
+   One row per account, showing the state the record page exists to
+   resolve: does it have contacts, has it been analyzed, are its tags
+   trusted — and therefore what to do next. The "Next step" column is the
+   same computation the record page shows, so the list and the record can
+   never disagree about what an account needs. */
+
+let _crmAccounts = [];
+let _crmAcctFilter = "all";
+let _crmAcctPage = 1;
+const CRM_ACCT_PAGE_SIZE = 25;
+
+function acctNextStep(a) {
+  if (!a.has_summary && !a.ai_analyzed_at && !a.tag_count) return { key: "analyze", label: "Run AI analysis" };
+  if (!a.contact_count) return { key: "contacts", label: "Add contacts" };
+  if (a.tag_count && !a.confirmed_count) return { key: "review", label: "Review tags" };
+  return { key: "ready", label: "Ready" };
+}
+
+function crmAccountsFiltered() {
+  const term = crmSearchTerm().toLowerCase();
+  return _crmAccounts.filter((a) => {
+    if (term) {
+      const hay = `${a.name || ""} ${a.chinese_name || ""} ${a.industry || ""} ${a.booth || ""}`.toLowerCase();
+      if (!hay.includes(term)) return false;
+    }
+    const step = acctNextStep(a).key;
+    if (_crmAcctFilter === "no-contacts") return !a.contact_count;
+    if (_crmAcctFilter === "not-analyzed") return step === "analyze";
+    if (_crmAcctFilter === "needs-review") return step === "review";
+    if (_crmAcctFilter === "ready") return step === "ready";
+    return true;
+  });
+}
+
+function renderCrmAccounts() {
+  const tbody = document.getElementById("crm-acct-tbody");
+  if (!tbody) return;
+  const list = crmAccountsFiltered();
+  const totalPages = Math.max(1, Math.ceil(list.length / CRM_ACCT_PAGE_SIZE));
+  if (_crmAcctPage > totalPages) _crmAcctPage = totalPages;
+  const slice = list.slice((_crmAcctPage - 1) * CRM_ACCT_PAGE_SIZE, _crmAcctPage * CRM_ACCT_PAGE_SIZE);
+
+  setText("crm-tabcount-companies", _crmAccounts.length ? String(_crmAccounts.length) : "");
+
+  if (!list.length) {
+    tbody.innerHTML = `<tr><td colspan="6">
+      <div class="table-empty-state">
+        <div class="tes-icon">🏢</div>
+        <div class="tes-title">No companies match</div>
+        <div class="tes-hint">Clear the filter, or use “New company” to add one.</div>
+      </div></td></tr>`;
+    document.getElementById("crm-acct-pagination").innerHTML = "";
+    return;
+  }
+
+  tbody.innerHTML = slice.map((a) => {
+    const step = acctNextStep(a);
+    const analysis = a.ai_analyzed_at
+      ? `<span class="ca-ok">Analyzed</span><div class="cell-sub">${escapeHtml(intelFmtDate(a.ai_analyzed_at))}</div>`
+      : a.has_summary || a.tag_count
+        ? `<span class="ca-ok">Analyzed</span><div class="cell-sub">date not recorded</div>`
+        : `<span class="ca-none">Not analyzed</span>`;
+    const tags = a.tag_count
+      ? `${a.tag_count} tag${a.tag_count !== 1 ? "s" : ""}<div class="cell-sub">${a.confirmed_count ? `${a.confirmed_count} confirmed` : "none confirmed"}</div>`
+      : `<span class="ca-none">—</span>`;
+    return `<tr class="crm-acct-row" data-acct-id="${a.id}" data-acct-name="${escapeAttr(a.name)}">
+      <td>
+        <div class="cell-primary" style="font-weight:600;">${escapeHtml(a.name)}</div>
+        ${a.chinese_name ? `<div class="cell-sub">${escapeHtml(a.chinese_name)}</div>` : ""}
+      </td>
+      <td><div class="cell-primary">${escapeHtml(a.industry || "—")}</div>${a.booth ? `<div class="cell-sub">展位 ${escapeHtml(a.booth)}</div>` : ""}</td>
+      <td>${a.contact_count ? `<b>${a.contact_count}</b>` : `<span class="ca-none">0</span>`}</td>
+      <td>${analysis}</td>
+      <td>${tags}</td>
+      <td><span class="ca-step ca-step-${step.key}">${step.label}</span></td>
+    </tr>`;
+  }).join("");
+
+  tbody.querySelectorAll(".crm-acct-row").forEach((row) => {
+    row.addEventListener("click", () => openCrmAccount(Number(row.dataset.acctId), row.dataset.acctName));
+  });
+
+  const pag = document.getElementById("crm-acct-pagination");
+  pag.innerHTML = totalPages <= 1 ? "" : `
+    <button class="btn-sm btn-ghost" id="crm-acct-prev" ${_crmAcctPage <= 1 ? "disabled" : ""}>← Prev</button>
+    <span style="font-size:0.85rem;color:#555;">Page ${_crmAcctPage} of ${totalPages} · ${list.length} companies</span>
+    <button class="btn-sm btn-ghost" id="crm-acct-next" ${_crmAcctPage >= totalPages ? "disabled" : ""}>Next →</button>`;
+  document.getElementById("crm-acct-prev")?.addEventListener("click", () => { _crmAcctPage--; renderCrmAccounts(); });
+  document.getElementById("crm-acct-next")?.addEventListener("click", () => { _crmAcctPage++; renderCrmAccounts(); });
+}
+
+async function loadCrmAccounts() {
+  try {
+    const d = await getJSON("/api/companies/summary");
+    _crmAccounts = d.companies || [];
+    renderCrmAccounts();
+  } catch (e) { /* leave whatever is already listed */ }
+}
+
+// Opens one account's record page. The panel keeps its own sub-tabs for
+// several open accounts, so comparing two companies doesn't mean losing
+// either.
+function openCrmAccount(id, name) {
+  openCrmAccountRecord();
+  addCrmIntelCompany(id, name);
+}
+
+function initCrmWorkspace() {
+  document.getElementById("crm-find-btn")?.addEventListener("click", () => openCrmDiscoverModal());
+
+  // ── Object tabs ──
+  document.querySelectorAll("[data-crm-tab]").forEach((tab) =>
+    tab.addEventListener("click", () => showCrmTab(tab.dataset.crmTab)));
+  let savedTab = "contacts";
+  try { savedTab = localStorage.getItem("crm_tab") || "contacts"; } catch (e) { /* ignore */ }
+  showCrmTab(savedTab);
+
+  // ── Companies list ──
+  document.getElementById("crm-acct-refresh")?.addEventListener("click", loadCrmAccounts);
+  document.getElementById("crm-acct-back")?.addEventListener("click", closeCrmAccountRecord);
+  document.querySelectorAll("[data-acct-filter]").forEach((b) => b.addEventListener("click", () => {
+    _crmAcctFilter = b.dataset.acctFilter;
+    _crmAcctPage = 1;
+    document.querySelectorAll("[data-acct-filter]").forEach((x) => x.classList.toggle("active", x === b));
+    renderCrmAccounts();
+  }));
+  document.getElementById("crm-acct-new-btn")?.addEventListener("click", () => openNewCompanyModal());
+
+  // ── New company dialog ──
+  document.querySelectorAll("[data-newco-close]").forEach((b) =>
+    b.addEventListener("click", closeNewCompanyModal));
+  document.getElementById("crm-newco-modal")?.addEventListener("click", (e) => {
+    if (e.target.id === "crm-newco-modal") closeNewCompanyModal();
+  });
+  document.getElementById("newco-create")?.addEventListener("click", submitNewCompany);
+  document.getElementById("newco-name")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitNewCompany();
+  });
+
+  // Keep the plan in step with every input that changes its outcome.
+  document.getElementById("company-input")?.addEventListener("input", debounce(refreshCrmPlan, 300));
+  ["search-per-company-limit", "search-max-total"].forEach((id) =>
+    document.getElementById(id)?.addEventListener("input", debounce(refreshCrmPlan, 250)));
+  document.querySelectorAll('input[name="crm-import-mode"]').forEach((r) =>
+    r.addEventListener("change", refreshCrmPlan));
+  document.querySelectorAll("[data-crm-discover-close]").forEach((b) =>
+    b.addEventListener("click", closeCrmDiscoverModal));
+  document.getElementById("crm-discover-modal")?.addEventListener("click", (e) => {
+    if (e.target.id === "crm-discover-modal") closeCrmDiscoverModal();   // click-outside
+  });
+
+  document.getElementById("crm-intel-open-btn")?.addEventListener("click", openCrmIntelDrawer);
+  document.getElementById("crm-intel-close")?.addEventListener("click", closeCrmIntelDrawer);
+  document.getElementById("crm-intel-scrim")?.addEventListener("click", closeCrmIntelDrawer);
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    closeCrmDiscoverModal();
+    closeNewCompanyModal();
+  });
+
+  // Filters apply as they change: text after a pause, selects immediately.
+  const apply = () => document.getElementById("crm-apply-filters-btn").click();
+  const applyDebounced = debounce(apply, 350);
+  ["crm-filter-event", "crm-filter-industry", "crm-filter-owner"].forEach((id) => {
+    document.getElementById(id)?.addEventListener("input", applyDebounced);
+  });
+  document.getElementById("crm-filter-status")?.addEventListener("change", apply);
+
+  // Open "More filters" on load if anything inside it is already applied,
+  // so an active filter is never hidden behind a closed disclosure.
+  const more = document.getElementById("crm-more-filters");
+  if (more) {
+    const hasHidden = () => ["event", "industry", "follow_up_status", "assigned_salesperson"]
+      .some((k) => _crmActiveFilters[k])
+      || (_crmActiveFilters.department_categories || []).length
+      || (_crmActiveFilters.seniority_levels || []).length;
+    if (hasHidden()) more.open = true;
+    // The rail scrolls internally, so an expanded disclosure can open
+    // entirely below the fold and read as "nothing happened".
+    more.addEventListener("toggle", () => {
+      if (more.open) more.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  }
+
+  document.getElementById("crm-bulk-clear")?.addEventListener("click", clearCrmSelection);
+}
+
 /* ── Init ── */
 
 initAppShell();
 loadSenderProfile();
 loadDraftModes();
 initIntelligenceView();
-initCrmIntel();
 initAiUsageDashboard();
 initEmailSettings();
 initTagPriority();
@@ -3744,6 +4273,20 @@ loadCrmContacts();
 loadBrowseSelectors();
 loadSearchTaxonomy();
 refreshUsage();
+
+/* Deferred one microtask, until this script has finished evaluating.
+
+   initCrmIntel() → loadCrmIntelCompanyOptions() → loadIntelTaxonomy(), whose
+   first line reads `_intelTaxonomy` — a module-level `let` declared several
+   hundred lines *below* this init block. Called synchronously here it hits
+   the temporal dead zone and throws, and loadCrmIntelCompanyOptions()
+   swallows the error in its catch, so the "+ add company…" dropdown was
+   left permanently empty with nothing reported. A microtask runs after all
+   top-level declarations are initialised. */
+queueMicrotask(() => {
+  initCrmIntel();
+  initCrmWorkspace();
+});
 
 // =========================================================================
 // Import Email modal
@@ -4258,11 +4801,84 @@ function intelConfidencePct(conf) {
 
 function intelFmtDate(x) { return x ? new Date(x).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : ""; }
 
+/* ── Account lifecycle: what exists, what's missing, what's next ─────────
+   Company Intelligence was a tag editor that happened to sit next to a
+   contact list. As the hub for an account it has to answer, in order:
+   is this analyzed, are its tags trustworthy, and can I actually talk to
+   anyone here? Exactly one step is recommended at a time — a page that
+   flags five things equally recommends nothing. */
+function intelNextStep(st, contacts) {
+  const n = (contacts && contacts.count) || 0;
+  if (!st.analyzed) {
+    return { key: "analyze", title: "Run AI analysis",
+      why: "Nothing is known about this account yet. Analysis writes a business description and suggests tags that shape every email drafted for it.",
+      action: `<button class="btn-orange btn-sm" data-intel-action="research" data-mode="full">Generate AI analysis</button>` };
+  }
+  if (n === 0) {
+    return { key: "contacts", title: "Add contacts",
+      why: "This account is analyzed but has nobody to contact. Pull decision-makers from Apollo to start working it.",
+      action: `<button class="btn-primary btn-sm" data-intel-action="focus-contacts">Add contacts</button>` };
+  }
+  if (st.tag_count > 0 && !st.confirmed_count) {
+    return { key: "review", title: "Review the suggested tags",
+      why: `${st.tag_count} AI tag(s) are being used unconfirmed. Confirming or rejecting them sharpens the drafting prompt.`,
+      action: `<button class="btn-ghost btn-sm" data-intel-action="focus-tags">Review tags</button>` };
+  }
+  if (st.stale) {
+    return { key: "refresh", title: "Refresh the analysis",
+      why: `The last analysis is older than ${st.review_period_days} days.`,
+      action: `<button class="btn-orange btn-sm" data-intel-action="research" data-mode="full">Refresh AI analysis</button>` };
+  }
+  return { key: "ready", title: "Ready to work",
+    why: `Analyzed, tags reviewed, and ${n} contact(s) on file. Open it in the CRM to draft outreach.`,
+    action: `<button class="btn-ghost btn-sm" data-intel-action="open-crm">Open in CRM</button>` };
+}
+
+function intelContactsSection(c, contacts, st) {
+  // Account-level, matching what the import planner and the CRM's company
+  // filter both count — see getCompanyContactStats().
+  const n = (contacts && contacts.count) || 0;
+  const withEmail = (contacts && contacts.with_email) || 0;
+  const ownN = contacts && contacts.own_count != null ? contacts.own_count : n;
+  const lastAdded = contacts && contacts.last_added_at ? intelFmtDate(contacts.last_added_at) : null;
+
+  // Default ask: enough to be useful without being a blank cheque.
+  const suggested = n > 0 ? Math.min(500, n + 25) : 25;
+
+  const body = n === 0
+    ? `<div class="ic-empty">
+         <div class="ic-empty-title">No contacts yet</div>
+         <div class="ic-empty-hint">Nobody at this company is in your CRM. Pull them from Apollo using the default executive + specialist departments, or pick your own.</div>
+       </div>`
+    : `<div class="ic-stats">
+         <span class="ic-stat"><b>${n}</b> contact${n !== 1 ? "s" : ""}</span>
+         <span class="ic-stat"><b>${withEmail}</b> with email</span>
+         ${lastAdded ? `<span class="ic-stat">last added <b>${escapeHtml(lastAdded)}</b></span>` : ""}
+         ${ownN !== n ? `<span class="ic-stat ic-stat-soft">${ownN} on this company record, the rest on related entities</span>` : ""}
+       </div>`;
+
+  return `
+    <div class="intel-section" data-intel-contacts>
+      <h3>Contacts <span style="font-weight:400;font-size:0.75rem;color:#9ca3af;">— from the Contact Engine</span></h3>
+      ${body}
+      <div class="ic-import">
+        <label class="ic-import-label" for="ic-target-${c.id}">Target contacts for this company</label>
+        <div class="ic-import-row">
+          <input type="number" class="ic-target" id="ic-target-${c.id}" value="${suggested}" min="1" max="500">
+          <button class="btn-primary btn-sm" data-intel-action="import-contacts">Preview import</button>
+          ${n ? `<button class="btn-ghost btn-sm" data-intel-action="open-crm">View in CRM</button>` : ""}
+        </div>
+        <div class="ic-plan" data-intel-plan></div>
+      </div>
+    </div>`;
+}
+
 function renderCompanyIntel(intel, panelId = "intel-panel") {
   const c = intel.company || {};
   const tags = intel.tags || [];
   const sources = intel.sources || [];
   const st = intel.status || {};
+  const contactStats = intel.contacts || { count: 0 };
   const companyCats = (_intelTaxonomy || []).filter((cat) => cat.applies_to === "company");
 
   // group present tags by category_key
@@ -4315,6 +4931,19 @@ function renderCompanyIntel(intel, panelId = "intel-panel") {
         : ""}
       <div class="intel-research-note" style="margin-top:8px;font-size:0.78rem;color:#9ca3af;"></div>
     </div>`;
+
+  // ── Recommended next step, then contact coverage ──
+  const next = intelNextStep(st, contactStats);
+  html += `
+    <div class="intel-next intel-next-${next.key}">
+      <div class="intel-next-body">
+        <div class="intel-next-label">Next step</div>
+        <div class="intel-next-title">${escapeHtml(next.title)}</div>
+        <div class="intel-next-why">${escapeHtml(next.why)}</div>
+      </div>
+      <div class="intel-next-action">${next.action}</div>
+    </div>`;
+  html += intelContactsSection(c, contactStats, st);
 
   // ── Tags by category ──
   html += `
@@ -4376,7 +5005,13 @@ function renderCompanyIntel(intel, panelId = "intel-panel") {
     </div>`;
 
   const panel = document.getElementById(panelId);
-  if (panel) { panel.dataset.companyId = String(c.id || ""); panel.innerHTML = html; }
+  // The name is needed by the contact-import actions, which address the
+  // Contact Engine by company name rather than id.
+  if (panel) {
+    panel.dataset.companyId = String(c.id || "");
+    panel.dataset.companyName = c.name || "";
+    panel.innerHTML = html;
+  }
 }
 
 async function onIntelPanelClick(e) {
@@ -4391,6 +5026,76 @@ async function onIntelPanelClick(e) {
   const note = () => panel.querySelector(".intel-research-note");
 
   try {
+    /* ── Contact Engine, run from the account hub ─────────────────────────
+       Two deliberate steps: the first click only asks the planner what the
+       import would do, and only the second spends anything. Pulling
+       contacts costs Apollo credits, so it never happens on a single click
+       from a screen the user opened to read tags. */
+    if (action === "focus-contacts" || action === "focus-tags") {
+      const sel = action === "focus-contacts" ? "[data-intel-contacts]" : ".intel-section:nth-of-type(2)";
+      panel.querySelector(sel)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (action === "focus-contacts") panel.querySelector(".ic-target")?.focus();
+      return;
+    }
+
+    if (action === "open-crm") {
+      const name = panel.dataset.companyName || "";
+      if (typeof closeCrmIntelDrawer === "function") closeCrmIntelDrawer();
+      showView("crm");
+      const box = document.getElementById("crm-search-input");
+      if (box) box.value = name;
+      loadCrmContacts(name);
+      return;
+    }
+
+    if (action === "import-contacts" || action === "import-contacts-confirm") {
+      const name = panel.dataset.companyName || "";
+      const targetEl = panel.querySelector(".ic-target");
+      const planBox = panel.querySelector("[data-intel-plan]");
+      const target = Math.max(1, Math.min(Number(targetEl && targetEl.value) || 25, 500));
+      if (!name) return;
+
+      if (action === "import-contacts") {
+        planBox.innerHTML = `<div class="ic-plan-line">Checking…</div>`;
+        const d = await getJSON(`/api/leads/plan?companies=${encodeURIComponent(name)}&target=${target}&maxTotal=${target}&mode=append`);
+        const p = (d.plans || [])[0];
+        if (!p) { planBox.innerHTML = ""; return; }
+        planBox.innerHTML = p.willRetrieve > 0
+          ? `<div class="ic-plan-line"><b>${p.current}</b> now → <b>${p.target}</b> target = <b class="ic-plan-get">+${p.willRetrieve}</b> to retrieve.
+               Costs about ${p.searchRequests} Apollo search request(s), plus up to ${p.emailLookups} email lookup(s).
+               Existing contacts are kept as they are.</div>
+             <div class="ic-plan-row">
+               <button class="btn-orange btn-sm" data-intel-action="import-contacts-confirm">Import ${p.willRetrieve} contact(s)</button>
+               <button class="btn-ghost btn-sm" data-intel-action="import-cancel">Cancel</button>
+             </div>`
+          : `<div class="ic-plan-line">Already at ${p.current} — raise the target above ${p.current} to pull more.</div>`;
+        return;
+      }
+
+      // Confirmed: run the real import, then re-render from the server so
+      // the counts and the recommended next step reflect what just landed.
+      btn.disabled = true; btn.textContent = "Importing…";
+      const r = await fetch("/api/leads/search", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ companies: name, force: false, perCompanyLimit: target, maxTotal: target, departments: [] }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) { showMessage(d.error || "Import failed.", "error"); btn.disabled = false; btn.textContent = "Retry"; return; }
+      const s = (d.summaries || [])[0];
+      showMessage(s
+        ? `${name}: imported ${s.importedCount} new contact(s); ${s.alreadyHeldCount || 0} already in your CRM were left untouched.`
+        : `${name}: import finished.`, "info");
+      refreshUsage();
+      loadBrowseSelectors();
+      await loadCompanyIntel(companyId, panelId);
+      return;
+    }
+
+    if (action === "import-cancel") {
+      panel.querySelector("[data-intel-plan]").innerHTML = "";
+      return;
+    }
+
     if (action === "research") {
       const mode = btn.dataset.mode === "full" ? "full" : "missing";
       const key = `research:${companyId}:${mode}`;
@@ -4553,30 +5258,68 @@ function initCrmIntel() {
   }
   const subtabs = document.getElementById("crm-intel-subtabs");
   if (subtabs) subtabs.addEventListener("click", onCrmIntelSubtabClick);
-  const add = document.getElementById("crm-intel-add");
-  if (add) add.addEventListener("change", () => {
-    const id = Number(add.value);
-    const opt = add.options[add.selectedIndex];
-    const name = opt ? opt.dataset.name : "";
-    add.value = "";
-    if (id) addCrmIntelCompany(id, name);
-  });
-  loadCrmIntelCompanyOptions();
 }
 
-async function loadCrmIntelCompanyOptions() {
+/* ── New company dialog ──────────────────────────────────────────────────
+   Creating an account is a deliberate act with its own form, not a row
+   tucked into a dropdown: the extra optional fields (Chinese name,
+   industry, website) are what make the AI research that follows useful.
+   Reuses POST /api/companies, so a hand-typed company is normalised and
+   account-resolved exactly like an imported one. */
+
+function openNewCompanyModal(prefillName) {
+  const m = document.getElementById("crm-newco-modal");
+  if (!m) return;
+  ["newco-name", "newco-zh", "newco-industry", "newco-website"].forEach((id) => {
+    const el = document.getElementById(id); if (el) el.value = "";
+  });
+  const nameEl = document.getElementById("newco-name");
+  if (nameEl && prefillName) nameEl.value = prefillName;
+  const err = document.getElementById("newco-error");
+  if (err) { err.style.display = "none"; err.textContent = ""; }
+  m.classList.add("open");
+  setTimeout(() => nameEl?.focus(), 60);
+}
+
+function closeNewCompanyModal() {
+  document.getElementById("crm-newco-modal")?.classList.remove("open");
+}
+
+async function submitNewCompany() {
+  const btn = document.getElementById("newco-create");
+  const err = document.getElementById("newco-error");
+  const name = (document.getElementById("newco-name")?.value || "").trim();
+  const show = (msg) => { if (err) { err.textContent = msg; err.style.display = ""; } };
+
+  if (!name) { show("Enter a company name."); return; }
+  btn.disabled = true; btn.textContent = "Creating…";
   try {
-    await loadIntelTaxonomy();
-    const r = await fetch("/api/companies");
+    const r = await fetch("/api/companies", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        chinese_name: (document.getElementById("newco-zh")?.value || "").trim(),
+        industry: (document.getElementById("newco-industry")?.value || "").trim(),
+        website: (document.getElementById("newco-website")?.value || "").trim(),
+      }),
+    });
     const d = await r.json();
-    const add = document.getElementById("crm-intel-add");
-    if (!add) return;
-    add.innerHTML =
-      '<option value="">+ add company…</option>' +
-      (d.companies || []).map((c) =>
-        `<option value="${c.id}" data-name="${escapeAttr(c.name)}">${escapeHtml(c.name)}${c.chinese_name ? " / " + escapeHtml(c.chinese_name) : ""}</option>`
-      ).join("");
-  } catch (e) { /* ignore — search-driven flow still works */ }
+    if (!r.ok || !d.ok) { show(d.error || "Could not create the company."); return; }
+
+    closeNewCompanyModal();
+    showMessage(d.created
+      ? `Created “${d.company.name}” — it's now a CRM account.`
+      : `“${d.company.name}” already existed; opening it.`, "info");
+    // Make the new account browsable everywhere, not just here.
+    await loadCrmAccounts();
+    loadBrowseSelectors();
+    if (typeof refreshCrmCompanies === "function") refreshCrmCompanies();
+    openCrmAccount(d.company.id, d.company.name);
+  } catch (e) {
+    show("Network error: " + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = "Create and open";
+  }
 }
 
 function renderCrmIntelSubtabs() {
@@ -4639,7 +5382,8 @@ async function crmIntelFromSearch(companyNames) {
       renderCrmIntelSubtabs();
       selectCrmIntelCompany(_crmIntelActiveId);
     }
-    loadCrmIntelCompanyOptions();
+    // Newly searched companies change the list view's counts.
+    loadCrmAccounts();
   } catch (e) { /* ignore */ }
 }
 
@@ -4960,7 +5704,7 @@ function highlightTagInPrompt(value) {
       if (typeof closeEmailModal === "function") closeEmailModal();
       showView("crm");
       addCrmIntelCompany(co.id, co.name);
-      document.getElementById("crm-intel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      openCrmIntelDrawer();
     });
   }
   // Tag include/exclude checkboxes (Customize) + Prompt Inspector button.

@@ -9,12 +9,12 @@ const {
   initDb,
   insertContact, listContacts, getContact, listContactsByCompany, deleteContact, deleteContacts,
   updateContactDraft, findExistingContact, upsertContact, updateContact,
-  upsertCompany, findCompanyByName, getCompany, listCompanies, getCompanyContacts,
-  getOrCreateAccount, getAccount, listAccounts, listAccountGroups, getAccountContacts,
+  upsertCompany, findCompanyByName, getCompany, listCompanies, listCompanySummaries, getCompanyContacts,
+  getOrCreateAccount, getAccount, findAccountByName, contactCountsByAccountNames, listAccounts, listAccountGroups, getAccountContacts,
   listCompaniesForAccount, mergeAccounts,
   insertBusinessCard, listBusinessCardsForContact,
   getApolloCache, setApolloCache,
-  getCompanySearchCache, setCompanySearchCache, updateCachedLeadDraft,
+  getCompanySearchCache, getCompanySearchCaches, setCompanySearchCache, updateCachedLeadDraft,
   logApolloResult, listApolloResults,
   insertEmailDraftVersion, listEmailDraftsForContact,
   insertCommunication, listTimelineForContact, getCommunication,
@@ -620,6 +620,56 @@ app.get('/api/companies', async (req, res) => {
   }
 });
 
+// GET /api/companies/summary -- backs the Companies list view and the
+// account picker. Lightweight by design; see listCompanySummaries().
+app.get('/api/companies/summary', async (req, res) => {
+  try {
+    res.json({ ok: true, companies: await listCompanySummaries() });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load companies' });
+  }
+});
+
+/* POST /api/companies — create an account from scratch.
+
+   Company Intelligence used to be a browser of rows that some other ingestion
+   path had already created (CSV upload, Apollo search, card scan), so a
+   company you had simply heard of could not be worked at all. This is the
+   manual entry point: name it, and it exists as a real CRM account you can
+   analyze and then staff with contacts.
+
+   upsertCompany() is deliberately reused rather than a bare INSERT — it owns
+   the name validation, the name_key normalisation and the account resolution
+   that every other ingestion path already relies on, so a hand-typed company
+   lands identically to an imported one. It also means re-adding an existing
+   name returns that row instead of creating a duplicate. */
+app.post('/api/companies', async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'A company name is required.' });
+
+    const existing = await findCompanyByName(name);
+    const result = await upsertCompany({
+      name,
+      chinese_name: req.body.chinese_name,
+      website: req.body.website,
+      industry: req.body.industry,
+      notes: req.body.notes,
+    });
+    if (!result) {
+      // upsertCompany's guard is an exact-match blocklist ("engineering",
+      // "n/a", bare legal suffixes like "Inc") aimed at junk produced by the
+      // automated ingestion paths. It deliberately does not second-guess a
+      // free-typed name — a human naming their own account is authoritative.
+      return res.status(400).json({ error: `"${name}" can't be used as a company name.` });
+    }
+    const company = await getCompany(result.id);
+    res.json({ ok: true, company, created: !existing });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create the company', details: err.message });
+  }
+});
+
 // GET /api/companies/:id/contacts
 app.get('/api/companies/:id/contacts', async (req, res) => {
   try {
@@ -646,6 +696,16 @@ function companyCacheKey(company) {
   return `company:${company.trim().toLowerCase()}`;
 }
 
+// Apollo uses the email field to carry non-addresses too -- "N/A" when it has
+// none, and "(email available via Apollo, not returned in payload)" when it
+// has one but won't hand it over. Neither is storable or usable as a dedupe
+// key, so both collapse to empty.
+function cleanApolloEmail(email) {
+  const v = String(email || '').trim();
+  if (!v || v.startsWith('(') || v.includes('N/A')) return '';
+  return v;
+}
+
 function contactRowToLeadFormat(c) {
   return {
     name: c.full_name, title: c.job_title, company: c.company, department: c.department,
@@ -658,6 +718,77 @@ function contactRowToLeadFormat(c) {
     contact_id: c.id
   };
 }
+
+/* GET /api/leads/plan?companies=CATL,BYD&target=40&mode=append
+
+   Answers, before anything is spent or written: how many contacts do I hold
+   for this company, how many will be retrieved, what will that cost, and is
+   this appending or replacing?
+
+   Read-only and free — it never calls Apollo and never creates an account.
+   The one number it cannot know for free is how many matches Apollo actually
+   has; that is reported only when a previous search recorded it, stamped
+   with when, rather than guessed at. */
+app.get('/api/leads/plan', async (req, res) => {
+  try {
+    const names = String(req.query.companies || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const target = Math.max(1, Math.min(Number(req.query.target) || 25, 500));
+    const maxTotal = Math.max(1, Math.min(Number(req.query.maxTotal) || 100, 2000));
+    const replace = String(req.query.mode || 'append') === 'replace';
+
+    // Two batched round trips for the whole request, not two per company:
+    // this runs on every keystroke, so its latency is felt directly.
+    const [counts, caches] = await Promise.all([
+      contactCountsByAccountNames(names),
+      getCompanySearchCaches(names.map(companyCacheKey)),
+    ]);
+
+    let budget = maxTotal;
+    const plans = [];
+    for (const name of names) {
+      const key = name.toLowerCase();
+      const known = Object.prototype.hasOwnProperty.call(counts, key);
+      const current = known ? counts[key] : 0;
+
+      // Append tops up to the target; a full refresh re-reads the whole target.
+      const wanted = replace ? target : Math.max(0, target - current);
+      const willRetrieve = Math.min(wanted, budget);
+      budget -= willRetrieve;
+
+      // Apollo returns 25 records per request (APOLLO_PAGE_SIZE), and paging
+      // starts at page 1, so reaching `target` costs ceil(target/25) requests.
+      const searchRequests = willRetrieve > 0 ? Math.ceil(target / 25) : 0;
+
+      // What a prior search recorded Apollo as holding, if anything.
+      let apolloTotal = null, apolloTotalAt = null;
+      const cached = caches[companyCacheKey(name)];
+      if (cached) {
+        try {
+          const payload = JSON.parse(cached.raw_json);
+          if (Number(payload.total)) { apolloTotal = Number(payload.total); apolloTotalAt = cached.fetched_at; }
+        } catch (e) { /* malformed cache entry is simply "unknown" */ }
+      }
+
+      plans.push({
+        company: name,
+        known,
+        current,
+        target,
+        willRetrieve,
+        // Upper bound: one people/match lookup per imported contact that
+        // arrives without an email. Most do.
+        emailLookups: willRetrieve,
+        searchRequests,
+        budgetLimited: wanted > willRetrieve,
+        mode: replace ? 'replace' : 'append',
+        apolloTotal, apolloTotalAt,
+      });
+    }
+    res.json({ ok: true, plans, maxTotal, remainingBudget: budget });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not build an import plan' });
+  }
+});
 
 app.post('/api/leads/search', async (req, res) => {
   try {
@@ -694,22 +825,67 @@ app.post('/api/leads/search', async (req, res) => {
       // it persists even if Apollo returns zero contacts for this search.
       const account = await getOrCreateAccount(companyName);
 
-      if (!forceRefresh && account) {
-        const existingContacts = await getAccountContacts(account.id);
-        if (existingContacts.length > 0) {
-          allContacts = allContacts.concat(existingContacts.map(contactRowToLeadFormat));
-          messages.push(`CACHE:${companyName}:${existingContacts.length}:${account.updated_at}`);
-          continue;
+      /* ── Apollo adds; the local DB owns everything else ──────────────────
+         perCompanyLimit is read as the TARGET NUMBER OF CONTACTS this
+         account should end up with, not as "fetch this many again":
+
+           already >= target  -> serve from the DB, spend no Apollo credits
+           already <  target   -> top up: query Apollo, drop everyone we
+                                  already hold, import only the shortfall
+           force refresh       -> re-query at the full target anyway
+
+         Nothing is ever deleted or replaced. Contacts we already hold are
+         not even re-written on a top-up, so their updated_at, drafts,
+         notes, tags, threads, interaction history and CRM metadata are
+         left exactly as they are rather than being churned by an import
+         that had nothing new to say about them. */
+      const existingContacts = account ? await getAccountContacts(account.id) : [];
+      const existingCount = existingContacts.length;
+
+      if (!forceRefresh && existingCount >= perCompanyLimit) {
+        allContacts = allContacts.concat(existingContacts.map(contactRowToLeadFormat));
+        messages.push(`CACHE:${companyName}:${existingCount}:${account.updated_at}`);
+        continue;
+      }
+
+      // How many NEW contacts this company still needs. On a full refresh we
+      // re-import whatever Apollo returns for the target instead.
+      const shortfall = Math.max(0, perCompanyLimit - existingCount);
+
+      // Dedupe index over what we already hold, mirroring the keys
+      // findExistingContact() uses on write, plus apollo_person_id — the
+      // most reliable identifier for Apollo-sourced rows and the one that
+      // still works for the many contacts Apollo returns with no email.
+      const existingKeys = new Set();
+      for (const e of existingContacts) {
+        if (e.apollo_person_id) existingKeys.add(`apollo:${String(e.apollo_person_id).toLowerCase()}`);
+        if (e.email) existingKeys.add(`email:${String(e.email).trim().toLowerCase()}`);
+        if (e.linkedin_url) existingKeys.add(`li:${String(e.linkedin_url).trim().toLowerCase()}`);
+        if (e.full_name && e.company) {
+          existingKeys.add(`name:${String(e.full_name).trim().toLowerCase()}|${String(e.company).trim().toLowerCase()}`);
         }
       }
+      const alreadyHeld = (c) => {
+        const email = cleanApolloEmail(c.email);
+        if (c.apollo_id && existingKeys.has(`apollo:${String(c.apollo_id).toLowerCase()}`)) return true;
+        if (email && existingKeys.has(`email:${email.trim().toLowerCase()}`)) return true;
+        if (c.linkedin && existingKeys.has(`li:${String(c.linkedin).trim().toLowerCase()}`)) return true;
+        const comp = c.company || companyName;
+        if (c.name && comp && existingKeys.has(`name:${String(c.name).trim().toLowerCase()}|${String(comp).trim().toLowerCase()}`)) return true;
+        return false;
+      };
 
       if (!apolloConfigured()) {
         messages.push(`${companyName}: no local data found, and Apollo API key not configured.`);
         continue;
       }
 
+      // Fetch up to the target for this account. Contacts we already hold
+      // occupy the earlier rows of Apollo's result order, so asking for the
+      // target (rather than just the shortfall) is what surfaces the extra
+      // records beyond page one.
       const result = await doCompanySearch(companyName, apiKey, {
-        perCompanyLimit: Math.min(perCompanyLimit, remainingBudget),
+        perCompanyLimit,
         departments
       });
       if (result.error) {
@@ -717,9 +893,32 @@ app.post('/api/leads/search', async (req, res) => {
         continue;
       }
 
-      const contacts = result.contacts || [];
-      remainingBudget -= contacts.length;
+      const fetched = result.contacts || [];
       const orgs = result.orgs || [];
+
+      // A full refresh re-imports everything Apollo returned (upsert only —
+      // still no deletes). A normal search imports strictly what's missing,
+      // capped at the shortfall and at the shared cross-company budget.
+      const newlyFound = forceRefresh ? fetched : fetched.filter((c) => !alreadyHeld(c));
+      const importCap = forceRefresh ? Math.min(fetched.length, remainingBudget)
+                                     : Math.min(shortfall, remainingBudget);
+      const contacts = newlyFound.slice(0, importCap);
+      const alreadyHeldCount = fetched.length - newlyFound.length;
+
+      if (!forceRefresh && existingCount > 0) {
+        messages.push(
+          contacts.length
+            ? `${companyName}: ${existingCount} contact(s) already saved and left untouched; adding ${contacts.length} new one(s) to reach ${existingCount + contacts.length}.`
+            : `${companyName}: ${existingCount} contact(s) already saved. Apollo returned no records beyond the ones you already have — raise "Contacts per company" to search deeper.`
+        );
+      }
+      if (newlyFound.length > contacts.length) {
+        messages.push(`${companyName}: ${newlyFound.length - contacts.length} further new contact(s) were found but not imported — raise "Contacts per company" or "Maximum total contacts".`);
+      }
+
+      // Budget counts what actually lands in the CRM; re-reading contacts we
+      // already own costs the user nothing and shouldn't consume their cap.
+      remainingBudget -= contacts.length;
 
       // Pre-upsert one company (legal-entity) row per distinct name Apollo
       // actually returned, parented to this Account -- so the per-contact
@@ -743,7 +942,7 @@ app.post('/api/leads/search', async (req, res) => {
       let importedCount = 0;
       let duplicatesSkipped = 0;
       for (const c of contacts) {
-        const cleanEmail = c.email && !String(c.email).startsWith('(') && !String(c.email).includes('N/A') ? c.email : '';
+        const cleanEmail = cleanApolloEmail(c.email);
         const rawJson = c._apollo_raw ? JSON.stringify(c._apollo_raw) : undefined;
         console.log(`[leads/search] ${c.name} @ ${c.company}: apollo_email_fields={email:${JSON.stringify(c._apollo_raw && c._apollo_raw.email)}, personal_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.personal_emails)}, business_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.business_emails)}, has_email:${c._apollo_raw && c._apollo_raw.has_email}} cleanEmail=${JSON.stringify(cleanEmail)}`);
         const { id, updated } = await upsertContact({
@@ -764,14 +963,23 @@ app.post('/api/leads/search', async (req, res) => {
       }
 
       await logApolloResult('people_search', lastCompanyId, null, companyName, JSON.stringify({ contacts, orgs }));
-      await setCompanySearchCache(companyCacheKey(companyName), JSON.stringify({ company: companyName, contacts, orgs }));
+      // `total` is Apollo's own match count for this query. Persisting it is
+      // what lets the import planner tell the user how much more is available
+      // without spending a request to find out.
+      await setCompanySearchCache(companyCacheKey(companyName),
+        JSON.stringify({ company: companyName, contacts, orgs, total: result.total || null }));
 
       summaries.push({
         company: companyName, departments: departmentLabels,
-        foundCount: contacts.length, importedCount, duplicatesSkipped
+        foundCount: fetched.length, importedCount, duplicatesSkipped,
+        alreadyHeldCount, existingCount, totalCount: existingCount + importedCount,
+        target: perCompanyLimit, forced: forceRefresh
       });
 
-      allContacts = allContacts.concat(contacts);
+      // Hand back the account's full current roster, not just this batch, so
+      // the caller sees the CRM's actual state after the import rather than
+      // an increment it has to reconcile itself.
+      allContacts = allContacts.concat(existingContacts.map(contactRowToLeadFormat), contacts);
       allOrgs = allOrgs.concat(orgs);
       if (result.fallback_message) messages.push(result.fallback_message);
     }
