@@ -76,9 +76,67 @@ function transportFor({ host, port, encryption, user, pass }) {
   });
 }
 
+// Provider-specific SMTP rejections. A raw "535 5.7.0 ERR.LOGIN.REQCODE" tells
+// the user nothing; the fix (use the client authorization code, not the mailbox
+// password) is completely opaque from the code alone. Each entry is matched
+// against the server's response text, so it works for both verify() and send().
+//
+// The NetEase behaviours below were confirmed against smtp.qiye.163.com:465:
+//   user = heml@skeqi.com  → 535 ERR.LOGIN.REQCODE      (username form accepted)
+//   user = heml            → 535 email format login fail (username form rejected)
+// i.e. this provider requires the FULL email address as the SMTP username.
+const SMTP_ERROR_HINTS = [
+  {
+    match: /ERR\.LOGIN\.REQCODE/i,
+    providers: ['netease_enterprise'],
+    message: '网易企业邮箱要求使用「客户端授权码」，不是邮箱登录密码。'
+           + '登录 qiye.163.com → 设置 → 客户端授权码（或 POP3/SMTP/IMAP）→ 生成授权码，'
+           + '然后把它填进上面的密码框。'
+           + ' (NetEase requires a client authorization code, not the mailbox login password.)',
+  },
+  {
+    match: /email format login fail/i,
+    message: 'SMTP 用户名必须是完整邮箱地址（例如 you@skeqi.com），不能只填邮箱名。'
+           + ' (This provider requires the full email address as the SMTP username.)',
+  },
+  {
+    // Seen when an address from another domain is tested against this provider's
+    // SMTP host — the credentials are irrelevant, the domain simply isn't hosted
+    // here. Easy to mistake for a password problem and waste time on it.
+    match: /ERR\.LOGIN\.DOMAINNOTEXIST/i,
+    message: '该邮箱的域名不在此服务商托管。请确认「组织邮箱域名」与你要连接的邮箱域名一致，'
+           + '或为这个邮箱选择正确的服务商 —— 与密码无关。'
+           + ' (The address\'s domain is not hosted by this provider; not a credential problem.)',
+  },
+  {
+    match: /ERR\.LOGIN\.PASSERR|Invalid user name or password|authentication failed/i,
+    message: '用户名或密码/授权码不正确。若服务商要求授权码，请确认填的不是登录密码。',
+  },
+  {
+    match: /ERR\.LOGIN\.SMTPLIMIT|too many|rate limit|frequency/i,
+    message: '认证过于频繁，已被服务商临时限流。等几分钟再试，不要连续点测试。',
+  },
+  {
+    match: /must issue a STARTTLS/i,
+    message: '服务器要求先建立 STARTTLS。把加密方式改成 STARTTLS（端口通常 587）。',
+  },
+];
+
+// Returns an actionable message when the SMTP response matches a known
+// provider quirk, otherwise the server's own text.
+function explainSmtpError(err, providerType) {
+  const raw = [err && err.response, err && err.message].filter(Boolean).join(' ');
+  if (!raw) return 'SMTP verification failed';
+  for (const hint of SMTP_ERROR_HINTS) {
+    if (hint.providers && providerType && !hint.providers.includes(providerType)) continue;
+    if (hint.match.test(raw)) return `${hint.message}\n\n服务器原文: ${raw.trim().replace(/\s+/g, ' ')}`;
+  }
+  return raw.trim().replace(/\s+/g, ' ');
+}
+
 async function verifySmtpAuth(cfg) {
   try { await transportFor(cfg).verify(); return { ok: true, message: 'SMTP authentication succeeded' }; }
-  catch (e) { return { ok: false, message: e.message || 'SMTP verification failed' }; }
+  catch (e) { return { ok: false, message: explainSmtpError(e, cfg && cfg.providerType) }; }
 }
 
 // General send used by the provider abstraction. `message` is a nodemailer
@@ -87,7 +145,7 @@ async function sendMail(cfg, message) {
   try {
     const info = await transportFor(cfg).sendMail(message);
     return { ok: true, message: `Sent to ${message.to} (id ${info.messageId || '?'})`, id: info.messageId };
-  } catch (e) { return { ok: false, message: e.message || 'Send failed' }; }
+  } catch (e) { return { ok: false, message: explainSmtpError(e, cfg && cfg.providerType) }; }
 }
 
 async function sendTestMail(cfg, from, to) {
@@ -98,7 +156,7 @@ async function sendTestMail(cfg, from, to) {
       text: 'This is a test email from Skeqi EmailDrafter. If you received it, sending is working.',
     });
     return { ok: true, message: `Test email sent to ${to} (id ${info.messageId || '?'})` };
-  } catch (e) { return { ok: false, message: e.message || 'Send failed' }; }
+  } catch (e) { return { ok: false, message: explainSmtpError(e, cfg && cfg.providerType) }; }
 }
 
 // Resolve TXT with a hard per-lookup timeout so a non-resolving domain can't
@@ -194,7 +252,7 @@ async function oauthUserInfo(provider, accessToken) {
   return p.parseUser(d);
 }
 
-module.exports = {
+module.exports = { explainSmtpError,
   probeHost, tcpConnect, tlsHandshake, verifySmtpAuth, sendMail, sendTestMail, validateDomain, transportFor,
   OAUTH_PROVIDERS, oauthProviderMeta, oauthEnvNames, oauthCreds, oauthConfigured,
   oauthAuthUrl, oauthExchangeCode, oauthUserInfo,

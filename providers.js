@@ -28,9 +28,19 @@ const PROVIDERS = {
       app_password_required: false,
     },
   },
+  // Verified against smtp.qiye.163.com:465 on 2026-07-29:
+  //   username = full address (heml@skeqi.com) → 535 ERR.LOGIN.REQCODE
+  //     the username form is accepted; the server is rejecting the credential type
+  //   username = local part only (heml)        → 553 email format login fail
+  //     the username form itself is rejected
+  //   address from another domain              → 535 ERR.LOGIN.DOMAINNOTEXIST
+  // Conclusion: this provider requires the FULL email address as the SMTP
+  // username, and a client authorization code — never the login password.
   netease_enterprise: {
     id: 'netease_enterprise', label: 'NetEase Enterprise Mail / 网易企业邮箱', type: 'smtp',
-    note: '网易企业邮箱 (qiye.163.com). Requires a client authorization code (客户端授权码).',
+    note: '网易企业邮箱 (qiye.163.com). 用户名必须是完整邮箱地址；密码必须是「客户端授权码」，'
+        + '不是邮箱登录密码。qiye.163.com → 设置 → 客户端授权码 生成。'
+        + ' (Full email address as username; client authorization code as password.)',
     defaults: {
       smtp_host: 'smtp.qiye.163.com', smtp_port: 465, smtp_encryption: 'ssl',
       imap_host: 'imap.qiye.163.com', imap_port: 993, imap_encryption: 'ssl',
@@ -130,7 +140,11 @@ class SmtpImapProvider extends BaseEmailProvider {
   _smtpCfg() {
     return {
       host: this.org.smtp_host, port: this.org.smtp_port, encryption: this.org.smtp_encryption,
+      // NetEase (and others) reject a bare mailbox name — the full address is
+      // required, so sender_email is the correct fallback, not the local part.
       user: this.account.mailbox_username || this.account.sender_email, pass: this.secret,
+      // Lets email.js pick provider-specific hints for opaque SMTP codes.
+      providerType: this.descriptor && this.descriptor.id,
     };
   }
   async verifyConnection() {
