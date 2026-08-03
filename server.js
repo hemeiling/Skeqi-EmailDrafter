@@ -47,7 +47,10 @@ const {
 } = require('./apollo');
 const { doCompanySearch, CRM_FIELDS } = require('./leads');
 const { DEPARTMENT_TAXONOMY, SENIORITY_TAXONOMY } = require('./contactClassify');
-const { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES, buildPromptForMode, CLAUDE_MODEL } = require('./claude');
+const {
+  draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES, buildPromptForMode, CLAUDE_MODEL,
+  DRAFT_LENGTHS, DRAFT_TONES, DRAFT_LANGUAGES, DRAFT_CTAS, normalizeDraftOptions, draftOptionsSignature,
+} = require('./claude');
 const { contactsToCsv, contactsToXml, contactsToXlsx, safeFilename } = require('./export');
 const { parseCompanyFile } = require('./companyImport');
 const { normalizeFileToImages } = require('./cardBatch');
@@ -1421,8 +1424,12 @@ app.post('/api/communications/:id/duplicate', async (req, res) => {
 // already an equivalent draft, before the modal offers to redraft?
 app.get('/api/contacts/:id/check-draft', async (req, res) => {
   try {
-    const { mode, extraInstructions } = req.query;
-    const draft = await checkEquivalentDraft(Number(req.params.id), mode, extraInstructions);
+    const { mode, extraInstructions, options } = req.query;
+    // Same key as the generator, or the modal would report an equivalent
+    // draft exists and then generate a different one anyway.
+    let parsedOptions = {};
+    try { parsedOptions = options ? JSON.parse(options) : {}; } catch { parsedOptions = {}; }
+    const draft = await checkEquivalentDraft(Number(req.params.id), mode, extraInstructions, draftOptionsSignature(parsedOptions));
     res.json({ ok: true, exists: Boolean(draft), draft: draft || null });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1892,6 +1899,21 @@ app.get('/api/draft-modes', (req, res) => {
   res.json({ ok: true, modes: listDraftModes() });
 });
 
+// GET /api/draft-options -- the generation controls the prompt layer supports.
+// Served rather than hardcoded in the UI so the word ranges shown to the user
+// are the same ones the prompt asks Claude for; they can never drift apart.
+app.get('/api/draft-options', (req, res) => {
+  const list = (obj, extra = () => ({})) =>
+    Object.entries(obj).map(([value, v]) => ({ value, label: v.label, ...extra(v) }));
+  res.json({
+    ok: true,
+    lengths: list(DRAFT_LENGTHS, (v) => ({ words: v.words, hint: v.hint, default: Boolean(v.default) })),
+    tones: list(DRAFT_TONES),
+    languages: list(DRAFT_LANGUAGES),
+    ctas: list(DRAFT_CTAS),
+  });
+});
+
 // GET /api/search-taxonomy -- department/seniority options for search settings + CRM filters
 app.get('/api/search-taxonomy', (req, res) => {
   res.json({
@@ -2015,8 +2037,11 @@ function buildCustomerProfile(company, companyTags, contactTags, taxonomy, inclu
 // Assemble the full draft context (customer profile + SKQ grounding + company
 // notes/event) from saved data. DB-only, no AI. Shared by /api/draft-email and
 // the Prompt Inspector so what you preview is exactly what gets sent.
-async function buildDraftContext(contact, mode, extraInstructions, resolvedContactId, includeTagIds) {
+async function buildDraftContext(contact, mode, extraInstructions, resolvedContactId, includeTagIds, options) {
   const context = {};
+  // Length/tone/language/CTA travel with the rest of the context so the
+  // Prompt Inspector previews exactly the prompt that will be sent.
+  context.options = normalizeDraftOptions(options);
   let tagsUsed = 0;
   let breakdown = null;
   let skqModules = [];
@@ -2131,13 +2156,19 @@ app.post('/api/draft-email', async (req, res) => {
     const resolvedContactId = contactId || contact.contact_id;
     const resolvedMode = mode || 'cold_outreach';
     const resolvedInstructions = extraInstructions || '';
+    // Length / tone / language / CTA. Unknown or absent values fall back to
+    // the defaults, so an old client that sends none behaves exactly as before.
+    const resolvedOptions = normalizeDraftOptions(req.body.options);
+    const optionsSignature = draftOptionsSignature(req.body.options);
 
-    // Reuse an existing draft for the same (contact, mode, instructions)
-    // instead of calling Claude again -- unless the user explicitly asked to
-    // regenerate (the "Redraft" button always sets this). Trashed drafts
-    // don't count -- the user already discarded that one.
+    // Reuse an existing draft for the same (contact, mode, instructions,
+    // generation options) instead of calling Claude again -- unless the user
+    // explicitly asked to regenerate (the "Redraft" button always sets this).
+    // Trashed drafts don't count -- the user already discarded that one.
+    // The options are part of the key: reusing a 250-word formal draft for a
+    // 60-word direct request would silently ignore what the user chose.
     if (resolvedContactId && !regenerate) {
-      const existing = await checkEquivalentDraft(Number(resolvedContactId), resolvedMode, resolvedInstructions);
+      const existing = await checkEquivalentDraft(Number(resolvedContactId), resolvedMode, resolvedInstructions, optionsSignature);
       if (existing) {
         // Reused a saved draft — no AI call. Record the tokens saved.
         const saved = await estimateAiSaved('email_draft', {});
@@ -2161,7 +2192,7 @@ app.post('/api/draft-email', async (req, res) => {
 
     // Assemble the draft context from saved intelligence (AI tags used by
     // default, confidence-tiered) + deterministic SKQ grounding. No AI here.
-    const built = await buildDraftContext(contact, mode, extraInstructions, resolvedContactId, req.body.includeTagIds);
+    const built = await buildDraftContext(contact, mode, extraInstructions, resolvedContactId, req.body.includeTagIds, req.body.options);
     const context = built.context;
     const tagsUsed = built.tagsUsed;
 
@@ -2190,6 +2221,7 @@ app.post('/api/draft-email', async (req, res) => {
       await updateContactDraft(Number(resolvedContactId), draft);
       const versionResult = await insertEmailDraftVersion(Number(resolvedContactId), draft, resolvedMode, resolvedInstructions, {
         to_email: contact.email || '',
+        draft_options: optionsSignature,
       });
       commRow = await getCommunication(versionResult.communicationId);
       await logContactActivity(Number(resolvedContactId), 'draft_generated', `Mode: ${resolvedMode}`);
@@ -2216,11 +2248,11 @@ app.post('/api/draft-email', async (req, res) => {
 // saved company intelligence actually reaches the prompt.
 app.post('/api/draft-email/inspect', async (req, res) => {
   try {
-    const { contact, sender, contactId, mode, extraInstructions, includeTagIds } = req.body || {};
+    const { contact, sender, contactId, mode, extraInstructions, includeTagIds, options } = req.body || {};
     if (!contact) return res.status(400).json({ error: 'No contact provided' });
     const resolvedContactId = contactId || contact.contact_id;
     const resolvedMode = mode || 'cold_outreach';
-    const built = await buildDraftContext(contact, resolvedMode, extraInstructions || '', resolvedContactId, includeTagIds);
+    const built = await buildDraftContext(contact, resolvedMode, extraInstructions || '', resolvedContactId, includeTagIds, options);
     let priorSummary = null;
     if (resolvedContactId) {
       try {

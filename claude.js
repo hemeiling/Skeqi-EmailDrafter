@@ -83,6 +83,7 @@ function buildPrompt(contact, sender, context = {}) {
     `4. 4-6 sentences total — conversational, not salesy\n` +
     `5. Close with a low-pressure CTA: suggest a 20-30 min call\n` +
     `6. ${signOffLine}\n` +
+    `${draftOptionsBlock(context.options)}` +
     `\nAlso provide:\n` +
     `- subject: a compelling subject line (under 10 words, no clickbait)\n` +
     `- followup: one sentence friendly reminder (same voice, 3-5 days later)\n` +
@@ -177,6 +178,117 @@ const MODE_REQUIREMENTS = {
   ]
 };
 
+/* =========================================================================
+   Generation options — length, tone, language, call to action.
+
+   Every mode above hardcodes a sentence count ("4-6 sentences total"). When
+   the user asks for a specific length that instruction is not merely
+   redundant, it actively contradicts the request, so the options block is
+   emitted LAST and says so explicitly: a later, explicit instruction beats
+   an earlier default. The mode requirement is left in place rather than
+   rewritten so that the modes stay readable on their own.
+
+   Word counts are ranges rather than exact targets because language models
+   hit "roughly 120 words" far more reliably than "exactly 120", and a hard
+   number invites padding to reach it.
+   ========================================================================= */
+
+const DRAFT_LENGTHS = {
+  ultra_short: { label: 'Ultra short', words: [50, 80],   hint: '2-3 sentences' },
+  short:       { label: 'Short',       words: [80, 150],  hint: '3-5 sentences' },
+  medium:      { label: 'Medium',      words: [150, 250], hint: '5-8 sentences', default: true },
+  long:        { label: 'Long',        words: [250, 400], hint: '2-3 short paragraphs' },
+  custom:      { label: 'Custom',      words: null,       hint: 'your own word count' },
+};
+
+const DRAFT_TONES = {
+  professional: { label: 'Professional', instruction: 'Professional and businesslike: clear, courteous, no slang, no exclamation marks.' },
+  warm:         { label: 'Warm',         instruction: 'Warm and personable: friendly and human, while still businesslike.' },
+  direct:       { label: 'Direct',       instruction: 'Direct and concise: lead with the point, cut hedging and pleasantries.' },
+  consultative: { label: 'Consultative', instruction: 'Consultative and expert: lead with insight and a point of view, not a pitch.' },
+  formal:       { label: 'Formal',       instruction: 'Formal and deferential: full sentences, honorifics where natural, no contractions.' },
+};
+
+const DRAFT_LANGUAGES = {
+  english: { label: 'English',        instruction: 'Write the entire email, subject line and follow-up in English.' },
+  chinese: { label: '中文',            instruction: 'Write the entire email, subject line and follow-up in Simplified Chinese (简体中文), using natural business Chinese rather than a translation of English phrasing.' },
+  match:   { label: 'Match recipient', instruction: "Infer the recipient's working language from their name, company and location, and write the entire email in that language. If it is genuinely unclear, use English." },
+};
+
+const DRAFT_CTAS = {
+  auto:     { label: 'Default for this type', instruction: null },
+  call:     { label: 'Book a call',     instruction: 'Close by proposing a specific short call, and offer two concrete time options.' },
+  meet:     { label: 'Meet in person',  instruction: 'Close by proposing an in-person meeting (at their site or the event being referenced).' },
+  materials:{ label: 'Send materials',  instruction: 'Close by offering to send a specific document, spec sheet or case study — no meeting ask.' },
+  reply:    { label: 'Just ask a reply',instruction: 'Close with a single low-friction question that can be answered in one line. Do not ask for a meeting.' },
+  none:     { label: 'No ask',          instruction: 'Do not ask for anything. Close by leaving the door open, with no call to action.' },
+};
+
+function normalizeDraftOptions(raw = {}) {
+  const o = raw || {};
+  const length = DRAFT_LENGTHS[o.length] ? o.length : 'medium';
+  let words = DRAFT_LENGTHS[length].words;
+  if (length === 'custom') {
+    // Clamp: below ~30 words there is no email left, above ~600 it stops
+    // being outreach. A single number becomes a ±15% band for the reason above.
+    const n = Math.max(30, Math.min(600, Number(o.customWords) || 150));
+    words = [Math.round(n * 0.85), Math.round(n * 1.15)];
+  }
+  return {
+    length,
+    words,
+    customWords: length === 'custom' ? Math.max(30, Math.min(600, Number(o.customWords) || 150)) : null,
+    tone: DRAFT_TONES[o.tone] ? o.tone : 'professional',
+    language: DRAFT_LANGUAGES[o.language] ? o.language : 'english',
+    cta: DRAFT_CTAS[o.cta] ? o.cta : 'auto',
+  };
+}
+
+// A stable string identifying one set of options, so a saved draft is only
+// reused when it was generated under the same ones. Defaults produce the
+// empty string, which keeps every pre-existing draft reusable as before.
+function draftOptionsSignature(raw) {
+  const o = normalizeDraftOptions(raw);
+  if (o.length === 'medium' && o.tone === 'professional' && o.language === 'english' && o.cta === 'auto') return '';
+  return [o.length, o.length === 'custom' ? o.customWords : '', o.tone, o.language, o.cta].join('|');
+}
+
+function draftOptionsBlock(raw) {
+  const o = normalizeDraftOptions(raw);
+
+  // Chinese is written in characters, not space-delimited words, and asking
+  // for "60 words" of Chinese means nothing. One English word is roughly 1.8
+  // Chinese characters, so the budget is restated in the unit the model is
+  // actually producing.
+  const zh = o.language === 'chinese';
+  const budget = zh
+    ? `约 ${Math.round(o.words[0] * 1.8)}-${Math.round(o.words[1] * 1.8)} 个汉字 (about ${Math.round(o.words[0] * 1.8)}-${Math.round(o.words[1] * 1.8)} Chinese characters)`
+    : `about ${o.words[0]}-${o.words[1]} words`;
+
+  // A word budget alone loses to the numbered requirements above, which each
+  // demand their own sentence: asking for 50-80 words while still requiring an
+  // observation, a value connection, a CTA and a sign-off reliably produced
+  // ~115 words. Under a tight budget the model has to be told it may drop
+  // requirements, and which one to keep.
+  const tight = o.words[1] <= 150;
+  const lengthLine = tight
+    ? `- Length: ${budget} for the email body — a hard budget. It takes priority over completeness: `
+      + `cover only the single most important point, and omit or merge any requirement above that does not fit. `
+      + `Do not pad to reach the range, and do not exceed it.`
+    : `- Length: ${budget} for the email body. This OVERRIDES any sentence count given above; `
+      + `expand or compress the requirements to fit rather than padding.`;
+
+  const lines = [
+    lengthLine,
+    `- Tone: ${DRAFT_TONES[o.tone].instruction}`,
+    `- Language: ${DRAFT_LANGUAGES[o.language].instruction}`,
+  ];
+  if (DRAFT_CTAS[o.cta].instruction) {
+    lines.push(`- Call to action: ${DRAFT_CTAS[o.cta].instruction} This REPLACES the closing instruction given above.`);
+  }
+  return `\n\nOutput controls (these take priority over the numbered requirements above where they conflict):\n${lines.join('\n')}\n`;
+}
+
 // Builds the shared recipient/sender/context blocks used by every
 // non-default mode. Mirrors the original buildPrompt()'s framing so the
 // output format and tone stay consistent, without modifying buildPrompt itself.
@@ -238,6 +350,7 @@ function buildPromptForMode(mode, contact, sender, context = {}) {
     `${contextBlock}${customerProfileBlock(context)}\n\n` +
     `Now write the email. Requirements:\n${reqList}\n` +
     `${requirements.length + 1}. ${signOffLine}\n` +
+    `${draftOptionsBlock(context.options)}` +
     `\nAlso provide:\n` +
     `- subject: a compelling subject line (under 10 words, no clickbait)\n` +
     `- followup: one sentence friendly reminder (same voice, 3-5 days later)\n` +
@@ -414,4 +527,8 @@ async function categorizeEmail(subject, body, fromName, fromEmail) {
   }
 }
 
-module.exports = { draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES, buildPromptForMode, CLAUDE_MODEL };
+module.exports = {
+  draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES, buildPromptForMode, CLAUDE_MODEL,
+  DRAFT_LENGTHS, DRAFT_TONES, DRAFT_LANGUAGES, DRAFT_CTAS,
+  normalizeDraftOptions, draftOptionsSignature,
+};

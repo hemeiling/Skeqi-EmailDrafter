@@ -751,6 +751,72 @@
     }
     .crm-plan-foot b { color: var(--color-text); }
 
+    /* ── Draft generation options (length · tone · language · CTA) ──
+       Segmented controls: an ordered scale reads better as adjacent
+       segments than as a dropdown that hides four of five choices. */
+    .draft-options { margin-top: 12px; }
+    .do-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+    .do-row:last-child { margin-bottom: 0; }
+    .do-label {
+      font-size: 0.74rem; font-weight: 600; color: var(--color-text-secondary);
+      min-width: 88px; flex-shrink: 0;
+    }
+    .do-segs {
+      display: inline-flex; border: 1px solid var(--color-border); border-radius: var(--radius-md);
+      overflow: hidden; background: var(--color-surface);
+    }
+    .do-seg {
+      background: none; border: none; border-right: 1px solid var(--color-border);
+      padding: 5px 11px; font-size: 0.76rem; color: var(--color-text-secondary);
+      white-space: nowrap; border-radius: 0;
+    }
+    .do-seg:last-child { border-right: none; }
+    .do-seg:hover { background: var(--color-primary-soft); color: var(--color-primary-hover); }
+    .do-seg.active { background: var(--color-primary); color: #fff; font-weight: 600; }
+    .do-custom {
+      width: 80px; padding: 5px 8px; font-size: 0.78rem;
+      border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+    }
+    .do-custom[hidden] { display: none; }
+    .do-hint { font-size: 0.71rem; color: var(--color-text-tertiary); }
+    .do-select {
+      padding: 5px 9px; font-size: 0.78rem; border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm); background: var(--color-surface); min-width: 190px;
+    }
+    .do-more { margin-top: 10px; border-top: 1px solid var(--color-border-soft); padding-top: 9px; }
+    .do-more > summary {
+      list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px;
+      font-size: 0.74rem; color: var(--color-text-secondary); user-select: none; flex-wrap: wrap;
+    }
+    .do-more > summary::-webkit-details-marker { display: none; }
+    .do-more > summary::before { content: "▸"; font-size: 0.62rem; color: var(--color-text-tertiary); transition: transform .12s; }
+    .do-more[open] > summary::before { transform: rotate(90deg); }
+    .do-more-label { font-weight: 600; }
+    /* The summary states the full setting even while collapsed, so nothing
+       is ever silently in effect. */
+    .do-summary { color: var(--color-text-tertiary); font-size: 0.72rem; }
+    .do-more-body { margin-top: 10px; }
+
+    /* Bulk-bar popover: same component, dark-bar trigger. */
+    .crm-bulk-opts {
+      background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.22); color: #fff;
+      border-radius: var(--radius-sm); padding: 6px 10px; font-size: 0.76rem; white-space: nowrap;
+    }
+    .crm-bulk-opts:hover { background: rgba(255,255,255,0.22); }
+    .crm-bulk-popover {
+      position: absolute; bottom: calc(100% + 10px); right: 12px; z-index: 260;
+      width: min(560px, calc(100vw - 48px));
+      background: var(--color-surface); color: var(--color-text);
+      border: 1px solid var(--color-border); border-radius: var(--radius-md);
+      box-shadow: var(--shadow-lg); padding: 14px 16px;
+    }
+    .crm-bulk-popover[hidden] { display: none; }
+    .crm-bulk-popover-title {
+      font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--color-text-secondary); margin-bottom: 10px;
+    }
+    .crm-bulkbar { position: fixed; }
+
     /* ── The single search bar: page-level, above the object tabs, so it
        visibly governs the whole workspace rather than one table. ── */
     .crm-search-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
@@ -2114,9 +2180,21 @@
       <span class="crm-bulk-count" id="crm-selected-count"></span>
       <select id="crm-mode-select" title="Draft purpose/context"></select>
       <input type="text" id="crm-extra-instructions" placeholder="Additional instructions (optional)" />
+      <!-- The bar is horizontal and already crowded, so the same control is
+           reached through a popover rather than inlined. The trigger states
+           the current setting, so a bulk run's length/tone is never a
+           surprise. -->
+      <button type="button" class="crm-bulk-opts" id="crm-bulk-opts-btn" aria-expanded="false">
+        <span id="crm-bulk-opts-label">Medium · Professional</span> ▾
+      </button>
       <button class="btn-orange btn-sm" id="crm-bulk-draft-btn" disabled>Draft emails</button>
       <button class="btn-danger btn-sm" id="crm-bulk-delete-btn" disabled>Delete</button>
       <button type="button" class="crm-bulk-dismiss" id="crm-bulk-clear">Clear selection</button>
+
+      <div class="crm-bulk-popover" id="crm-bulk-opts-popover" hidden>
+        <div class="crm-bulk-popover-title">Draft options</div>
+        <div class="draft-options" id="bulk-draft-options"></div>
+      </div>
     </div>
 
     <!-- ── Find contacts (Apollo discovery) ──────────────────────────────
@@ -2634,6 +2712,9 @@
     <div class="draft-section" id="draft-library-section" style="border-top:1px solid #e0e4ea;border-bottom:1px solid #e0e4ea;padding:12px 0;">
       <div class="draft-label">Drafts for this Contact</div>
       <div id="draft-library-list" class="draft-library-list"></div>
+      <!-- Generation controls, next to the button that spends them. -->
+      <div class="draft-options" id="modal-draft-options"></div>
+
       <div style="display:flex;gap:8px;margin-top:10px;align-items:flex-end;">
         <div style="flex:1;">
           <label style="display:block;font-size:0.76rem;color:#555;margin-bottom:3px;">Additional instructions <span style="color:#9ca3af;font-weight:400;">(used when generating/regenerating the selected category)</span></label>

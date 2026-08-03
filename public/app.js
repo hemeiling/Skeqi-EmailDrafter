@@ -870,6 +870,9 @@ async function openDraftModalForContact(contact, refreshFn, options = {}) {
   document.getElementById("modal-contact-info").textContent =
     `${contact.title || ""} · ${contact.company || ""} · ${contact.department || ""}`;
   document.getElementById("modal-extra-instructions").value = "";
+  // Re-rendered per open so it reflects options changed elsewhere (e.g. in
+  // the bulk bar) since this modal was last shown.
+  renderDraftOptions(document.getElementById("modal-draft-options"), "modal");
   openModal("email-modal");
   loadModalIntel(contact); // saved company intelligence + tags used in generation (no AI)
   loadEmailSendStatus();    // show the "sending not configured yet" banner if applicable
@@ -976,6 +979,7 @@ async function requestDraft(contact, mode, extraInstructions, regenerate) {
         contact, sender: _sender, contactId: contact.contact_id, companyKey: contact.company,
         mode, extraInstructions, regenerate: Boolean(regenerate),
         includeTagIds: getModalIncludeTagIds(),
+        options: currentDraftOptions(),
       }),
     });
     const d = await r.json();
@@ -1030,6 +1034,147 @@ async function loadDraftModes() {
     document.getElementById("crm-mode-select").innerHTML = optionsHtml;
     document.getElementById("aee-mode").innerHTML = optionsHtml;
   } catch (e) { /* silent */ }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Draft options — length · tone · language · call to action
+
+   Four controls, one component, rendered wherever a draft is generated
+   (the contact modal and the bulk bar) so the two can never offer
+   different choices. The catalogue is fetched from /api/draft-options
+   rather than duplicated here: the word ranges shown to the user are the
+   same ones the prompt asks for.
+
+   Presentation is a segmented control rather than radios or a dropdown.
+   Length is an ordered scale of five, which segments express directly —
+   the options are all visible, comparable at a glance, and one click
+   apart. A dropdown would hide four of five behind a click and lose the
+   sense of a scale; radios would cost five rows of vertical space in a
+   modal that is already long.
+
+   Everything except length sits behind a summary line, because most
+   drafts are generated without touching them. The summary always states
+   the full current setting, so nothing is silently in effect.
+   ══════════════════════════════════════════════════════════════════════ */
+
+const DRAFT_OPTS_KEY = "draft_options_v1";
+let _draftOptionsCatalog = null;
+
+function defaultDraftOptions() {
+  return { length: "medium", customWords: 150, tone: "professional", language: "english", cta: "auto" };
+}
+
+// Last-used options persist: a team with a house style sets them once.
+function getSavedDraftOptions() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DRAFT_OPTS_KEY) || "{}");
+    return { ...defaultDraftOptions(), ...raw };
+  } catch { return defaultDraftOptions(); }
+}
+function saveDraftOptions(o) {
+  try { localStorage.setItem(DRAFT_OPTS_KEY, JSON.stringify(o)); } catch { /* ignore */ }
+}
+
+async function loadDraftOptionsCatalog() {
+  if (_draftOptionsCatalog) return _draftOptionsCatalog;
+  try {
+    _draftOptionsCatalog = await getJSON("/api/draft-options");
+  } catch (e) {
+    _draftOptionsCatalog = { lengths: [], tones: [], languages: [], ctas: [] };
+  }
+  return _draftOptionsCatalog;
+}
+
+function draftOptionsSummary(o, cat) {
+  const find = (list, v) => (list || []).find((x) => x.value === v);
+  const len = find(cat.lengths, o.length);
+  const lenLabel = o.length === "custom" ? `${o.customWords} words` : (len ? len.label : o.length);
+  return [lenLabel, (find(cat.tones, o.tone) || {}).label, (find(cat.languages, o.language) || {}).label,
+    o.cta !== "auto" ? (find(cat.ctas, o.cta) || {}).label : null].filter(Boolean).join(" · ");
+}
+
+/* Renders the control into `container`. `scope` prefixes the element ids so
+   the modal and bulk-bar copies can coexist. onChange fires on every edit. */
+async function renderDraftOptions(container, scope, onChange) {
+  if (!container) return;
+  const cat = await loadDraftOptionsCatalog();
+  const o = getSavedDraftOptions();
+
+  const seg = (name, list, current) => list.map((x) =>
+    `<button type="button" class="do-seg${x.value === current ? " active" : ""}"
+       data-do-field="${name}" data-do-value="${x.value}"
+       ${x.words ? `title="${x.words[0]}–${x.words[1]} words${x.hint ? " · " + escapeHtml(x.hint) : ""}"` : ""}
+     >${escapeHtml(x.label)}</button>`).join("");
+
+  container.innerHTML = `
+    <div class="do-row">
+      <label class="do-label">Length</label>
+      <div class="do-segs" role="group" aria-label="Email length">${seg("length", cat.lengths, o.length)}</div>
+      <input type="number" class="do-custom" id="${scope}-do-custom" min="30" max="600" step="10"
+             value="${o.customWords}" aria-label="Custom word count"
+             ${o.length === "custom" ? "" : "hidden"}>
+      <span class="do-hint" id="${scope}-do-hint"></span>
+    </div>
+    <details class="do-more" id="${scope}-do-more">
+      <summary><span class="do-more-label">Tone, language &amp; call to action</span>
+        <span class="do-summary" id="${scope}-do-summary"></span></summary>
+      <div class="do-more-body">
+        <div class="do-row"><label class="do-label">Tone</label>
+          <div class="do-segs" role="group" aria-label="Tone">${seg("tone", cat.tones, o.tone)}</div></div>
+        <div class="do-row"><label class="do-label">Language</label>
+          <div class="do-segs" role="group" aria-label="Language">${seg("language", cat.languages, o.language)}</div></div>
+        <div class="do-row"><label class="do-label">Call to action</label>
+          <select class="do-select" id="${scope}-do-cta" aria-label="Call to action">
+            ${cat.ctas.map((c) => `<option value="${c.value}" ${c.value === o.cta ? "selected" : ""}>${escapeHtml(c.label)}</option>`).join("")}
+          </select></div>
+      </div>
+    </details>`;
+
+  const state = { ...o };
+  const paint = () => {
+    container.querySelectorAll("[data-do-field]").forEach((b) => {
+      b.classList.toggle("active", state[b.dataset.doField] === b.dataset.doValue);
+    });
+    const custom = container.querySelector(`#${scope}-do-custom`);
+    if (custom) custom.hidden = state.length !== "custom";
+    const chosen = (cat.lengths || []).find((l) => l.value === state.length);
+    const hint = container.querySelector(`#${scope}-do-hint`);
+    if (hint) {
+      hint.textContent = state.length === "custom"
+        ? `≈ ${state.customWords} words`
+        : (chosen && chosen.words ? `${chosen.words[0]}–${chosen.words[1]} words · ${chosen.hint}` : "");
+    }
+    const sum = container.querySelector(`#${scope}-do-summary`);
+    if (sum) sum.textContent = draftOptionsSummary(state, cat);
+    saveDraftOptions(state);
+    if (onChange) onChange({ ...state });
+  };
+
+  container.querySelectorAll("[data-do-field]").forEach((b) => b.addEventListener("click", (e) => {
+    e.preventDefault();
+    state[b.dataset.doField] = b.dataset.doValue;
+    paint();
+    if (b.dataset.doField === "length" && b.dataset.doValue === "custom") {
+      container.querySelector(`#${scope}-do-custom`)?.focus();
+    }
+  }));
+  container.querySelector(`#${scope}-do-custom`)?.addEventListener("input", (e) => {
+    state.customWords = Math.max(30, Math.min(600, Number(e.target.value) || 150));
+    paint();
+  });
+  container.querySelector(`#${scope}-do-cta`)?.addEventListener("change", (e) => {
+    state.cta = e.target.value; paint();
+  });
+
+  paint();
+  return state;
+}
+
+// What the draft endpoints should be sent. Reads saved state, so it is
+// correct even if the control was never rendered in this session.
+function currentDraftOptions() {
+  const o = getSavedDraftOptions();
+  return { length: o.length, customWords: o.customWords, tone: o.tone, language: o.language, cta: o.cta };
 }
 
 const DRAFT_STATUS_LABELS = { draft: "Draft", ready_for_review: "Ready for Review", approved: "Approved", archived: "Archived", trash: "Trash" };
@@ -3819,6 +3964,7 @@ document.getElementById("crm-bulk-draft-btn").addEventListener("click", async ()
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contact: crmRowToDraftFormat(c), sender: _sender, contactId: c.id, mode, extraInstructions: extra,
+          options: currentDraftOptions(),
         }),
       });
       const d = await r.json();
@@ -4258,6 +4404,31 @@ function initCrmWorkspace() {
   }
 
   document.getElementById("crm-bulk-clear")?.addEventListener("click", clearCrmSelection);
+
+  // ── Draft options in the bulk bar ──
+  const optsBtn = document.getElementById("crm-bulk-opts-btn");
+  const optsPop = document.getElementById("crm-bulk-opts-popover");
+  if (optsBtn && optsPop) {
+    const label = document.getElementById("crm-bulk-opts-label");
+    const setLabel = async (o) => {
+      const cat = await loadDraftOptionsCatalog();
+      if (label) label.textContent = draftOptionsSummary(o || getSavedDraftOptions(), cat);
+    };
+    renderDraftOptions(document.getElementById("bulk-draft-options"), "bulk", setLabel);
+    setLabel();
+    optsBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      optsPop.hidden = !optsPop.hidden;
+      optsBtn.setAttribute("aria-expanded", optsPop.hidden ? "false" : "true");
+    });
+    document.addEventListener("click", (e) => {
+      if (optsPop.hidden) return;
+      if (!optsPop.contains(e.target) && e.target !== optsBtn) {
+        optsPop.hidden = true;
+        optsBtn.setAttribute("aria-expanded", "false");
+      }
+    });
+  }
 }
 
 /* ── Init ── */
@@ -5543,6 +5714,7 @@ async function openPromptInspector() {
         contact: _modalContact, sender: _sender, contactId: _modalContact.contact_id,
         mode: _modalSelectedMode,
         extraInstructions: (document.getElementById("modal-extra-instructions") || {}).value?.trim() || "",
+        options: currentDraftOptions(),
         includeTagIds: getModalIncludeTagIds(),
       }),
     });

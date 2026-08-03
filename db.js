@@ -223,6 +223,12 @@ async function initDb() {
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS cc TEXT`);
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS bcc TEXT`);
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS notes TEXT`);
+  // Which generation options (length/tone/language/CTA) produced this draft.
+  // Stored so a saved draft is only reused when the request asks for the same
+  // ones -- reusing a 400-word formal draft for a 60-word direct request would
+  // silently ignore what the user chose. Empty string = the defaults, which is
+  // what every draft written before this column existed effectively used.
+  await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS draft_options TEXT`);
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS parent_email_id INTEGER REFERENCES communications(id)`);
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS follow_up_sequence_number INTEGER`);
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`);
@@ -2038,6 +2044,7 @@ async function insertEmailDraftVersion(contactId, draft, mode, extraInstructions
     category: resolvedMode, status: 'draft',
     version: modeVersion, source: 'email_draft',
     draft_mode: resolvedMode, extra_instructions: extraInstructions || '',
+    draft_options: extraFields.draft_options || '',
     followup_text: draft.followup || '', rationale: draft.rationale || '',
     to_email: extraFields.to_email || '', cc: extraFields.cc || '',
     bcc: extraFields.bcc || '', notes: extraFields.notes || ''
@@ -2073,8 +2080,8 @@ async function insertCommunication(e) {
       (contact_id, company_id, comm_type, subject, body, category, status, version,
        source, from_email, from_name, to_email, draft_mode, followup_text, rationale,
        sent_at, review_needed, raw_payload, extra_instructions, cc, bcc, notes,
-       parent_email_id, follow_up_sequence_number)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+       parent_email_id, follow_up_sequence_number, draft_options)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
     RETURNING *
   `, [
     e.contact_id || null, e.company_id || null,
@@ -2083,7 +2090,8 @@ async function insertCommunication(e) {
     e.source || 'manual', e.from_email || '', e.from_name || '',
     e.to_email || '', e.draft_mode || '', e.followup_text || '', e.rationale || '',
     e.sent_at || null, Boolean(e.review_needed), e.raw_payload || '', e.extra_instructions || '',
-    e.cc || '', e.bcc || '', e.notes || '', e.parent_email_id || null, e.follow_up_sequence_number || null
+    e.cc || '', e.bcc || '', e.notes || '', e.parent_email_id || null, e.follow_up_sequence_number || null,
+    e.draft_options || ''
   ]);
   return row;
 }
@@ -2448,15 +2456,16 @@ async function createFollowUp(id) {
 
 // Same lookup as findLatestDraftForContact, but excludes trashed drafts --
 // a draft the user has already discarded shouldn't block generating a new one.
-async function checkEquivalentDraft(contactId, mode, extraInstructions) {
+async function checkEquivalentDraft(contactId, mode, extraInstructions, optionsSignature) {
   return q1(`
     SELECT * FROM communications
     WHERE contact_id = $1 AND comm_type = 'draft' AND deleted_at IS NULL
       AND COALESCE(draft_mode, 'cold_outreach') = $2
       AND COALESCE(extra_instructions, '') = $3
+      AND COALESCE(draft_options, '') = $4
     ORDER BY version DESC, id DESC
     LIMIT 1
-  `, [contactId, mode || 'cold_outreach', extraInstructions || '']);
+  `, [contactId, mode || 'cold_outreach', extraInstructions || '', optionsSignature || '']);
 }
 
 // Draft Library data source: one row per category (draft_mode) that has a
