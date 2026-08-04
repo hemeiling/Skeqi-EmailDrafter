@@ -34,8 +34,11 @@ const {
   findContactByEmail, findContactByEmailDomain, findCompanyByDomain, countNeedsReviewEmails,
   searchContacts, filterContacts, patchContactCrmFields, logContactActivity, listContactActivity,
   listContactNamesForBrowse,
-  getSetting, setSetting, listEvents
+  getSetting, setSetting, listEvents,
+  queryContactsPage, countContacts, contactFacets, listContactsByIds,
+  logCompanyActivity, listCompanyActivity, pool
 } = require('./db');
+const { normalizeColumnFilters, describeFilters, EMAIL_MODES, ACTIVITY_STATES, DRAFT_STATES, CONTACT_STATUSES, CONTACT_SOURCES, EMAIL_SOURCES, COMPANY_SOURCES } = require('./contact-query');
 const { parseCardText } = require('./parse');
 const {
   isConfigured: apolloConfigured,
@@ -349,6 +352,7 @@ app.post('/api/scan-batch-file', upload.single('file'), async (req, res) => {
         const payload = {
           ...fields,
           source: 'business_card',
+          email_source: fields.email ? 'business_card' : 'none',
           apollo_person_id: processed.apolloPersonId || '',
           apollo_raw_json: processed.apolloRaw ? JSON.stringify(processed.apolloRaw) : '',
           apollo_enriched_at: processed.apolloRaw ? new Date().toISOString() : '',
@@ -416,34 +420,63 @@ app.post('/api/contacts', async (req, res) => {
 });
 
 // GET /api/contacts
+/* GET /api/contacts — the CRM data grid.
+
+   Filtering, sorting, counting and paging all happen in Postgres; the
+   response carries one page plus the true total, so the browser never
+   holds the whole table. Sidebar filters arrive as flat query params (as
+   they always have); the Excel-style column filters arrive as one JSON
+   blob in `columns`, because they are structured and nesting them into
+   query params would be a worse encoding of the same tree. */
+function gridFiltersFromQuery(query) {
+  const {
+    q, event, company, industry, follow_up_status, assigned_salesperson,
+    accounts, contact_ids, department_categories, seniority_levels,
+    show_event, booth_categories, company_sources, columns,
+  } = query;
+
+  const split = (v) => (v ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : []);
+
+  let parsedColumns = {};
+  if (columns) {
+    // A malformed blob must narrow nothing rather than 500 the grid.
+    try { parsedColumns = normalizeColumnFilters(JSON.parse(columns)); }
+    catch { parsedColumns = {}; }
+  }
+
+  return {
+    q: q ? String(q).trim() : '',
+    event, company, industry, follow_up_status, assigned_salesperson,
+    accounts: split(accounts),
+    contact_ids: split(contact_ids).map(Number).filter(Number.isInteger),
+    department_categories: split(department_categories),
+    seniority_levels: split(seniority_levels),
+    show_event,
+    booth_categories: split(booth_categories),
+    company_sources: split(company_sources),
+    columns: parsedColumns,
+  };
+}
+
 app.get('/api/contacts', async (req, res) => {
   try {
-    const { q, event, company, industry, follow_up_status, tags, assigned_salesperson, accounts, contact_ids, department_categories, seniority_levels, sortBy, show_event, booth_categories } = req.query;
-    // Multi-select filters travel as comma-separated strings (?accounts=Ford,Tesla,CATL).
-    const accountList = accounts ? String(accounts).split(',').map((s) => s.trim()).filter(Boolean) : [];
-    const contactIdList = contact_ids ? String(contact_ids).split(',').map(Number).filter((n) => Number.isInteger(n)) : [];
-    const departmentList = department_categories ? String(department_categories).split(',').map((s) => s.trim()).filter(Boolean) : [];
-    const seniorityList = seniority_levels ? String(seniority_levels).split(',').map((s) => s.trim()).filter(Boolean) : [];
-    const boothCatList = booth_categories ? String(booth_categories).split(',').map((s) => s.trim()).filter(Boolean) : [];
-    const hasStructuredFilter = event || company || industry || follow_up_status || tags || assigned_salesperson
-      || accountList.length || contactIdList.length || departmentList.length || seniorityList.length
-      || show_event || boothCatList.length;
+    const filters = gridFiltersFromQuery(req.query);
+    const sort = req.query.sort
+      ? { column: String(req.query.sort), direction: req.query.dir === 'asc' ? 'asc' : 'desc' }
+      : null;
 
-    let contacts;
-    if (hasStructuredFilter) {
-      contacts = await filterContacts({
-        event, company, industry, follow_up_status, tags, assigned_salesperson,
-        accounts: accountList, contact_ids: contactIdList,
-        department_categories: departmentList, seniority_levels: seniorityList, sortBy,
-        show_event, booth_categories: boothCatList
-      });
-    } else if (q) {
-      contacts = await searchContacts(q);
-    } else {
-      contacts = await listContacts(200);
-    }
+    // Legacy callers (dashboard counts, the import contact picker) pass no
+    // page and expect a plain list, so the default page size stays where
+    // listContacts() had it. The grid always sends its own.
+    const pageSize = Math.min(500, Math.max(1, Number(req.query.pageSize || req.query.limit) || 200));
+    const page = Math.max(1, Number(req.query.page) || 1);
 
-    const enriched = contacts.map(c => {
+    const [contacts, total] = await Promise.all([
+      queryContactsPage(filters, sort, page, pageSize),
+      countContacts(filters),
+    ]);
+
+    const enriched = contacts.map((c) => {
       const draftCount = Number(c.draft_count) || 0;
       return {
         ...c,
@@ -452,9 +485,74 @@ app.get('/api/contacts', async (req, res) => {
         has_draft: Boolean(c.draft_subject) || draftCount > 0,
       };
     });
-    res.json({ ok: true, contacts: enriched });
+
+    res.json({
+      ok: true,
+      contacts: enriched,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      sort,
+      chips: describeFilters(filters.columns),
+    });
   } catch (err) {
+    console.error('List contacts error:', err);
     res.status(500).json({ error: 'Failed to load contacts' });
+  }
+});
+
+/* GET /api/contacts/facets?column=… — the option counts inside one column
+   menu, computed against every other active filter. Lets the menu show
+   "Reply received (0)" instead of offering a filter that silently returns
+   nothing. */
+app.get('/api/contacts/facets', async (req, res) => {
+  try {
+    const column = String(req.query.column || '');
+    const filters = gridFiltersFromQuery(req.query);
+    filters.facetSearch = req.query.search || '';
+    res.json({ ok: true, column, options: await contactFacets(filters, column) });
+  } catch (err) {
+    console.error('Facets error:', err);
+    res.status(500).json({ error: 'Failed to load filter options' });
+  }
+});
+
+/* GET /api/contacts/grid-vocab — the option lists and their labels, so the
+   menus are built from the same vocabulary the SQL is keyed by. */
+app.get('/api/contacts/grid-vocab', (req, res) => {
+  res.json({
+    ok: true,
+    email: EMAIL_MODES,
+    activity: ACTIVITY_STATES,
+    draft: DRAFT_STATES,
+    status: CONTACT_STATUSES,
+    source: CONTACT_SOURCES,
+    emailSource: EMAIL_SOURCES,
+    companySource: COMPANY_SOURCES,
+  });
+});
+
+/* GET /api/companies/:id/activity — the company audit trail: how it was
+   discovered, and any later correction to that record. */
+app.get('/api/companies/:id/activity', async (req, res) => {
+  try {
+    res.json({ ok: true, activity: await listCompanyActivity(Number(req.params.id)) });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load company activity' });
+  }
+});
+
+/* GET /api/companies/source-counts — how many companies came from each
+   discovery path. Drives the Companies filter and answers "how much of the
+   CRM can we actually trace". */
+app.get('/api/companies/source-counts', async (req, res) => {
+  try {
+    const rows = await pool.query(
+      `SELECT COALESCE(source, 'legacy') AS key, COUNT(*)::int AS n FROM companies GROUP BY 1 ORDER BY n DESC`);
+    res.json({ ok: true, options: rows.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load company source counts' });
   }
 });
 
@@ -598,6 +696,10 @@ app.post('/api/companies/upload', upload.single('file'), async (req, res) => {
         industry: c.industry,
         booth: c.booth,
         event_name: eventName,
+        // The uploaded file discovered the *company*. The contacts that an
+        // Apollo search later returns for it remain Apollo contacts.
+        source: 'file_upload',
+        source_file: (req.file && req.file.originalname) || '',
         category: c.category,
         priority: c.priority,
         background: c.background,
@@ -658,6 +760,7 @@ app.post('/api/companies', async (req, res) => {
       website: req.body.website,
       industry: req.body.industry,
       notes: req.body.notes,
+      source: 'manual',
     });
     if (!result) {
       // upsertCompany's guard is an exact-match blocklist ("engineering",
@@ -763,12 +866,13 @@ app.get('/api/leads/plan', async (req, res) => {
       const searchRequests = willRetrieve > 0 ? Math.ceil(target / 25) : 0;
 
       // What a prior search recorded Apollo as holding, if anything.
-      let apolloTotal = null, apolloTotalAt = null;
+      let apolloTotal = null, apolloTotalAt = null, lastError = null, lastErrorAt = null;
       const cached = caches[companyCacheKey(name)];
       if (cached) {
         try {
           const payload = JSON.parse(cached.raw_json);
           if (Number(payload.total)) { apolloTotal = Number(payload.total); apolloTotalAt = cached.fetched_at; }
+          if (payload.lastError) { lastError = payload.lastError; lastErrorAt = payload.lastErrorAt || null; }
         } catch (e) { /* malformed cache entry is simply "unknown" */ }
       }
 
@@ -784,7 +888,13 @@ app.get('/api/leads/plan', async (req, res) => {
         searchRequests,
         budgetLimited: wanted > willRetrieve,
         mode: replace ? 'replace' : 'append',
-        apolloTotal, apolloTotalAt,
+        // Whether this is a first import or a top-up changes the wording and
+        // the action, so the planner states it rather than the UI guessing.
+        firstImport: current === 0,
+        // The most Apollo can actually supply beyond what we hold, when a
+        // previous search told us the true match count.
+        availableBeyondHeld: apolloTotal == null ? null : Math.max(0, apolloTotal - current),
+        apolloTotal, apolloTotalAt, lastError, lastErrorAt,
       });
     }
     res.json({ ok: true, plans, maxTotal, remainingBudget: budget });
@@ -893,6 +1003,18 @@ app.post('/api/leads/search', async (req, res) => {
       });
       if (result.error) {
         messages.push(`${companyName}: ${result.error}`);
+        /* Remember the failure. Without this the planner had no way to know
+           the last attempt failed, so it kept presenting a confident
+           estimate beside "Lead search failed" messages on the page. */
+        try {
+          const key = companyCacheKey(companyName);
+          const prev = await getCompanySearchCache(key);
+          let payload = {};
+          try { payload = prev ? JSON.parse(prev.raw_json) : {}; } catch (e) { payload = {}; }
+          payload.lastError = String(result.error).slice(0, 300);
+          payload.lastErrorAt = new Date().toISOString();
+          await setCompanySearchCache(key, JSON.stringify(payload));
+        } catch (e) { /* recording the failure must never mask it */ }
         continue;
       }
 
@@ -932,13 +1054,13 @@ app.post('/api/leads/search', async (req, res) => {
       for (const companyName2 of contacts.map((c) => c.company || companyName)) {
         if (seenCompanyNames.has(companyName2.toLowerCase())) continue;
         seenCompanyNames.add(companyName2.toLowerCase());
-        const compResult = await upsertCompany({ name: companyName2, account_name: companyName });
+        const compResult = await upsertCompany({ name: companyName2, account_name: companyName, source: 'apollo' });
         if (compResult) lastCompanyId = compResult.id;
       }
       if (!seenCompanyNames.size) {
         // No contacts came back at all -- still ensure a company row exists
         // under this Account so the search isn't a total no-op.
-        const compResult = await upsertCompany({ name: companyName, account_name: companyName });
+        const compResult = await upsertCompany({ name: companyName, account_name: companyName, source: 'apollo' });
         if (compResult) lastCompanyId = compResult.id;
       }
 
@@ -956,7 +1078,10 @@ app.post('/api/leads/search', async (req, res) => {
           apollo_person_id: c.apollo_id, source: 'apollo',
           has_email: Boolean(c.has_email) || Boolean(cleanEmail),
           apollo_raw_json: rawJson,
-          email_lookup_status: cleanEmail ? 'found' : 'not_checked'
+          email_lookup_status: cleanEmail ? 'found' : 'not_checked',
+          // Search-supplied, which costs no reveal credit — a distinction the
+          // details panel and the export both surface.
+          email_source: cleanEmail ? 'apollo_search' : 'none'
         });
         c.contact_id = id;
         c.email_lookup_status = cleanEmail ? 'found' : 'not_checked';
@@ -969,6 +1094,7 @@ app.post('/api/leads/search', async (req, res) => {
       // `total` is Apollo's own match count for this query. Persisting it is
       // what lets the import planner tell the user how much more is available
       // without spending a request to find out.
+      // Success clears any recorded failure — the warning must not outlive it.
       await setCompanySearchCache(companyCacheKey(companyName),
         JSON.stringify({ company: companyName, contacts, orgs, total: result.total || null }));
 
@@ -1049,66 +1175,129 @@ app.post('/api/reveal-email', async (req, res) => {
   }
 });
 
-// POST /api/contacts/:id/enrich-email
-// Smart enrich: checks apollo_raw_json first (free), then falls back to reveal API.
+/* POST /api/contacts/:id/enrich-email — resolve one contact's address.
+
+   Two tiers, and the boundary between them is the whole point:
+
+     free  — an address already stored in the CRM, or one sitting in the
+             Apollo payload we already paid for and saved. Costs nothing,
+             runs on any request.
+     paid  — asking Apollo to reveal an address it has not given us. Costs a
+             credit, and runs ONLY when the caller passes allowApollo.
+
+   Without allowApollo the paid tier is not attempted: the route reports
+   `needsApollo` with an estimate and spends nothing. That default is what
+   makes it safe for any code path — present or future — to call this while
+   rendering, and it is enforced here rather than at the call sites, because
+   a call site that forgets is exactly how the charges got hidden before. */
 app.post('/api/contacts/:id/enrich-email', async (req, res) => {
   try {
     const contactId = Number(req.params.id);
+    const allowApollo = req.body && req.body.allowApollo === true;
     const contact = await getContact(contactId);
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
 
+    // Tier 1a: already in the CRM. Free for every source, including uploads.
     if (contact.email) {
-      return res.json({ ok: true, email: contact.email, source: 'neon_cached' });
+      return res.json({
+        ok: true, email: contact.email, source: 'stored',
+        email_source: contact.email_source || 'legacy',
+        creditsUsed: 0, email_lookup_status: 'found',
+      });
     }
 
     let email = '';
     let source = '';
+    let emailSource = '';
+    let creditsUsed = 0;
 
-    // Step 1: try to extract from stored apollo_raw_json (free, no API call)
+    // Tier 1b: the stored Apollo payload. Already bought and saved, so
+    // reading it again is free.
     if (contact.apollo_raw_json) {
       try {
         const rawPerson = JSON.parse(contact.apollo_raw_json);
         const candidate = extractApolloEmail(rawPerson);
-        if (candidate) { email = candidate; source = 'apollo_raw_json'; }
-        console.log(`[enrich-email] contact_id=${contactId} raw_json_check: email=${JSON.stringify(candidate)}`);
+        if (candidate) { email = candidate; source = 'apollo_raw_json'; emailSource = 'apollo_search'; }
       } catch (e) {
         console.warn(`[enrich-email] contact_id=${contactId} failed to parse apollo_raw_json: ${e.message}`);
       }
     }
 
-    // Step 2: if still missing and we have an Apollo ID, call the reveal API
-    if (!email && contact.apollo_person_id) {
+    if (email) {
+      await updateContact(contactId, { email, email_lookup_status: 'found', email_source: emailSource });
+      return res.json({ ok: true, email, source, email_source: emailSource, creditsUsed: 0, email_lookup_status: 'found' });
+    }
+
+    // Tier 2: a paid reveal is the only remaining option.
+    if (contact.apollo_person_id) {
+      if (!allowApollo) {
+        return res.json({
+          ok: true, email: '', source: 'none', creditsUsed: 0,
+          needsApollo: true, estimatedCredits: 1,
+          email_lookup_status: contact.email_lookup_status || 'not_checked',
+          message: 'An Apollo reveal is required for this address and was not requested.',
+        });
+      }
       if (!apolloConfigured()) {
-        return res.json({ ok: true, email: '', email_lookup_status: 'not_checked', message: 'Apollo not configured' });
+        return res.json({ ok: true, email: '', email_lookup_status: 'not_checked', creditsUsed: 0, message: 'Apollo not configured' });
       }
-      console.log(`[enrich-email] contact_id=${contactId} calling reveal for apollo_id=${contact.apollo_person_id}`);
       const result = await revealPersonEmail(contact.apollo_person_id, config.APOLLO_API_KEY);
-      if (result.error) {
-        return res.status(502).json({ error: result.error });
-      }
+      if (result.error) return res.status(502).json({ error: result.error });
+
+      creditsUsed = 1;   // the call was made; a miss costs the same as a hit
       if (result.email && !result.email.startsWith('(')) {
         email = result.email;
         source = 'apollo_reveal';
+        emailSource = 'apollo_enrichment';
         await updateContact(contactId, {
-          email,
-          email_lookup_status: 'found',
-          apollo_raw_json: result.raw ? JSON.stringify(result.raw) : undefined
+          email, email_lookup_status: 'found', email_source: emailSource,
+          apollo_raw_json: result.raw ? JSON.stringify(result.raw) : undefined,
         });
       } else {
-        // Apollo was called but returned no email — record this so we don't retry
+        // Apollo answered "no address". Recorded so we never pay to ask twice.
         source = 'apollo_reveal';
         await updateContact(contactId, { email_lookup_status: 'not_available' });
       }
-    } else if (email) {
-      await updateContact(contactId, { email, email_lookup_status: 'found' });
     }
 
     const finalStatus = email ? 'found' : (contact.apollo_person_id ? 'not_available' : 'not_checked');
-    console.log(`[enrich-email] contact_id=${contactId} result: email=${JSON.stringify(email)} source=${source} status=${finalStatus}`);
-    res.json({ ok: true, email, email_lookup_status: finalStatus, source });
+    res.json({ ok: true, email, email_lookup_status: finalStatus, source, email_source: emailSource, creditsUsed });
   } catch (err) {
     console.error('Enrich email error:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+/* POST /api/contacts/reveal-estimate — what would a reveal cost, and for
+   whom, before anything is spent. Free: it only reads the CRM. */
+app.post('/api/contacts/reveal-estimate', async (req, res) => {
+  try {
+    const ids = (req.body && Array.isArray(req.body.ids) ? req.body.ids : []).map(Number).filter(Number.isInteger);
+    if (!ids.length) return res.json({ ok: true, total: 0, alreadyStored: 0, freeFromPayload: 0, needsApollo: 0, noApolloId: 0, estimatedCredits: 0 });
+
+    const rows = await listContactsByIds(ids);
+    let alreadyStored = 0, freeFromPayload = 0, needsApollo = 0, noApolloId = 0;
+    for (const c of rows) {
+      if (c.email && String(c.email).trim()) { alreadyStored++; continue; }
+      // Already asked and Apollo had none: asking again would cost a credit
+      // to learn the same thing, so it is not offered.
+      if (c.email_lookup_status === 'not_available') { noApolloId++; continue; }
+      // The payload is already paid for; an address inside it is free.
+      let inPayload = '';
+      if (c.apollo_raw_json) {
+        try { inPayload = extractApolloEmail(JSON.parse(c.apollo_raw_json)) || ''; } catch { inPayload = ''; }
+      }
+      if (inPayload) { freeFromPayload++; continue; }
+      if (c.apollo_person_id) { needsApollo++; continue; }
+      noApolloId++;
+    }
+    res.json({
+      ok: true, total: rows.length, alreadyStored, freeFromPayload, needsApollo, noApolloId,
+      estimatedCredits: needsApollo,
+    });
+  } catch (err) {
+    console.error('Reveal estimate error:', err);
+    res.status(500).json({ error: 'Failed to estimate reveal cost' });
   }
 });
 
@@ -1262,6 +1451,7 @@ app.post('/api/emails/ingest', async (req, res) => {
         email: fromEmail,
         company: companyHint,
         source: 'email_import',
+        email_source: 'email_import',
         email_lookup_status: fromEmail ? 'found' : 'not_checked'
       });
       contact = await getContact(newId);
@@ -1865,6 +2055,9 @@ app.post('/api/contacts/manual', async (req, res) => {
         notes: c.company_notes || '',
         event_name: c.event_name || '',
         booth: c.booth_number || '',
+        // Created because a contact is being saved by hand, not discovered
+        // independently — the distinction the audit trail exists to keep.
+        source: 'contact_creation',
       });
       if (compResult) companyId = compResult.id;
     }
@@ -1879,6 +2072,7 @@ app.post('/api/contacts/manual', async (req, res) => {
       meeting_notes: c.meeting_notes || '',
       website: c.website || '',
       source: 'manual',
+      email_source: (req.body.email || '').trim() ? 'manual' : 'none',
       contact_status: c.contact_status || 'prospect',
       follow_up_status: c.follow_up_status || 'not_contacted',
       priority: c.priority || 'medium',

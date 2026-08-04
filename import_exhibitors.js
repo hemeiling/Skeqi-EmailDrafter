@@ -110,11 +110,11 @@ function countryToLocation(r) {
   console.log('\n开始写入…');
   let created = 0, updated = 0, failed = 0;
   for (const c of plan.create) {
-    try { await db.upsertCompany(c); created++; } catch (e) { failed++; if (failed < 4) console.error('  ✗', c.name, e.message); }
+    try { await db.upsertCompany({ ...c, source: 'exhibitor_list' }); created++; } catch (e) { failed++; if (failed < 4) console.error('  ✗', c.name, e.message); }
     if (created % 100 === 0 && created) console.log(`  新建 ${created}/${plan.create.length}`);
   }
   for (const u of plan.fillOnly) {
-    try { await db.upsertCompany(u); updated++; } catch (e) { failed++; if (failed < 4) console.error('  ✗', u.name, e.message); }
+    try { await db.upsertCompany({ ...u, source: 'exhibitor_list' }); updated++; } catch (e) { failed++; if (failed < 4) console.error('  ✗', u.name, e.message); }
   }
   console.log(`\n完成: 新建 ${created} | 补字段 ${updated} | 失败 ${failed}`);
 

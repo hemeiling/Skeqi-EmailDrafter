@@ -97,6 +97,7 @@ const I18N_PAIRS = [
   ["Tags", "标签"],
   ["Status", "状态"],
   ["Draft", "草稿"],
+  ["Source", "来源"],
   ["Details", "详情"],
   ["View", "查看"],
   ["Redraft", "重新生成"],

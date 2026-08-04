@@ -640,7 +640,7 @@ function renderContacts(contacts, companyLabel) {
   const resultsEl = document.getElementById("results");
   if (!contacts.length) {
     resultsEl.innerHTML = `
-      <div class="table-empty-state">
+      <div class="table-empty-state" data-no-i18n>
         <div class="tes-icon">🔍</div>
         <div class="tes-title">No leadership contacts found</div>
         <div class="tes-hint">Try a different company name, or widen your target departments in Search Settings.</div>
@@ -784,9 +784,170 @@ function getSelectedContacts() {
 
 const CRM_FIELDS = ["name", "title", "company", "department", "email", "linkedin", "confidence", "relevance", "location"];
 
+/* ══════════════════════════════════════════════════════════════════════
+   Email reveal · 邮箱补全
+
+   Apollo returns "(email available via Apollo, not returned in payload)"
+   instead of an address, so an export made straight from search results is
+   full of placeholders and a salesperson has to go back to Apollo and click
+   Reveal on every row. This resolves them first, once, and stores the
+   result — so every later use (export, drafting, sending, contact detail)
+   reads a real address from our own database.
+
+   Cost control, in order:
+     · a contact that already has an email is skipped entirely;
+     · one Apollo confirmed has none (not_available) is never asked again;
+     · the server checks the stored apollo_raw_json before spending a
+       request, so many reveals cost nothing.
+   Concurrency is capped so a 300-row export doesn't open 300 sockets.
+   ══════════════════════════════════════════════════════════════════════ */
+
+const REVEAL_CONCURRENCY = 5;
+
+/* Which contacts a reveal pass should even attempt. This used to return true
+   for any contact lacking an address, including ones with no Apollo id —
+   which meant the batch made a request per row to be told "nothing to do".
+   Rows Apollo cannot help with are now excluded before the pass starts. */
+function contactNeedsReveal(c) {
+  const email = String(c.email || "");
+  const hasReal = email && !email.startsWith("(") && !email.includes("N/A");
+  if (hasReal) return false;                                     // free: already stored
+  if (c.email_lookup_status === "not_available") return false;   // already answered
+  if (!(c.contact_id || c.id)) return false;
+  // An Apollo id, or a saved payload that may already contain the address.
+  return Boolean(c.apollo_person_id || c.apollo_raw_json);
+}
+
+/* Reveals what's missing, reporting progress. Returns a map of
+   contactId -> email ('' when Apollo has none) plus tallies for the report. */
+async function revealEmailsForContacts(contacts, onProgress) {
+  const pending = (contacts || []).filter(contactNeedsReveal);
+  const result = { emails: {}, revealed: 0, unavailable: 0, failed: 0, skipped: (contacts || []).length - pending.length };
+  if (!pending.length) { if (onProgress) onProgress(0, 0); return result; }
+
+  let done = 0;
+  if (onProgress) onProgress(0, pending.length);
+
+  const queue = pending.slice();
+  const worker = async () => {
+    while (queue.length) {
+      const c = queue.shift();
+      const id = c.contact_id || c.id;
+      try {
+        const r = await fetch(`/api/contacts/${id}/enrich-email`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          // The caller has already shown the cost and had it accepted.
+          body: JSON.stringify({ allowApollo: true }),
+        });
+        const d = await r.json();
+        const email = d && d.email && !String(d.email).startsWith("(") ? d.email : "";
+        result.emails[id] = email;
+        if (email) result.revealed++; else result.unavailable++;
+        if (d && d.creditsUsed) result.credits = (result.credits || 0) + d.creditsUsed;
+      } catch (e) {
+        result.failed++;
+      }
+      done++;
+      if (onProgress) onProgress(done, pending.length);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(REVEAL_CONCURRENCY, pending.length) }, worker));
+  return result;
+}
+
+/* Small modal-less progress line, shown over the page while revealing. */
+function revealProgressUi() {
+  let el = document.getElementById("reveal-progress");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "reveal-progress";
+    el.className = "reveal-progress";
+    document.body.appendChild(el);
+  }
+  return {
+    show(done, total) {
+      el.hidden = false;
+      el.innerHTML = `<span class="spinner"></span>
+        <span>Revealing emails 正在补全邮箱… <b>${done} / ${total}</b></span>`;
+    },
+    hide() { el.hidden = true; },
+  };
+}
+
+/* Reveal, then apply the results onto the in-memory rows so whatever is
+   exported or drafted carries the real address rather than a placeholder. */
+/* Called before an export or a draft, where a missing address makes the
+   output useless. Asks the server what the batch would actually cost, then
+   asks the user — because "some of these need a paid reveal" is a decision,
+   not an implementation detail. Returns a result with `cancelled` when the
+   user declines, so callers can stop rather than ship a half-empty file.
+
+   Addresses already in the CRM — uploads, cards, manual entries, Apollo
+   search hits — are used without asking and without charge; they are
+   reported as `alreadyStored` so the user can see the paid figure is only
+   about the remainder. */
+async function revealBeforeUse(contacts, purposeEn = "continue", purposeCn = "继续") {
+  const ids = (contacts || []).map((c) => c.contact_id || c.id).filter(Boolean);
+  let plan = null;
+  try {
+    const r = await fetch("/api/contacts/reveal-estimate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    plan = await r.json();
+  } catch (e) {
+    console.error("reveal-estimate:", e);
+  }
+
+  if (plan && plan.estimatedCredits > 0) {
+    const ok = await confirmReveal(
+      `${plan.needsApollo} of ${plan.total} selected contacts need an Apollo reveal to ${purposeEn}.`
+      + `\n${plan.alreadyStored} already have an address stored`
+      + `${plan.freeFromPayload ? `, ${plan.freeFromPayload} can be read free from data already saved` : ""}`
+      + `${plan.noApolloId ? `, ${plan.noApolloId} cannot be revealed` : ""}.`,
+      `${plan.total} 位联系人中有 ${plan.needsApollo} 位需要 Apollo 揭示才能${purposeCn}；`
+      + `${plan.alreadyStored} 位已有邮箱`
+      + `${plan.freeFromPayload ? `，${plan.freeFromPayload} 位可从已保存数据免费读取` : ""}。`,
+      plan.estimatedCredits
+    );
+    if (!ok) return { emails: {}, revealed: 0, unavailable: 0, failed: 0, skipped: 0, cancelled: true };
+  }
+
+  const ui = revealProgressUi();
+  const res = await revealEmailsForContacts(contacts, (d, t) => { if (t) ui.show(d, t); });
+  ui.hide();
+  res.plan = plan;
+  (contacts || []).forEach((c) => {
+    const id = c.contact_id || c.id;
+    if (id in res.emails) {
+      c.email = res.emails[id] || "";
+      c.email_lookup_status = res.emails[id] ? "found" : "not_available";
+    }
+  });
+  return res;
+}
+
 async function exportSelected(fmt) {
   const selected = getSelectedContacts();
   if (!selected) { showMessage("Select at least one contact using the checkboxes.", "warn"); return; }
+
+  // Resolve addresses BEFORE building the file: an export full of
+  // "(email available via Apollo…)" costs the user a manual pass through
+  // Apollo, which is the whole point of exporting.
+  const rev = await revealBeforeUse(selected, "include in the export", "包含在导出中");
+  if (rev.cancelled) {
+    // Declining the charge cancels the export rather than silently shipping
+    // a file full of "Email not available".
+    showMessage("Export cancelled — no Apollo credits were used. 已取消导出，未消耗额度。", "info");
+    return;
+  }
+  if (rev.revealed || rev.unavailable || rev.failed) {
+    showMessage(
+      `Email reveal: ${rev.revealed} revealed, ${rev.unavailable} unavailable from Apollo`
+      + `${rev.failed ? `, ${rev.failed} failed` : ""}`
+      + `${rev.skipped ? `, ${rev.skipped} already had an address` : ""}. 邮箱补全完成。`,
+      rev.failed ? "warn" : "info");
+  }
 
   if (fmt === "xlsx") {
     await downloadPostBlob("/api/export-xlsx", { contacts: selected }, "selected_contacts.xlsx");
@@ -794,15 +955,19 @@ async function exportSelected(fmt) {
   }
   const hasDrafts = selected.some(c => c.draft_subject);
   const draftCols = hasDrafts ? ["draft_subject", "draft_body", "draft_followup", "draft_rationale"] : [];
+  // Provenance travels with the data: a spreadsheet that says an address
+  // came from an upload versus an Apollo reveal is auditable later, when
+  // nobody remembers which rows cost credits.
+  const provCols = ["email_source", "source", "company_source"];
   let content;
   if (fmt === "json") {
     content = JSON.stringify(selected, null, 2);
     downloadFile(content, "selected_contacts.json", "application/json");
   } else if (fmt === "crm") {
-    content = toCsvString(selected, [...CRM_FIELDS, ...draftCols]);
+    content = toCsvString(selected, [...CRM_FIELDS, ...provCols, ...draftCols]);
     downloadFile(content, "selected_crm.csv", "text/csv");
   } else {
-    content = toCsvString(selected, [...CRM_FIELDS, ...draftCols]);
+    content = toCsvString(selected, [...CRM_FIELDS, ...provCols, ...draftCols]);
     downloadFile(content, "selected_contacts.csv", "text/csv");
   }
 }
@@ -822,13 +987,35 @@ async function downloadPostBlob(url, body, filename) {
   } catch (e) { showMessage("Export error: " + e.message, "error"); }
 }
 
+/* Cell values for the browser-built exports.
+
+   There are two CSV paths in this app — this one, which downloads a file the
+   browser assembles, and export.js on the server. They must agree, or the
+   same selection exports differently depending on which button produced it:
+   a raw "apollo_enrichment" here and "Apollo enrichment" there, a blank email
+   here and "Email not available" there. */
+function exportCellValue(c, field) {
+  const v = c[field];
+  if (field === "email") {
+    const e = String(v == null ? "" : v).trim();
+    if (!e || e.startsWith("(") || e.includes("N/A") || e.toLowerCase().includes("available via apollo")) {
+      return "Email not available 邮箱不可用";
+    }
+    return e;
+  }
+  if (field === "email_source") return EMAIL_SOURCE_LABELS[c.email_source || (c.email ? "legacy" : "none")] || "";
+  if (field === "source") return SOURCE_LABELS[v] || v || "";
+  if (field === "company_source") return COMPANY_SOURCE_LABELS[v] || v || "";
+  return v;
+}
+
 function toCsvString(contacts, fields) {
   const esc = v => {
     const s = String(v == null ? "" : v);
     return s.includes(",") || s.includes('"') || s.includes("\n")
       ? '"' + s.replace(/"/g, '""') + '"' : s;
   };
-  return [fields.join(","), ...contacts.map(c => fields.map(f => esc(c[f])).join(","))].join("\r\n");
+  return [fields.join(","), ...contacts.map(c => fields.map(f => esc(exportCellValue(c, f))).join(","))].join("\r\n");
 }
 
 function downloadFile(content, filename, mime) {
@@ -2821,8 +3008,7 @@ function renderBatchResults(results) {
    ======================================================================= */
 
 let _crmContacts = [];
-let _crmPage = 1;
-const CRM_PAGE_SIZE = 10;
+// Paging lives in _grid now (page + pageSize), because the server owns it.
 
 // The CRM card used to be collapsible, from when every section shared one
 // scrolling page. With a dedicated nav view there is nothing to collapse it
@@ -2839,24 +3025,486 @@ function debounce(fn, wait) {
 // its own key here so filters combine instead of clobbering each other.
 let _crmActiveFilters = {};
 
+/* ═══════════════════════════════════════════════════════════════════════
+   Excel-style column filters for the contact grid.
+
+   Three rules shape this code:
+
+   1. The browser never holds the table. Every filter, sort and page is a
+      query parameter; the server returns one page plus a true total. The
+      grid is specified to scale to hundreds of thousands of contacts, and
+      that is only true if nothing here ever calls .filter() on rows.
+
+   2. The menus are built from the server's vocabulary, not a copy of it.
+      Option keys come from /api/contacts/grid-vocab and counts from
+      /api/contacts/facets, so a menu can never offer an option the SQL
+      doesn't implement.
+
+   3. Changes apply live. There is no Apply button: an Apply button in a
+      filter menu is a second thing to forget, and the counts already tell
+      you what a click will do before you make it.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const _grid = { columns: {}, sort: null, page: 1, pageSize: 25 };
+let _crmTotal = 0;
+let _crmTotalPages = 1;
+let _gridVocab = null;
+let _gridMenuCol = null;
+
+// Per-column sort wording. "A → Z" is meaningless on a date or a count, and
+// a grid that says it anyway reads as machine-generated.
+const SORT_LABELS = {
+  contact:  ["Sort A → Z 升序", "Sort Z → A 降序"],
+  company:  ["Sort A → Z 升序", "Sort Z → A 降序"],
+  email:    ["Sort A → Z 升序", "Sort Z → A 降序"],
+  tags:     ["Sort A → Z 升序", "Sort Z → A 降序"],
+  status:   ["Sort A → Z 升序", "Sort Z → A 降序"],
+  source:   ["Sort A → Z 升序", "Sort Z → A 降序"],
+  activity: ["Oldest first 最早在前", "Newest first 最近在前"],
+  draft:    ["Fewest first 最少在前", "Most first 最多在前"],
+};
+
+async function gridVocab() {
+  if (_gridVocab) return _gridVocab;
+  const r = await fetch("/api/contacts/grid-vocab");
+  _gridVocab = (await r.json());
+  return _gridVocab;
+}
+
+/* Shared by the row query and the facet queries, so the menu counts are
+   always computed against exactly the filter set the grid is showing. */
+function gridQueryParams(query) {
+  const params = new URLSearchParams();
+  if (query) params.set("q", query);
+  Object.entries(_crmActiveFilters).forEach(([k, v]) => {
+    if (Array.isArray(v)) { if (v.length) params.set(k, v.join(",")); }
+    else if (v) params.set(k, v);
+  });
+  if (Object.keys(_grid.columns).length) params.set("columns", JSON.stringify(_grid.columns));
+  if (_grid.sort) { params.set("sort", _grid.sort.column); params.set("dir", _grid.sort.direction); }
+  return params;
+}
+
+function crmSearchTerm() {
+  const el = document.getElementById("crm-search-input");
+  return el ? el.value.trim() : "";
+}
+
+async function gridFacets(column, search) {
+  const params = gridQueryParams(crmSearchTerm());
+  params.set("column", column);
+  if (search) params.set("search", search);
+  try {
+    const r = await fetch("/api/contacts/facets?" + params.toString());
+    const d = await r.json();
+    return d.options || [];
+  } catch (e) {
+    console.error("facets:", e);
+    return [];
+  }
+}
+
+/* ── Menu plumbing ──────────────────────────────────────────────────── */
+
+function closeColumnMenu() {
+  const menu = document.getElementById("crm-col-menu");
+  if (menu) { menu.hidden = true; menu.innerHTML = ""; }
+  _gridMenuCol = null;
+}
+
+function positionMenu(menu, btn) {
+  const r = btn.getBoundingClientRect();
+  menu.hidden = false;
+  // Measure after unhiding, then flip left if the menu would overflow the
+  // viewport — the rightmost columns are exactly where filters get used.
+  const w = menu.offsetWidth;
+  let left = r.left + window.scrollX;
+  if (left + w > window.scrollX + document.documentElement.clientWidth - 8) {
+    left = r.right + window.scrollX - w;
+  }
+  menu.style.left = Math.max(8, left) + "px";
+  menu.style.top = (r.bottom + window.scrollY + 4) + "px";
+}
+
+function sortSectionHtml(col) {
+  const [asc, desc] = SORT_LABELS[col] || SORT_LABELS.contact;
+  const active = _grid.sort && _grid.sort.column === col ? _grid.sort.direction : null;
+  return `
+    <button class="cm-item" data-sort="asc">${active === "asc" ? "✓ " : ""}↑ ${asc}</button>
+    <button class="cm-item" data-sort="desc">${active === "desc" ? "✓ " : ""}↓ ${desc}</button>
+    ${_grid.sort && _grid.sort.column === col
+      ? `<button class="cm-item" data-sort="clear">✕ Clear sort 清除排序</button>` : ""}
+    <div class="cm-divider"></div>`;
+}
+
+function footHtml(col) {
+  const has = Boolean(_grid.columns[col]);
+  return `
+    <div class="cm-foot">
+      <button class="btn-sm btn-ghost" data-act="clear-col" ${has ? "" : "disabled"}>Clear 清除</button>
+      <button class="btn-sm btn-primary" data-act="done">Done 完成</button>
+    </div>`;
+}
+
+/* A checkbox list of vocabulary options, annotated with live counts. The
+   count is the point: it turns "Reply received" from a guess into a
+   statement about this dataset. */
+function optionListHtml(options, counts, selected) {
+  const byKey = Object.fromEntries((counts || []).map((c) => [c.key, c.n]));
+  return options.map((o) => {
+    const n = byKey[o.key] ?? 0;
+    return `<label class="cm-item ${n === 0 ? "cm-zero" : ""}">
+      <input type="checkbox" value="${escapeAttr(o.key)}" ${selected.includes(o.key) ? "checked" : ""}>
+      <span>${escapeHtml(o.label)} ${escapeHtml(o.label_cn || "")}</span>
+      <span class="cm-count">${n}</span>
+    </label>`;
+  }).join("");
+}
+
+async function openColumnMenu(col, btn) {
+  if (_gridMenuCol === col) { closeColumnMenu(); return; }
+  const menu = document.getElementById("crm-col-menu");
+  _gridMenuCol = col;
+  menu.innerHTML = `<div class="cm-section" style="color:#9ca3af">Loading… 加载中…</div>`;
+  positionMenu(menu, btn);
+
+  const vocab = await gridVocab();
+  if (_gridMenuCol !== col) return;                 // user moved on while loading
+  menu.innerHTML = await columnMenuHtml(col, vocab);
+  positionMenu(menu, btn);
+  wireColumnMenu(col, menu, btn);
+}
+
+async function columnMenuHtml(col, vocab) {
+  const cur = _grid.columns[col] || {};
+  const sort = sortSectionHtml(col);
+
+  if (col === "contact") {
+    const modes = [
+      ["contains", "Contains 包含"], ["starts", "Starts with 开头为"],
+      ["ends", "Ends with 结尾为"], ["equals", "Is exactly 完全等于"],
+    ];
+    const mode = cur.mode && cur.mode !== "empty" && cur.mode !== "notEmpty" ? cur.mode : "contains";
+    return `${sort}
+      <div class="cm-title">Search by name 按姓名搜索</div>
+      <div class="cm-section">
+        <select data-f="mode" style="margin-bottom:5px;">
+          ${modes.map(([k, l]) => `<option value="${k}" ${mode === k ? "selected" : ""}>${l}</option>`).join("")}
+        </select>
+        <input type="text" data-f="value" placeholder="Type a name… 输入姓名…"
+               value="${escapeAttr(cur.mode === "empty" || cur.mode === "notEmpty" ? "" : (cur.value || ""))}">
+      </div>
+      <div class="cm-divider"></div>
+      <button class="cm-item" data-f="empty">${cur.mode === "empty" ? "✓ " : ""}Empty 为空</button>
+      <button class="cm-item" data-f="notEmpty">${cur.mode === "notEmpty" ? "✓ " : ""}Not empty 非空</button>
+      ${footHtml(col)}`;
+  }
+
+  if (col === "company" || col === "tags") {
+    const selected = cur.values || [];
+    const counts = await gridFacets(col, "");
+    const isTags = col === "tags";
+    const list = counts.length
+      ? counts.map((o) => `<label class="cm-item ${o.n === 0 ? "cm-zero" : ""}">
+            <input type="checkbox" value="${escapeAttr(o.key)}" ${selected.includes(o.key) ? "checked" : ""}>
+            <span>${escapeHtml(o.name_cn ? `${o.key} ${o.name_cn}` : o.key)}</span>
+            <span class="cm-count">${o.n}</span>
+          </label>`).join("")
+      : `<div class="cm-hint">${isTags
+            ? "No tags applied to contacts yet 尚无联系人标签"
+            : "No companies match 无匹配公司"}</div>`;
+    // Any values already chosen but absent from the current facet page still
+    // need a way back off — otherwise a filter could become unremovable from
+    // its own menu.
+    const orphans = selected.filter((v) => !counts.some((o) => o.key === v));
+    return `${sort}
+      <div class="cm-section">
+        <input type="text" data-f="search" placeholder="${isTags ? "Search tags 搜索标签" : "Search companies 搜索公司"}">
+      </div>
+      ${isTags ? `
+      <div class="cm-title">Match 匹配方式</div>
+      <div class="cm-radio-row">
+        <label class="cm-inline"><input type="radio" name="tagmatch" value="any" ${cur.match !== "all" ? "checked" : ""}> Any selected 任一</label>
+        <label class="cm-inline"><input type="radio" name="tagmatch" value="all" ${cur.match === "all" ? "checked" : ""}> All selected 全部</label>
+      </div>` : ""}
+      <div class="cm-scroll" data-f="list">
+        ${orphans.map((v) => `<label class="cm-item"><input type="checkbox" value="${escapeAttr(v)}" checked><span>${escapeHtml(v)}</span></label>`).join("")}
+        ${list}
+      </div>
+      ${footHtml(col)}`;
+  }
+
+  if (col === "email") {
+    const counts = await gridFacets("email", "");
+    return `${sort}
+      <div class="cm-scroll">${optionListHtml(vocab.email, counts, cur.modes || [])}</div>
+      <div class="cm-divider"></div>
+      <div class="cm-title">Contains domain 包含域名</div>
+      <div class="cm-section">
+        <input type="text" data-f="domain" placeholder="@tesla.com" value="${escapeAttr(cur.domain || "")}">
+      </div>
+      ${footHtml(col)}`;
+  }
+
+  if (col === "activity") {
+    const counts = await gridFacets("activity", "");
+    const within = cur.within || (cur.from || cur.to ? "custom" : "any");
+    return `${sort}
+      <div class="cm-scroll">${optionListHtml(vocab.activity, counts, cur.states || [])}</div>
+      <div class="cm-divider"></div>
+      <div class="cm-title">Last activity 最近活动</div>
+      <div class="cm-section" style="display:flex;flex-direction:column;gap:4px;">
+        <label class="cm-inline"><input type="radio" name="actwhen" value="any" ${within === "any" ? "checked" : ""}> Any time 不限时间</label>
+        <label class="cm-inline"><input type="radio" name="actwhen" value="7d" ${within === "7d" ? "checked" : ""}> Last 7 days 近 7 天</label>
+        <label class="cm-inline"><input type="radio" name="actwhen" value="30d" ${within === "30d" ? "checked" : ""}> Last 30 days 近 30 天</label>
+        <label class="cm-inline"><input type="radio" name="actwhen" value="custom" ${within === "custom" ? "checked" : ""}> Custom range 自定义</label>
+        <div data-f="range" style="display:${within === "custom" ? "flex" : "none"};gap:5px;margin-top:3px;">
+          <input type="date" data-f="from" value="${escapeAttr(cur.from || "")}">
+          <input type="date" data-f="to" value="${escapeAttr(cur.to || "")}">
+        </div>
+      </div>
+      ${footHtml(col)}`;
+  }
+
+  // status / source / draft — plain vocabulary checkbox lists.
+  const key = col === "draft" ? "states" : "values";
+  const counts = await gridFacets(col, "");
+  return `${sort}
+    <div class="cm-scroll">${optionListHtml(vocab[col], counts, cur[key] || [])}</div>
+    ${footHtml(col)}`;
+}
+
+/* ── Applying ───────────────────────────────────────────────────────── */
+
+function setColumnFilter(col, spec) {
+  if (spec && Object.keys(spec).length) _grid.columns[col] = spec;
+  else delete _grid.columns[col];
+  _grid.page = 1;                       // a narrower list makes page 7 meaningless
+  loadCrmContacts(crmSearchTerm());
+}
+
+function checkedValues(menu) {
+  return Array.from(menu.querySelectorAll('.cm-scroll input[type="checkbox"]:checked')).map((c) => c.value);
+}
+
+function wireColumnMenu(col, menu, btn) {
+  const rerender = async () => {
+    // Counts shift as filters change; re-render so the menu keeps telling
+    // the truth about the *current* filter set rather than the one it opened with.
+    menu.innerHTML = await columnMenuHtml(col, await gridVocab());
+    positionMenu(menu, btn);
+    wireColumnMenu(col, menu, btn);
+  };
+
+  menu.querySelectorAll("[data-sort]").forEach((b) => b.addEventListener("click", () => {
+    const d = b.dataset.sort;
+    _grid.sort = d === "clear" ? null : { column: col, direction: d };
+    loadCrmContacts(crmSearchTerm());
+    closeColumnMenu();
+  }));
+
+  const foot = (act) => menu.querySelector(`[data-act="${act}"]`);
+  if (foot("done")) foot("done").addEventListener("click", closeColumnMenu);
+  if (foot("clear-col")) foot("clear-col").addEventListener("click", () => { setColumnFilter(col, null); closeColumnMenu(); });
+
+  if (col === "contact") {
+    const modeEl = menu.querySelector('[data-f="mode"]');
+    const valEl = menu.querySelector('[data-f="value"]');
+    const apply = () => {
+      const v = valEl.value.trim();
+      setColumnFilter(col, v ? { mode: modeEl.value, value: v } : null);
+    };
+    valEl.addEventListener("input", debounce(apply, 350));
+    modeEl.addEventListener("change", apply);
+    valEl.focus();
+    menu.querySelector('[data-f="empty"]').addEventListener("click", () => {
+      setColumnFilter(col, _grid.columns[col] && _grid.columns[col].mode === "empty" ? null : { mode: "empty", value: "" });
+      closeColumnMenu();
+    });
+    menu.querySelector('[data-f="notEmpty"]').addEventListener("click", () => {
+      setColumnFilter(col, _grid.columns[col] && _grid.columns[col].mode === "notEmpty" ? null : { mode: "notEmpty", value: "" });
+      closeColumnMenu();
+    });
+    return;
+  }
+
+  if (col === "company" || col === "tags") {
+    const search = menu.querySelector('[data-f="search"]');
+    const readMatch = () => {
+      const r = menu.querySelector('input[name="tagmatch"]:checked');
+      return r ? r.value : "any";
+    };
+    const apply = () => {
+      const values = checkedValues(menu)
+        .concat(Array.from(menu.querySelectorAll('.cm-scroll > label > input:checked')).map((c) => c.value))
+        .filter((v, i, a) => a.indexOf(v) === i);
+      setColumnFilter(col, values.length
+        ? (col === "tags" ? { values, match: readMatch() } : { values })
+        : null);
+    };
+    menu.querySelectorAll('.cm-scroll input[type="checkbox"]').forEach((c) => c.addEventListener("change", apply));
+    menu.querySelectorAll('input[name="tagmatch"]').forEach((r) => r.addEventListener("change", apply));
+    if (search) {
+      search.addEventListener("input", debounce(async () => {
+        const list = menu.querySelector('[data-f="list"]');
+        const term = search.value.trim();
+        const counts = await gridFacets(col, term);
+        const selected = (_grid.columns[col] || {}).values || [];
+        list.innerHTML = counts.length
+          ? counts.map((o) => `<label class="cm-item ${o.n === 0 ? "cm-zero" : ""}">
+              <input type="checkbox" value="${escapeAttr(o.key)}" ${selected.includes(o.key) ? "checked" : ""}>
+              <span>${escapeHtml(o.name_cn ? `${o.key} ${o.name_cn}` : o.key)}</span>
+              <span class="cm-count">${o.n}</span></label>`).join("")
+          : `<div class="cm-hint">No matches 无匹配</div>`;
+        list.querySelectorAll('input[type="checkbox"]').forEach((c) => c.addEventListener("change", apply));
+      }, 300));
+      search.focus();
+    }
+    return;
+  }
+
+  if (col === "email") {
+    const domainEl = menu.querySelector('[data-f="domain"]');
+    const apply = () => {
+      const modes = checkedValues(menu);
+      const domain = domainEl.value.trim();
+      setColumnFilter(col, modes.length || domain ? { modes, domain } : null);
+    };
+    menu.querySelectorAll('.cm-scroll input[type="checkbox"]').forEach((c) => c.addEventListener("change", apply));
+    domainEl.addEventListener("input", debounce(apply, 350));
+    return;
+  }
+
+  if (col === "activity") {
+    const rangeEl = menu.querySelector('[data-f="range"]');
+    const apply = () => {
+      const states = checkedValues(menu);
+      const whenEl = menu.querySelector('input[name="actwhen"]:checked');
+      const when = whenEl ? whenEl.value : "any";
+      rangeEl.style.display = when === "custom" ? "flex" : "none";
+      const from = when === "custom" ? menu.querySelector('[data-f="from"]').value : "";
+      const to = when === "custom" ? menu.querySelector('[data-f="to"]').value : "";
+      const spec = {};
+      if (states.length) spec.states = states;
+      if (when === "7d" || when === "30d") spec.within = when;
+      if (from) spec.from = from;
+      if (to) spec.to = to;
+      setColumnFilter(col, Object.keys(spec).length ? spec : null);
+    };
+    menu.querySelectorAll('.cm-scroll input[type="checkbox"]').forEach((c) => c.addEventListener("change", apply));
+    menu.querySelectorAll('input[name="actwhen"]').forEach((r) => r.addEventListener("change", apply));
+    menu.querySelectorAll('[data-f="from"], [data-f="to"]').forEach((d) => d.addEventListener("change", apply));
+    return;
+  }
+
+  // status / source / draft
+  const key = col === "draft" ? "states" : "values";
+  const apply = () => {
+    const values = checkedValues(menu);
+    setColumnFilter(col, values.length ? { [key]: values } : null);
+  };
+  menu.querySelectorAll('.cm-scroll input[type="checkbox"]').forEach((c) => c.addEventListener("change", apply));
+}
+
+/* ── Chips + header state ───────────────────────────────────────────── */
+
+function renderGridChips(chips) {
+  const row = document.getElementById("crm-chip-row");
+  if (!row) return;
+
+  /* Sidebar filters used to render as their own chip strip in a separate
+     element. Two chip rows describing one table is one row too many, so the
+     sidebar's chips are folded in here — the row now answers "why am I
+     seeing these rows" completely, whichever control did the narrowing. */
+  const railChips = [];
+  CRM_FILTER_CHIPS.forEach((f) => {
+    const raw = _crmActiveFilters[f.key];
+    const values = f.list ? (raw || []) : (raw ? [raw] : []);
+    if (!values.length) return;
+    const shown = f.describe ? f.describe(values) : values;
+    const text = shown.length > 2 ? `${shown[0]} +${shown.length - 1}` : shown.join(", ");
+    railChips.push({ column: `__rail:${f.key}`, text: `${f.label}: ${text}`, text_cn: "" });
+  });
+  const COL_LABELS = {
+    contact: ["Contact", "联系人"], company: ["Company", "公司"], email: ["Email", "邮箱"],
+    activity: ["Activity", "互动记录"], tags: ["Tags", "标签"], status: ["Status", "状态"],
+    source: ["Source", "来源"], draft: ["Draft", "草稿"],
+  };
+  const sortChip = _grid.sort
+    ? [(() => {
+        const [en, cn] = COL_LABELS[_grid.sort.column] || [_grid.sort.column, _grid.sort.column];
+        const arrow = _grid.sort.direction === "asc" ? "↑" : "↓";
+        return { column: "__sort", text: `Sorted by ${en} ${arrow}`, text_cn: `按${cn}排序` };
+      })()]
+    : [];
+  const all = sortChip.concat(railChips, chips || []);
+  if (!all.length) { row.hidden = true; row.innerHTML = ""; return; }
+  row.hidden = false;
+  row.innerHTML = all.map((c, i) => `
+    <span class="crm-chip">${escapeHtml(c.text)} <span style="opacity:.75">${escapeHtml(c.text_cn || "")}</span>
+      <button data-chip="${i}" data-col="${escapeAttr(c.column)}" title="Remove 移除">×</button></span>`).join("")
+    + `<button class="crm-chip-clear" id="crm-clear-all-filters">Clear all 全部清除</button>`;
+
+  row.querySelectorAll("[data-chip]").forEach((b) => b.addEventListener("click", () => {
+    const col = b.dataset.col;
+    if (col === "__sort") { _grid.sort = null; loadCrmContacts(crmSearchTerm()); return; }
+    if (col.startsWith("__rail:")) { removeCrmFilter(col.slice(7)); return; }
+    // A chip removes its whole column: a per-option removal would need the
+    // chip to carry which option it came from, and "Email: has + personal"
+    // reads as one decision anyway.
+    setColumnFilter(col, null);
+  }));
+  document.getElementById("crm-clear-all-filters").addEventListener("click", clearAllCrmFilters);
+}
+
+function renderThIndicators() {
+  document.querySelectorAll("#crm-thead-row th[data-col]").forEach((th) => {
+    const col = th.dataset.col;
+    th.classList.toggle("col-filtered", Boolean(_grid.columns[col]));
+    const s = th.querySelector(".th-sort");
+    if (s) s.textContent = _grid.sort && _grid.sort.column === col
+      ? (_grid.sort.direction === "asc" ? "↑" : "↓") : "";
+  });
+}
+
+/* One delegated listener for every header button, so columns added later
+   need no wiring of their own. */
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".th-filter");
+  if (btn) { e.stopPropagation(); openColumnMenu(btn.dataset.col, btn); return; }
+  const menu = document.getElementById("crm-col-menu");
+  if (menu && !menu.hidden && !menu.contains(e.target)) closeColumnMenu();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeColumnMenu(); });
+window.addEventListener("resize", closeColumnMenu);
+
 async function loadCrmContacts(query, filterPatch) {
   try {
-    if (filterPatch) Object.assign(_crmActiveFilters, filterPatch);
-    const params = new URLSearchParams();
-    if (query) params.set("q", query);
-    Object.entries(_crmActiveFilters).forEach(([k, v]) => {
-      if (Array.isArray(v)) { if (v.length) params.set(k, v.join(",")); }
-      else if (v) { params.set(k, v); }
-    });
-    const url = "/api/contacts" + (params.toString() ? "?" + params.toString() : "");
-    const r = await fetch(url);
+    // A changed filter invalidates the current page number: page 7 of a
+    // 900-row list is not page 7 of the 12 rows it just became.
+    if (filterPatch) { Object.assign(_crmActiveFilters, filterPatch); _grid.page = 1; }
+
+    const params = gridQueryParams(query);
+    params.set("page", _grid.page);
+    params.set("pageSize", _grid.pageSize);
+
+    const r = await fetch("/api/contacts?" + params.toString());
     const d = await r.json();
-    _crmContacts = d.contacts || [];
-    _crmPage = 1;
+    _crmContacts = d.contacts || [];        // one page, not the table
+    _crmTotal = d.total || 0;
+    _crmTotalPages = d.totalPages || 1;
+
+    // Deleting the last rows of the last page can leave us past the end.
+    if (!_crmContacts.length && _grid.page > 1) {
+      _grid.page = 1;
+      return loadCrmContacts(query);
+    }
+
     renderCrmTable(_crmContacts);
+    renderGridChips(d.chips);
+    renderThIndicators();
     renderCrmFilterSummary();
     renderCrmCompanyBar();
-    autoEnrichCrmPage();
   } catch (e) {
     // Not silent: these renders run in sequence, so a throw in an early one
     // skips every later one. Swallowing it hid a missing constant that had
@@ -3132,26 +3780,9 @@ const CRM_FILTER_CHIPS = [
     describe: (keys) => keys.map((k) => (_seniorityOptions.find((d) => d.key === k) || {}).label || k) },
 ];
 
-function renderCrmFilterSummary() {
-  const el = document.getElementById("crm-filter-summary");
-  if (!el) return;
-
-  const chips = [];
-  CRM_FILTER_CHIPS.forEach((f) => {
-    const raw = _crmActiveFilters[f.key];
-    const values = f.list ? (raw || []) : (raw ? [raw] : []);
-    if (!values.length) return;
-    const shown = f.describe ? f.describe(values) : values;
-    const text = shown.length > 2 ? `${shown[0]} +${shown.length - 1}` : shown.join(", ");
-    chips.push(`<span class="crm-fchip"><b>${escapeHtml(f.label)}:</b><span data-no-i18n>${escapeHtml(text)}</span>
-      <button type="button" data-fkey="${f.key}" title="Remove this filter">&times;</button></span>`);
-  });
-
-  el.innerHTML = chips.join("");
-  el.querySelectorAll("button[data-fkey]").forEach((b) => {
-    b.addEventListener("click", () => removeCrmFilter(b.dataset.fkey));
-  });
-}
+/* Superseded by renderGridChips(), which shows sidebar and column filters
+   in one row. Kept as a no-op because several flows still call it. */
+function renderCrmFilterSummary() {}
 
 /* Single-company context bar.
 
@@ -3179,7 +3810,7 @@ function renderCrmCompanyBar() {
   if (accounts.length !== 1) { bar.hidden = true; bar.innerHTML = ""; return; }
 
   const name = accounts[0];
-  const n = _crmContacts.length;
+  const n = _crmTotal;                  // the filtered total, not this page
   // Analysis state comes from the company summaries the Companies tab uses;
   // if they aren't loaded yet, fetch them and re-render rather than guessing.
   const meta = _crmAccounts.find((c) => lc(c.name) === lc(name));
@@ -3244,37 +3875,62 @@ function removeCrmFilter(key) {
 
 // Background enrichment for contacts on the current CRM page that have
 // an Apollo ID but no email and haven't been checked yet.
-async function autoEnrichCrmPage() {
-  const pageStart = (_crmPage - 1) * CRM_PAGE_SIZE;
-  const pageEnd = Math.min(pageStart + CRM_PAGE_SIZE, _crmContacts.length);
-  for (let i = pageStart; i < pageEnd; i++) {
-    const c = _crmContacts[i];
-    if (!c || c.email || !c.apollo_person_id) continue;
-    const status = c.email_lookup_status || 'not_checked';
-    if (status === 'not_available' || status === 'found') continue;
-    // Fire and update cell in-place — don't block the loop on errors
-    (async () => {
-      const cell = document.getElementById(`crm-email-cell-${i}`);
-      if (cell) cell.innerHTML = `<span style="font-size:0.73rem;color:#6b7280;">Checking…</span>`;
-      try {
-        const r = await fetch(`/api/contacts/${c.id}/enrich-email`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-        });
-        const d = await r.json();
-        if (d.email && !d.email.startsWith("(")) {
-          _crmContacts[i].email = d.email;
-          _crmContacts[i].email_lookup_status = 'found';
-          if (cell) cell.innerHTML = `<span style="font-size:0.76rem;">${escapeHtml(d.email)}</span>`;
-        } else {
-          _crmContacts[i].email_lookup_status = d.email_lookup_status || 'not_available';
-          if (cell) cell.innerHTML = `<span style="color:#9ca3af;font-size:0.76rem;" title="Apollo confirmed no email">N/A</span>`;
-        }
-      } catch (_) {
-        if (cell) cell.innerHTML = `<span style="color:#9ca3af;font-size:0.76rem;">N/A</span>`;
-      }
-    })();
-  }
+/* ── Email resolution policy ────────────────────────────────────────────
+   Reading an address the CRM already holds is free, whoever supplied it —
+   an upload, a business card, a manual entry, or an Apollo *search* (which
+   returns some addresses at no extra cost). Those render straight from the
+   row, with no request at all.
+
+   Asking Apollo to *reveal* an address it has not given us costs a credit.
+   That never happens on load, scroll, filter, sort or paging. It happens
+   only when the user asks for it, and only after being told the price.
+
+   The previous version auto-revealed up to a page of contacts on every
+   render. This function is deliberately not replaced by a smaller budget:
+   a budgeted charge is still a charge nobody asked for. */
+
+function emailNeedsApolloReveal(c) {
+  if (!c) return false;
+  const email = String(c.email || "").trim();
+  if (email && !email.startsWith("(")) return false;          // already held — free
+  if (c.email_lookup_status === "not_available") return false; // asked before; Apollo had none
+  return Boolean(c.apollo_person_id);                          // only Apollo rows can be revealed
 }
+
+/* Renders the email cell for one row. Never issues a request: everything
+   here is decided from data already loaded. */
+function crmEmailCellHtml(c, i) {
+  const email = String(c.email || "").trim();
+  if (email && !email.startsWith("(")) {
+    const prov = EMAIL_SOURCE_LABELS[c.email_source] || "";
+    return `<span style="font-size:0.76rem;" ${prov ? `title="Email source 邮箱来源: ${escapeAttr(prov)}"` : ""}>${escapeHtml(email)}</span>`;
+  }
+  if (c.email_lookup_status === "not_available") {
+    return `<span style="color:#9ca3af;font-size:0.76rem;" title="Apollo confirmed no address 已确认无邮箱">Email not available 邮箱不可用</span>`;
+  }
+  if (emailNeedsApolloReveal(c)) {
+    // The price is on the control, not hidden behind it.
+    return `<button class="btn-sm btn-ghost crm-enrich-btn" data-idx="${i}"
+              style="font-size:11px;padding:2px 6px;"
+              title="Ask Apollo to reveal this address. Uses 1 Apollo credit. 使用 1 个 Apollo 额度。">
+              Reveal · 1 credit 揭示 · 1 额度</button>`;
+  }
+  // No stored address and nothing to reveal from: blank, per the source
+  // policy — a non-Apollo contact is never sent to Apollo implicitly.
+  return `<span style="color:#9ca3af;font-size:0.76rem;">—</span>`;
+}
+
+const EMAIL_SOURCE_LABELS = {
+  apollo_search: "Apollo search 搜索（不消耗额度）",
+  apollo_enrichment: "Apollo enrichment 增强（消耗额度）",
+  business_card: "Business card 名片",
+  manual: "Manually entered 手动输入",
+  email_import: "Imported email 导入邮件",
+  battery_show: "Battery Show data 电池展数据",
+  apollo_legacy: "Apollo (source not recorded) Apollo（来源未记录）",
+  legacy: "Not recorded 未记录",
+  none: "No email stored 暂无邮箱",
+};
 
 document.getElementById("crm-apply-filters-btn").addEventListener("click", () => {
   loadCrmContacts(document.getElementById("crm-search-input").value, {
@@ -3284,7 +3940,14 @@ document.getElementById("crm-apply-filters-btn").addEventListener("click", () =>
     assigned_salesperson: document.getElementById("crm-filter-owner").value.trim(),
   });
 });
-document.getElementById("crm-clear-filters-btn").addEventListener("click", () => {
+/* Clears every way the list can be narrowed: the sidebar fields, the
+   show/category cascade, the multi-selects, the column filters and the sort.
+
+   There used to be two "Clear all" controls — one in the filter rail, one in
+   the chip row — with identical labels and different scopes, so neither
+   told you what it would do and neither could clear the other's filters.
+   One control, one meaning: everything. */
+function clearAllCrmFilters() {
   document.getElementById("crm-filter-event").value = "";
   document.getElementById("crm-filter-industry").value = "";
   document.getElementById("crm-filter-status").value = "";
@@ -3301,37 +3964,71 @@ document.getElementById("crm-clear-filters-btn").addEventListener("click", () =>
   renderQbShows();
   renderQbCategories();
   renderCrmCompanyList();
+  _grid.columns = {};
+  _grid.sort = null;
+  _grid.page = 1;
   loadCrmContacts(document.getElementById("crm-search-input").value, {
     event: "", industry: "", follow_up_status: "", assigned_salesperson: "",
     accounts: [], contact_ids: [], department_categories: [], seniority_levels: [],
-    show_event: "", booth_categories: [],
+    show_event: "", booth_categories: [], company_sources: [],
   });
-});
+}
 
-const FOLLOW_UP_STATUSES = ["not_contacted", "contacted", "replied", "meeting_scheduled", "closed"];
+/* Matches CONTACT_STATUSES in contact-query.js. The inline editor and the
+   Status filter must offer the same vocabulary — a status you can filter on
+   but never set is a dead option, and vice versa. */
+const FOLLOW_UP_STATUSES = [
+  { key: "not_contacted",     label: "Not contacted 未联系" },
+  { key: "contacted",         label: "Contacted 已联系" },
+  { key: "replied",           label: "Replied 已回复" },
+  { key: "qualified",         label: "Qualified 已确认商机" },
+  { key: "meeting_scheduled", label: "Meeting scheduled 已约会议" },
+  { key: "customer",          label: "Customer 客户" },
+  { key: "do_not_contact",    label: "Do not contact 请勿联系" },
+  { key: "closed",            label: "Closed 已关闭" },
+];
+
+/* Contact sources. No file-upload entry: uploads supply company names, and
+   the contacts that come back from Apollo for those names are Apollo
+   contacts. See COMPANY_SOURCE_LABELS for where the file is recorded. */
+const SOURCE_LABELS = {
+  apollo: "Apollo", battery_show: "Battery Show 电池展",
+  business_card: "Business Card 名片", manual: "Manual 手动", email_import: "Email Import 邮件导入",
+};
+
+const COMPANY_SOURCE_LABELS = {
+  file_upload: "File upload 文件上传",
+  manual: "Manually created 手动创建",
+  exhibitor_list: "Exhibitor list 参展商名录",
+  apollo: "Apollo",
+  derived: "Derived from a contact 由联系人推导",
+  legacy: "Not recorded 未记录",
+};
+function sourceLabel(v) { return SOURCE_LABELS[v] || v || "—"; }
 
 function renderCrmTable(contacts) {
-  const total = contacts.length;
-  const totalPages = Math.max(1, Math.ceil(total / CRM_PAGE_SIZE));
-  if (_crmPage > totalPages) _crmPage = totalPages;
-
-  const pageStart = (_crmPage - 1) * CRM_PAGE_SIZE;
-  const pageEnd   = Math.min(pageStart + CRM_PAGE_SIZE, total);
-  const pageSlice = contacts.slice(pageStart, pageEnd);
+  // `contacts` is one server page; the count in the header is the server's
+  // total for the whole filtered set, which are different numbers and were
+  // the same one back when the browser held every row.
+  const total = _crmTotal;
+  const totalPages = _crmTotalPages;
+  const pageSlice = contacts;
+  const pageStart = 0;
 
   document.getElementById("crm-count").textContent =
     `${total} contact${total !== 1 ? "s" : ""} 位联系人`;
 
-  if (!total) {
+  if (!contacts.length) {
     document.getElementById("crm-tbody").innerHTML = `
-      <tr><td colspan="8">
+      <tr><td colspan="9">
         <div class="table-empty-state">
           <div class="tes-icon">🗂️</div>
-          <div class="tes-title">No contacts match</div>
-          <div class="tes-hint">Clear a filter, or use “Find contacts” to search Apollo and build your CRM.</div>
+          <div class="tes-title">No contacts match 无匹配联系人</div>
+          <div class="tes-hint">Remove a column filter or a sidebar filter, or use “Find contacts” to search Apollo and build your CRM.
+            移除列筛选或侧栏筛选，或使用“查找联系人”从 Apollo 检索。</div>
         </div>
       </td></tr>`;
-    document.getElementById("crm-pagination").innerHTML = "";
+    renderCrmPagination(total, totalPages);
     return;
   }
 
@@ -3344,14 +4041,7 @@ function renderCrmTable(contacts) {
       : draftCount > 1
         ? `<span style="font-size:0.72rem;color:#16a34a;font-weight:500;">${draftCount} drafts</span>`
         : `<span style="font-size:0.72rem;color:#16a34a;font-weight:500;">Saved</span>`;
-    const emailStatus = c.email_lookup_status || (c.email ? 'found' : 'not_checked');
-    const emailCell = c.email
-      ? `<span style="font-size:0.76rem;">${escapeHtml(c.email)}</span>`
-      : emailStatus === 'not_available'
-        ? `<span style="color:#9ca3af;font-size:0.76rem;" title="Apollo confirmed no email">N/A</span>`
-        : c.apollo_person_id && emailStatus === 'not_checked'
-          ? `<button class="btn-sm btn-ghost crm-enrich-btn" data-idx="${i}" style="font-size:11px;padding:2px 6px;">Enrich Email</button>`
-          : `<span style="color:#9ca3af;font-size:0.76rem;">N/A</span>`;
+    const emailCell = crmEmailCellHtml(c, i);
     const commCount = Number(c.comm_count) || 0;
     const commDraftCount = Number(c.comm_draft_count) || 0;
     const lastActivity = c.last_comm_at
@@ -3363,8 +4053,8 @@ function renderCrmTable(contacts) {
     // Two-line cells: the secondary attribute rides with the record it
     // describes (title under name, phone under email) instead of buying a
     // column of its own. Same information, four fewer columns to scan.
-    // #crm-email-cell-* stays a dedicated inner element because
-    // autoEnrichCrmPage() replaces its contents wholesale.
+    // #crm-email-cell-* stays a dedicated inner element so an explicit
+    // reveal can replace just that cell without re-rendering the row.
     return `<tr>
       <td class="col-check"><input type="checkbox" class="crm-check" data-idx="${i}"></td>
       <td data-no-i18n>
@@ -3373,7 +4063,6 @@ function renderCrmTable(contacts) {
       </td>
       <td data-no-i18n>
         <div class="cell-primary">${escapeHtml(c.company || "—")}</div>
-        <div class="cell-sub"><span class="badge badge-source">${escapeHtml(c.source || "manual")}</span></div>
       </td>
       <td>
         <div id="crm-email-cell-${i}" data-no-i18n>${emailCell}</div>
@@ -3387,8 +4076,11 @@ function renderCrmTable(contacts) {
             style="font-size:12px;padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;" placeholder="tags…"></td>
       <td>
         <select class="crm-status-select" data-id="${c.id}" style="font-size:12px;padding:3px 4px;border:1px solid #d1d5db;border-radius:4px;">
-          ${FOLLOW_UP_STATUSES.map(s => `<option value="${s}" ${c.follow_up_status === s ? "selected" : ""}>${s.replace(/_/g, " ")}</option>`).join("")}
+          ${FOLLOW_UP_STATUSES.map(o => `<option value="${o.key}" ${c.follow_up_status === o.key ? "selected" : ""}>${o.label}</option>`).join("")}
         </select>
+      </td>
+      <td data-no-i18n>
+        <span class="badge badge-source">${escapeHtml(sourceLabel(c.source))}</span>
       </td>
       <td class="col-actions">
         <div id="crm-action-${i}">
@@ -3428,16 +4120,39 @@ function renderCrmTable(contacts) {
 function renderCrmPagination(total, totalPages) {
   const el = document.getElementById("crm-pagination");
   if (!el) return;
-  if (totalPages <= 1) { el.innerHTML = ""; return; }
+  const page = _grid.page;
+  const from = total ? (page - 1) * _grid.pageSize + 1 : 0;
+  const to = Math.min(page * _grid.pageSize, total);
+
+  // Always rendered, even on a single page: the page-size control lives
+  // here, and "1–25 of 870" is the fastest answer to "how much is left".
   el.innerHTML = `
-    <button class="btn-sm btn-ghost" id="crm-prev-btn" ${_crmPage <= 1 ? "disabled" : ""}>← Prev</button>
-    <span style="font-size:0.85rem;color:#555;">Page 第 ${_crmPage} / ${totalPages} 页</span>
-    <button class="btn-sm btn-ghost" id="crm-next-btn" ${_crmPage >= totalPages ? "disabled" : ""}>Next →</button>`;
-  document.getElementById("crm-prev-btn").addEventListener("click", () => {
-    if (_crmPage > 1) { _crmPage--; renderCrmTable(_crmContacts); autoEnrichCrmPage(); }
-  });
-  document.getElementById("crm-next-btn").addEventListener("click", () => {
-    if (_crmPage < totalPages) { _crmPage++; renderCrmTable(_crmContacts); autoEnrichCrmPage(); }
+    <button class="btn-sm btn-ghost" id="crm-first-btn" ${page <= 1 ? "disabled" : ""}>« First 首页</button>
+    <button class="btn-sm btn-ghost" id="crm-prev-btn" ${page <= 1 ? "disabled" : ""}>← Prev 上一页</button>
+    <span style="font-size:0.85rem;color:#555;">
+      ${from}–${to} of ${total} · Page 第 ${page} / ${totalPages} 页
+    </span>
+    <button class="btn-sm btn-ghost" id="crm-next-btn" ${page >= totalPages ? "disabled" : ""}>Next 下一页 →</button>
+    <button class="btn-sm btn-ghost" id="crm-last-btn" ${page >= totalPages ? "disabled" : ""}>Last 末页 »</button>
+    <span style="margin-left:auto;font-size:0.8rem;color:#6b7280;">
+      Rows 每页
+      <select class="crm-page-size" id="crm-page-size">
+        ${[10, 25, 50, 100, 200].map((n) => `<option value="${n}" ${_grid.pageSize === n ? "selected" : ""}>${n}</option>`).join("")}
+      </select>
+    </span>`;
+
+  const go = (p) => {
+    _grid.page = Math.min(Math.max(1, p), totalPages);
+    loadCrmContacts(crmSearchTerm());
+  };
+  document.getElementById("crm-first-btn").addEventListener("click", () => go(1));
+  document.getElementById("crm-prev-btn").addEventListener("click", () => go(page - 1));
+  document.getElementById("crm-next-btn").addEventListener("click", () => go(page + 1));
+  document.getElementById("crm-last-btn").addEventListener("click", () => go(totalPages));
+  document.getElementById("crm-page-size").addEventListener("change", function () {
+    _grid.pageSize = Number(this.value) || 25;
+    _grid.page = 1;                      // row 260 is on a different page at a different size
+    loadCrmContacts(crmSearchTerm());
   });
 }
 
@@ -3735,6 +4450,12 @@ function crmRowToDraftFormat(c) {
 async function openCrmDraftModal(idx, options) {
   const c = _crmContacts[idx];
   if (!c) return;
+  // Reveal first so the draft opens with a real recipient rather than a
+  // placeholder the user has to chase.
+  if (emailNeedsApolloReveal(c)) {
+    const rev = await revealBeforeUse([c], "address the draft", "填写收件人");
+    if (rev.cancelled) return;                // the user declined the charge
+  }
   await openDraftModalForContact(crmRowToDraftFormat(c), () => {
     loadCrmContacts(document.getElementById("crm-search-input").value);
   }, options);
@@ -3773,9 +4494,10 @@ async function openContactDetailModal(c) {
 
   const emailEl = document.getElementById("cd-email-display");
   if (emailEl) {
-    emailEl.textContent = c.email || "No email saved";
+    emailEl.textContent = c.email || "No email saved 暂无邮箱";
     emailEl.style.color = c.email ? "#374151" : "#9ca3af";
   }
+  renderContactProvenance(c);
 
   // Load unified timeline
   await loadContactTimeline(c);
@@ -3788,6 +4510,45 @@ async function openContactDetailModal(c) {
   document.getElementById("cd-meeting-notes").value = c.meeting_notes || "";
   document.getElementById("cd-salesperson").value = c.assigned_salesperson || "";
   openModal("contact-detail-modal");
+}
+
+/* Two facts, kept apart on purpose:
+     Original source — where the contact record came from
+     Email source    — where the stored address came from, and whether
+                       obtaining it cost an Apollo credit
+   A contact imported from the Battery Show can hold an Apollo-enriched
+   address; a contact found through Apollo can hold one typed by hand. */
+function renderContactProvenance(c) {
+  const el = document.getElementById("cd-provenance");
+  if (!el) return;
+
+  const coKey = c.company_source || "legacy";
+  const coLabel = COMPANY_SOURCE_LABELS[coKey] || coKey;
+  const coFile = c.company_source_file
+    ? ` <span class="cd-prov-k">(${escapeHtml(c.company_source_file)})</span>` : "";
+  const srcLabel = SOURCE_LABELS[c.source] || c.source || "Not recorded 未记录";
+  const emailKey = c.email_source || (c.email ? "legacy" : "none");
+  const emailLabel = EMAIL_SOURCE_LABELS[emailKey] || emailKey;
+  /* Only claim a cost when the provenance actually records one. Rows written
+     before this column existed could have been revealed for a credit or
+     supplied free with a search — there is no way to tell now, and saying
+     "no credit used" over a row that may have cost one is a fabricated
+     reassurance in exactly the report meant to prevent hidden charges. */
+  const UNKNOWN_COST = new Set(["apollo_legacy", "legacy"]);
+  const cost = !c.email || UNKNOWN_COST.has(emailKey)
+    ? (c.email && UNKNOWN_COST.has(emailKey)
+        ? `<span class="cd-prov-k">· credit usage not recorded 额度使用未记录</span>` : "")
+    : emailKey === "apollo_enrichment"
+      ? `<span class="cd-prov-paid">· used an Apollo credit 消耗额度</span>`
+      : `<span class="cd-prov-free">· no Apollo credit used 未消耗额度</span>`;
+
+  /* The chain, in the order it happened. Reading top to bottom answers
+     "how did we get this person, and did their address cost anything" —
+     which is three different questions with three different answers. */
+  el.innerHTML = `
+    <div><span class="cd-prov-k">Company source 公司来源:</span> ${escapeHtml(coLabel)}${coFile}</div>
+    <div><span class="cd-prov-k">Contact source 联系人来源:</span> ${escapeHtml(srcLabel)}</div>
+    <div><span class="cd-prov-k">Email source 邮箱来源:</span> ${escapeHtml(emailLabel)} ${cost}</div>`;
 }
 
 async function loadContactTimeline(c) {
@@ -3878,30 +4639,58 @@ function renderTimelineItem(item, c) {
   </div>`;
 }
 
+/* The row-level reveal. Explicit by construction — it only ever runs from a
+   click on the priced button — and it still confirms first, because a click
+   on a 25-row grid is easy to make by accident and a credit is not
+   refundable. */
 async function enrichCrmEmail(idx) {
   const c = _crmContacts[idx];
   if (!c || !c.id) return;
+
+  const ok = await confirmReveal(
+    `Reveal the email address for ${c.full_name || "this contact"}?`,
+    `为 ${c.full_name || "该联系人"} 揭示邮箱地址？`,
+    1
+  );
+  if (!ok) return;
+
   const cell = document.getElementById(`crm-email-cell-${idx}`);
-  if (cell) cell.innerHTML = `<span style="font-size:0.73rem;color:#6b7280;">Enriching…</span>`;
+  if (cell) cell.innerHTML = `<span style="font-size:0.73rem;color:#6b7280;">Revealing… 揭示中…</span>`;
   try {
-    // Smart endpoint: checks stored apollo_raw_json first (free), then reveal API
     const r = await fetch(`/api/contacts/${c.id}/enrich-email`, {
       method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ allowApollo: true }),      // the user just said yes
     });
     const d = await r.json();
     if (d.email && !d.email.startsWith("(")) {
       _crmContacts[idx].email = d.email;
       _crmContacts[idx].email_lookup_status = 'found';
-      if (cell) cell.innerHTML = `<span style="font-size:0.76rem;">${escapeHtml(d.email)}</span>`;
+      _crmContacts[idx].email_source = d.email_source || 'apollo_enrichment';
     } else {
       _crmContacts[idx].email = "";
       _crmContacts[idx].email_lookup_status = d.email_lookup_status || 'not_available';
-      if (cell) cell.innerHTML = `<span style="color:#9ca3af;font-size:0.76rem;" title="Apollo confirmed no email">N/A</span>`;
     }
+    if (cell) cell.innerHTML = crmEmailCellHtml(_crmContacts[idx], idx);
+    // Re-bind: the cell may now hold a fresh button (or none).
+    cell?.querySelectorAll(".crm-enrich-btn").forEach((b) =>
+      b.addEventListener("click", () => enrichCrmEmail(Number(b.dataset.idx))));
     refreshUsage();
   } catch (e) {
-    if (cell) cell.innerHTML = `<span style="color:#9ca3af;font-size:0.76rem;">N/A</span>`;
+    if (cell) cell.innerHTML = `<span style="color:#9ca3af;font-size:0.76rem;">—</span>`;
   }
+}
+
+/* One confirmation shape for every paid reveal, so the price is always
+   stated in the same place and the same words. */
+function confirmReveal(questionEn, questionCn, credits) {
+  const n = Number(credits) || 0;
+  return Promise.resolve(window.confirm(
+    `${questionEn}\n${questionCn}\n\n` +
+    `This uses about ${n} Apollo credit${n === 1 ? "" : "s"}.\n` +
+    `本次操作约消耗 ${n} 个 Apollo 额度。\n\n` +
+    `Addresses already stored in the CRM are used for free and are not counted here.\n` +
+    `CRM 中已保存的邮箱免费使用，不计入此数。`
+  ));
 }
 
 document.getElementById("contact-detail-close").addEventListener("click", () => {
@@ -4015,6 +4804,17 @@ document.getElementById("crm-bulk-draft-btn").addEventListener("click", async ()
   const extra = document.getElementById("crm-extra-instructions").value.trim();
   const btn = document.getElementById("crm-bulk-draft-btn");
   btn.disabled = true;
+
+  /* Resolve addresses before drafting, not after. Every downstream step —
+     the draft's To field, sending, export, the contact record — then reads a
+     real address from our own database instead of each feature separately
+     deciding whether it needs to call Apollo. */
+  const bulkRev = await revealBeforeUse(
+    idxs.map((i) => _crmContacts[i]).filter(Boolean), "address the drafts", "填写收件人");
+  if (bulkRev.cancelled) {
+    showMessage("Cancelled — no Apollo credits were used. 已取消，未消耗额度。", "info");
+    return;
+  }
 
   let reusedCount = 0;
   let generatedCount = 0;
@@ -4213,6 +5013,75 @@ async function refreshCrmPlan() {
   }
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   Workflow dialogs: deliberate closing only
+
+   Find contacts, Add more contacts and New company are multi-step
+   configuration — companies, targets, departments, refresh mode — not
+   confirmations. A stray click on the backdrop was discarding minutes of
+   that, so the backdrop no longer closes them at all. They close on the ×,
+   on Cancel, or on Esc, and if anything was configured, closing asks first.
+
+   Dirty state is a snapshot comparison rather than a change flag: it stays
+   correct when a user edits a field and then puts it back, which a flag
+   would report as dirty forever.
+   ══════════════════════════════════════════════════════════════════════ */
+
+const _dialogBaselines = {};
+
+function dialogFieldValue(el) {
+  if (!el) return "";
+  if (el.type === "checkbox" || el.type === "radio") return el.checked ? "1" : "0";
+  return el.value == null ? "" : String(el.value);
+}
+
+// Snapshot every control inside the dialog, so a field added later is
+// covered without anyone remembering to list it here.
+function snapshotDialog(modalId) {
+  const modal = document.getElementById(modalId);
+  if (!modal) return;
+  const snap = {};
+  modal.querySelectorAll("input, textarea, select").forEach((el, i) => {
+    snap[el.id || `#${i}`] = dialogFieldValue(el);
+  });
+  _dialogBaselines[modalId] = snap;
+}
+
+function dialogIsDirty(modalId) {
+  const modal = document.getElementById(modalId);
+  const base = _dialogBaselines[modalId];
+  if (!modal || !base) return false;
+  let dirty = false;
+  modal.querySelectorAll("input, textarea, select").forEach((el, i) => {
+    const key = el.id || `#${i}`;
+    if (key in base && base[key] !== dialogFieldValue(el)) dirty = true;
+  });
+  return dirty;
+}
+
+function confirmDiscard(onDiscard) {
+  const modal = document.getElementById("discard-changes-modal");
+  if (!modal) { onDiscard(); return; }          // no confirm available: don't trap the user
+  openModal("discard-changes-modal");
+  const keep = document.getElementById("discard-keep-btn");
+  const go = document.getElementById("discard-confirm-btn");
+  const cleanup = () => {
+    keep.replaceWith(keep.cloneNode(true));      // drop these one-shot handlers
+    go.replaceWith(go.cloneNode(true));
+    closeModal("discard-changes-modal");
+  };
+  keep.addEventListener("click", cleanup, { once: true });
+  go.addEventListener("click", () => { cleanup(); onDiscard(); }, { once: true });
+}
+
+/* Wraps a dialog's close so it asks before discarding configuration. */
+function guardedDialogClose(modalId, closeFn) {
+  return () => {
+    if (!dialogIsDirty(modalId)) { closeFn(); return; }
+    confirmDiscard(closeFn);
+  };
+}
+
 function openCrmDiscoverModal(prefillCompany) {
   const m = document.getElementById("crm-discover-modal");
   if (!m) return;
@@ -4222,6 +5091,9 @@ function openCrmDiscoverModal(prefillCompany) {
     if (prefillCompany) input.value = prefillCompany;
     setTimeout(() => { input.focus(); input.select(); }, 60);
   }
+  // Snapshot AFTER prefilling, or a company carried in from elsewhere would
+  // register as an unsaved change the user never made.
+  snapshotDialog("crm-discover-modal");
   refreshCrmPlan();
 }
 function closeCrmDiscoverModal() {
@@ -4309,6 +5181,10 @@ function crmAccountsFiltered() {
       const hay = `${a.name || ""} ${a.chinese_name || ""} ${a.industry || ""} ${a.booth || ""}`.toLowerCase();
       if (!hay.includes(term)) return false;
     }
+    // The source filter ANDs with the state filters rather than replacing
+    // them: "uploaded companies that still have no contacts" is the question
+    // this pair is actually for.
+    if (_crmAcctSource && (a.source || "legacy") !== _crmAcctSource) return false;
     const step = acctNextStep(a).key;
     if (_crmAcctFilter === "no-contacts") return !a.contact_count;
     if (_crmAcctFilter === "not-analyzed") return step === "analyze";
@@ -4329,7 +5205,7 @@ function renderCrmAccounts() {
   setText("crm-tabcount-companies", _crmAccounts.length ? String(_crmAccounts.length) : "");
 
   if (!list.length) {
-    tbody.innerHTML = `<tr><td colspan="6">
+    tbody.innerHTML = `<tr><td colspan="7">
       <div class="table-empty-state">
         <div class="tes-icon">🏢</div>
         <div class="tes-title">No companies match</div>
@@ -4355,6 +5231,10 @@ function renderCrmAccounts() {
         ${a.chinese_name ? `<div class="cell-sub">${escapeHtml(a.chinese_name)}</div>` : ""}
       </td>
       <td data-no-i18n><div class="cell-primary">${escapeHtml(a.industry || "—")}</div>${a.booth ? `<div class="cell-sub">展位 ${escapeHtml(a.booth)}</div>` : ""}</td>
+      <td data-no-i18n>
+        <div class="ca-prov">${escapeHtml(COMPANY_SOURCE_LABELS[a.source || "legacy"] || a.source || "—")}</div>
+        ${a.source_file ? `<div class="cell-sub">${escapeHtml(a.source_file)}</div>` : ""}
+      </td>
       <td>${a.contact_count ? `<b>${a.contact_count}</b>` : `<span class="ca-none">0</span>`}</td>
       <td>${analysis}</td>
       <td>${tags}</td>
@@ -4375,12 +5255,35 @@ function renderCrmAccounts() {
   document.getElementById("crm-acct-next")?.addEventListener("click", () => { _crmAcctPage++; renderCrmAccounts(); });
 }
 
+let _crmAcctSource = "";      // "" = all discovery paths
+
 async function loadCrmAccounts() {
   try {
     const d = await getJSON("/api/companies/summary");
     _crmAccounts = d.companies || [];
     renderCrmAccounts();
+    populateCompanySourceFilter();
   } catch (e) { /* leave whatever is already listed */ }
+}
+
+/* Options come with their counts, so the filter doubles as the answer to
+   "how much of the CRM can we trace" — including how much still cannot. */
+async function populateCompanySourceFilter() {
+  const sel = document.getElementById("crm-acct-source");
+  if (!sel || sel.dataset.filled) return;
+  try {
+    const d = await getJSON("/api/companies/source-counts");
+    const total = (d.options || []).reduce((n, o) => n + o.n, 0);
+    sel.innerHTML = `<option value="">All sources 全部来源 (${total})</option>`
+      + (d.options || []).map((o) =>
+          `<option value="${escapeAttr(o.key)}">${escapeHtml(COMPANY_SOURCE_LABELS[o.key] || o.key)} (${o.n})</option>`).join("");
+    sel.dataset.filled = "1";
+    sel.addEventListener("change", () => {
+      _crmAcctSource = sel.value;
+      _crmAcctPage = 1;
+      renderCrmAccounts();
+    });
+  } catch (e) { console.error("company source counts:", e); }
 }
 
 // Opens one account's record page. The panel keeps its own sub-tabs for
@@ -4476,6 +5379,8 @@ function renderTopupContext(res) {
 }
 
 async function openCrmTopupModal(prefillCompany) {
+  _topupPhase = "ready";           // a reopened dialog is never mid-run
+  _topupResult = null;
   const m = document.getElementById("crm-topup-modal");
   if (!m) return;
 
@@ -4503,6 +5408,7 @@ async function openCrmTopupModal(prefillCompany) {
   renderTopupContext(res);
 
   m.classList.add("open");
+  snapshotDialog("crm-topup-modal");
   refreshTopupPlan();
   // Land on the number when the company is settled, on the company when not.
   setTimeout(() => (res.name ? document.getElementById("topup-target") : input)?.focus(), 60);
@@ -4520,10 +5426,21 @@ async function refreshTopupPlan() {
   const current = document.getElementById("topup-current");
   const seq = ++_topupSeq;
 
+  /* The primary action is disabled the moment anything changes, and only
+     re-enabled by a fresh plan that says the import can actually run.
+
+     Previously it kept its old state while a plan was in flight (300ms
+     debounce plus a round trip) and after a failed request, so the dialog
+     could show "not in your CRM" beside an enabled Append button — offering
+     an action that could not do what its label claimed. */
+  if (runBtn) runBtn.disabled = true;
+
   if (!name) {
     box.hidden = true;
     if (current) current.textContent = "";
-    if (runBtn) { runBtn.disabled = true; runBtn.textContent = "Append contacts"; }
+    if (runBtn) runBtn.textContent = "Retrieve contacts";
+    const t0 = document.getElementById("topup-title");
+    if (t0) t0.textContent = "Add more contacts";
     return;
   }
 
@@ -4537,17 +5454,77 @@ async function refreshTopupPlan() {
     if (current) current.textContent = `${p.current} in CRM now 当前已有`;
 
     if (!p.known) {
-      box.innerHTML = `<div class="crm-plan-row"><div class="crm-plan-cost">
-        “${escapeHtml(name)}” isn't in your CRM yet — use <b>Find contacts</b> to discover it first.
-        <br><span class="i18n-zh" style="margin-left:0;">该公司尚未加入 CRM，请先使用「查找联系人」。</span>
-      </div></div>`;
+      // A dead end is worse than a detour: hand the user straight into the
+      // workflow that CAN do this, carrying the name and target across.
+      box.innerHTML = `<div class="crm-plan-row">
+        <div class="crm-plan-cost">
+          “${escapeHtml(name)}” isn't in your CRM yet, so there is nothing to add to.
+          Discovering it is the Find contacts workflow.
+          <br><span class="i18n-zh" style="margin-left:0;">该公司尚未加入 CRM，无法执行「追加」。请改用「查找联系人」。</span>
+        </div>
+        <div class="crm-plan-row-actions">
+          <button type="button" class="btn-primary btn-sm" id="topup-switch-find">Find contacts for “${escapeHtml(name)}”</button>
+        </div>
+      </div>`;
       box.hidden = false;
-      if (runBtn) { runBtn.disabled = true; runBtn.textContent = "Append contacts"; }
+      if (runBtn) runBtn.textContent = "Retrieve contacts";
+      document.getElementById("topup-switch-find")?.addEventListener("click", () => {
+        closeCrmTopupModal();
+        const t = document.getElementById("search-per-company-limit");
+        if (t) t.value = target;                 // carry the target across
+        openCrmDiscoverModal(name);
+      });
       return;
     }
 
+    /* Four distinct states, each with its own wording and action:
+         · first import   — 0 held, so "append" was the wrong word entirely
+         · top-up         — some held, add the difference
+         · nothing to do  — already at or above the target
+         · last search failed — say so instead of estimating over it
+
+       Apollo's real match count, when a previous search recorded it, caps
+       what can honestly be promised. Claiming "up to 75" when Apollo holds
+       2 is the same over-promise in a politer form. */
+    const first = p.firstImport;
+
+    /* The dialog's own title was fixed at "Add more contacts / appends them"
+       even when the company had none — describing an append that wasn't one.
+       The header follows the state like everything else. */
+    const title = document.getElementById("topup-title");
+    const sub = document.getElementById("topup-subtitle");
+    if (title) title.textContent = first ? "Import contacts" : "Add more contacts";
+    if (sub) {
+      sub.textContent = first
+        ? "This company has no contacts yet. Pulls its first contacts from Apollo into your CRM. 该公司尚无联系人，将从 Apollo 导入首批联系人。"
+        : "Pulls additional contacts from Apollo for one company and appends them. Existing contacts, drafts, tags, notes and history are never changed. 已有联系人、草稿、标签、备注与历史记录不会被修改。";
+    }
+
+    const avail = p.availableBeyondHeld;                 // null = unknown
+    const realistic = avail == null ? p.willRetrieve : Math.min(p.willRetrieve, avail);
+    const verb = first ? "to import" : "to add";
+
+    const failureBanner = p.lastError ? `
+      <div class="crm-plan-row topup-warn">
+        <b>⚠ The last Apollo search for this company failed 上次搜索失败</b>
+        <div class="crm-plan-cost">${escapeHtml(p.lastError)}${p.lastErrorAt ? ` · ${intelFmtDate(p.lastErrorAt)}` : ""}</div>
+        <div class="crm-plan-cost">The estimate below assumes Apollo is reachable again. 以下预估假设 Apollo 已恢复。</div>
+      </div>` : "";
+
+    let availLine;
+    if (avail == null) {
+      availLine = `How many Apollo actually has here is unknown until we ask — it may return fewer than ${p.target}, or none.`;
+    } else if (avail === 0) {
+      availLine = `A previous search found <b>${nf.format(p.apolloTotal)}</b> matching people at this company${p.apolloTotalAt ? ` (${intelFmtDate(p.apolloTotalAt)})` : ""} — you already hold them all, so this will likely return nothing new.`;
+    } else if (avail < p.willRetrieve) {
+      availLine = `<b>Apollo only has ${nf.format(p.apolloTotal)} matching people at this company</b>${p.apolloTotalAt ? ` (seen ${intelFmtDate(p.apolloTotalAt)})` : ""}, so expect about <b>${realistic}</b>, not ${p.willRetrieve}. Apollo 匹配人数有限。`;
+    } else {
+      availLine = `A previous search saw <b>${nf.format(p.apolloTotal)}</b> matching people at this company${p.apolloTotalAt ? ` (${intelFmtDate(p.apolloTotalAt)})` : ""}.`;
+    }
+
     box.innerHTML = `
-      <div class="crm-plan-head">What this will do</div>
+      <div class="crm-plan-head">${first ? "First import for this company 首次导入" : "What this will do 本次操作预览"}</div>
+      ${failureBanner}
       <div class="crm-plan-row">
         <div class="crm-plan-co" data-no-i18n>${escapeHtml(p.company)}</div>
         <div class="crm-plan-math">
@@ -4555,25 +5532,68 @@ async function refreshTopupPlan() {
           <span class="crm-plan-op">→</span>
           <span class="crm-plan-num"><b>${p.target}</b><span>target</span></span>
           <span class="crm-plan-op">=</span>
-          <span class="crm-plan-num crm-plan-get"><b>${p.willRetrieve > 0 ? "+" + p.willRetrieve : "0"}</b><span>to retrieve</span></span>
+          <span class="crm-plan-num crm-plan-get"><b>${p.willRetrieve > 0 ? "up to " + p.willRetrieve : "0"}</b><span>${verb}</span></span>
         </div>
         <div class="crm-plan-cost">${p.searchRequests
-          ? `~${p.searchRequests} Apollo search request(s), plus up to ${p.emailLookups} email lookup(s).`
+          ? `Costs about ${p.searchRequests} Apollo search request(s), plus up to ${p.emailLookups} email lookup(s).`
           : "No Apollo requests — nothing to fetch"}</div>
+        <div class="crm-plan-cost">${availLine}</div>
         ${p.willRetrieve === 0 && p.current >= p.target
           ? `<div class="crm-plan-none">Already at or above the target — raise it to pull more.</div>` : ""}
       </div>
-      <div class="crm-plan-foot"><b>Append only.</b> The ${p.current} contact${p.current !== 1 ? "s" : ""} already saved are left exactly as they are. 已保存的 ${p.current} 位联系人保持不变。</div>`;
+      <div class="crm-plan-foot">${first
+        ? `<b>First import.</b> This company has no contacts yet, so nothing can be overwritten. 该公司尚无联系人。`
+        : `<b>Append only.</b> The ${p.current} contact${p.current !== 1 ? "s" : ""} already saved are left exactly as they are. 已保存的 ${p.current} 位联系人保持不变。`}</div>`;
     box.hidden = false;
     if (runBtn) {
       runBtn.disabled = p.willRetrieve === 0;
-      runBtn.textContent = p.willRetrieve > 0
-        ? `Append ${p.willRetrieve} contact${p.willRetrieve !== 1 ? "s" : ""} 追加 ${p.willRetrieve} 位联系人`
-        : "Nothing to append";
+      // "Import" for a company with nothing, "Add" for one being topped up —
+      // and never a promise of an exact number Apollo hasn't confirmed.
+      runBtn.textContent = p.willRetrieve === 0
+        ? "Nothing to retrieve"
+        : first
+          ? `Import up to ${p.willRetrieve} contact${p.willRetrieve !== 1 ? "s" : ""} 最多导入 ${p.willRetrieve} 位`
+          : `Add up to ${p.willRetrieve} contact${p.willRetrieve !== 1 ? "s" : ""} 最多补充 ${p.willRetrieve} 位`;
     }
   } catch (e) {
     if (seq !== _topupSeq) return;
-    box.hidden = true;
+    // Leave the action disabled (set at the top) and say why, rather than
+    // silently hiding the panel with a stale enabled button behind it.
+    box.innerHTML = `<div class="crm-plan-row"><div class="crm-plan-cost">
+      Couldn't check this company just now — ${escapeHtml(e.message || "network error")}. Try again.
+      </div></div>`;
+    box.hidden = false;
+  }
+}
+
+/* The dialog's action button changes meaning after a run: "Import" becomes
+   "Close"/"View contacts". That was implemented by assigning btn.onclick —
+   which does NOT replace the addEventListener that runs the import, so the
+   finished-state click fired BOTH: another paid Apollo search, and then the
+   close. The modal vanished, credits were spent, and nothing visible
+   happened. One listener, one phase flag, no second handler to forget. */
+let _topupPhase = "ready";        // ready → running → done
+let _topupResult = null;          // { company, imported, total } for the done phase
+
+function onTopupRunClick() {
+  if (_topupPhase === "running") return;        // ignore double-clicks mid-flight
+  if (_topupPhase === "done") { finishTopup(); return; }
+  runCrmTopup();
+}
+
+/* Leaving the dialog after a successful import should land on the contacts
+   it just created — that is what "import" implies. Closing onto an
+   unchanged screen is why a working import read as a no-op. */
+function finishTopup() {
+  const r = _topupResult;
+  _topupPhase = "ready";
+  _topupResult = null;
+  closeCrmTopupModal();
+  if (r && r.imported > 0) {
+    showCrmTab("contacts");
+    setCrmAccounts([r.company]);
+    showMessage(`${r.imported} contact${r.imported === 1 ? "" : "s"} imported for ${r.company}. `
+      + `已为 ${r.company} 导入 ${r.imported} 位联系人。`, "info");
   }
 }
 
@@ -4581,11 +5601,41 @@ async function runCrmTopup() {
   const name = (document.getElementById("topup-company")?.value || "").trim();
   const target = Math.max(1, Math.min(Number(document.getElementById("topup-target")?.value) || 50, 500));
   const btn = document.getElementById("topup-run");
+  const box = document.getElementById("topup-plan");
   if (!name || !btn) return;
 
+  /* Apollo can take 30-60s. Without feedback the dialog looks frozen, and a
+     user who has just been told this spends credits will reasonably start
+     clicking again. The stages below are honest about being indicative —
+     the server does not stream progress, so they are labelled as such
+     rather than pretending to track the real request. */
+  _topupPhase = "running";
   btn.disabled = true;
-  const original = btn.textContent;
-  btn.textContent = "Appending…";
+  btn.textContent = "Retrieving… 检索中…";
+  const stages = [
+    "Searching Apollo for this company 搜索公司",
+    "Finding people at the company 查找联系人",
+    "Matching against your CRM 与 CRM 去重",
+    "Saving new contacts 保存联系人",
+  ];
+  let stage = 0;
+  const paint = () => {
+    box.hidden = false;
+    box.innerHTML = `<div class="crm-plan-row">
+      <div class="topup-progress">
+        ${stages.map((label, i) => `
+          <div class="topup-stage ${i < stage ? "done" : i === stage ? "active" : ""}">
+            <span class="topup-dot">${i < stage ? "✓" : i === stage ? "<span class='spinner'></span>" : "○"}</span>
+            <span>${escapeHtml(label)}</span>
+          </div>`).join("")}
+      </div>
+      <div class="crm-plan-cost">This can take up to a minute. Emails are revealed afterwards, in the contact list.
+        <br>整个过程可能需要一分钟，请勿重复点击。</div>
+    </div>`;
+  };
+  paint();
+  const tick = setInterval(() => { if (stage < stages.length - 1) { stage++; paint(); } }, 4000);
+
   try {
     const r = await fetch("/api/leads/search", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -4593,21 +5643,59 @@ async function runCrmTopup() {
       body: JSON.stringify({ companies: name, force: false, perCompanyLimit: target, maxTotal: target, departments: [] }),
     });
     const d = await r.json();
-    if (!r.ok || d.error) { showMessage(d.error || "Import failed.", "error"); btn.textContent = original; btn.disabled = false; return; }
+    clearInterval(tick);
 
-    const s = (d.summaries || [])[0];
-    showMessage(s
-      ? `${name}: appended ${s.importedCount} new contact(s); ${s.alreadyHeldCount || 0} already in your CRM were left untouched. 已追加 ${s.importedCount} 位新联系人。`
-      : `${name}: import finished.`, "info");
-    closeCrmTopupModal();
+    if (!r.ok || d.error) {
+      // Surface the real failure here instead of a toast behind the dialog.
+      box.innerHTML = `<div class="crm-plan-row"><div class="topup-failed">
+        <b>Apollo search failed 搜索失败</b><br>${escapeHtml(d.error || `HTTP ${r.status}`)}${d.details ? `<br><span class="crm-plan-cost">${escapeHtml(String(d.details).slice(0, 200))}</span>` : ""}
+        <br><span class="crm-plan-cost">Nothing was imported. 未导入任何联系人。</span>
+      </div></div>`;
+      _topupPhase = "ready";
+      btn.textContent = "Try again 重试";
+      btn.disabled = false;
+      return;
+    }
+
+    /* What actually happened, from the server's own counts — not what we
+       predicted. Apollo routinely returns fewer than the target. */
+    const sum = (d.summaries || [])[0] || {};
+    const found = Number(sum.foundCount) || 0;
+    const imported = Number(sum.importedCount) || 0;
+    const held = Number(sum.alreadyHeldCount) || 0;
+    const total = Number(sum.totalCount);
+    const short = imported < target - held;
+    box.innerHTML = `<div class="crm-plan-row">
+      <div class="topup-done"><b>✓ Finished 完成</b></div>
+      <ul class="topup-summary">
+        <li>Apollo returned <b>${found}</b> record(s) Apollo 返回</li>
+        <li><b>${imported}</b> new contact(s) imported 新增导入</li>
+        <li><b>${held}</b> already in your CRM, left untouched 已存在，未改动</li>
+        ${Number.isFinite(total) ? `<li>This company now has <b>${total}</b> contact(s) 当前共有</li>` : ""}
+      </ul>
+      ${short ? `<div class="crm-plan-cost">Fewer than the target — Apollo had no more matching people for this company. 少于目标数量，Apollo 已无更多匹配。</div>` : ""}
+      ${(d.messages || []).filter((m) => !String(m).startsWith("CACHE:")).map((m) => `<div class="crm-plan-cost">${escapeHtml(m)}</div>`).join("")}
+    </div>`;
+    _topupPhase = "done";
+    _topupResult = { company: name, imported, total };
+    // The button says what it will do, which differs by outcome: there is
+    // nothing to view when Apollo returned nobody.
+    btn.textContent = imported > 0
+      ? `View ${imported} new contact${imported === 1 ? "" : "s"} 查看新联系人`
+      : "Close 关闭";
+    btn.disabled = false;
+
     refreshUsage();
     loadBrowseSelectors();
     loadCrmAccounts();
-    // Show the result: scope the list to the company just enriched.
-    setCrmAccounts([name]);
   } catch (e) {
-    showMessage("Network error: " + e.message, "error");
-    btn.textContent = original; btn.disabled = false;
+    clearInterval(tick);
+    box.innerHTML = `<div class="crm-plan-row"><div class="topup-failed">
+      <b>Network error 网络错误</b><br>${escapeHtml(e.message)}
+      <br><span class="crm-plan-cost">Nothing was imported. 未导入任何联系人。</span></div></div>`;
+    _topupPhase = "ready";
+    btn.textContent = "Try again 重试";
+    btn.disabled = false;
   }
 }
 
@@ -4616,14 +5704,24 @@ function initCrmWorkspace() {
 
   // ── Add more contacts ──
   document.getElementById("crm-topup-btn")?.addEventListener("click", () => openCrmTopupModal());
+  const guardedTopupClose = guardedDialogClose("crm-topup-modal", closeCrmTopupModal);
   document.querySelectorAll("[data-topup-close]").forEach((b) =>
-    b.addEventListener("click", closeCrmTopupModal));
-  document.getElementById("crm-topup-modal")?.addEventListener("click", (e) => {
-    if (e.target.id === "crm-topup-modal") closeCrmTopupModal();
-  });
-  document.getElementById("topup-company")?.addEventListener("input", debounce(refreshTopupPlan, 300));
-  document.getElementById("topup-target")?.addEventListener("input", debounce(refreshTopupPlan, 250));
-  document.getElementById("topup-run")?.addEventListener("click", runCrmTopup);
+    b.addEventListener("click", guardedTopupClose));
+  /* Invalidate synchronously, re-validate asynchronously.
+
+     Disabling inside the debounced plan left a ~300ms window in which the
+     button still carried the previous company's verdict — long enough to
+     click "Append 49 contacts" for a company that had just been replaced.
+     The keystroke itself now revokes the action; only a returned plan can
+     grant it again. */
+  const invalidateTopup = () => {
+    const b = document.getElementById("topup-run");
+    if (b) b.disabled = true;
+  };
+  const planSoon = debounce(refreshTopupPlan, 300);
+  ["topup-company", "topup-target"].forEach((id) =>
+    document.getElementById(id)?.addEventListener("input", () => { invalidateTopup(); planSoon(); }));
+  document.getElementById("topup-run")?.addEventListener("click", onTopupRunClick);
 
   // ── Object tabs ──
   document.querySelectorAll("[data-crm-tab]").forEach((tab) =>
@@ -4644,11 +5742,9 @@ function initCrmWorkspace() {
   document.getElementById("crm-acct-new-btn")?.addEventListener("click", () => openNewCompanyModal());
 
   // ── New company dialog ──
+  const guardedNewcoClose = guardedDialogClose("crm-newco-modal", closeNewCompanyModal);
   document.querySelectorAll("[data-newco-close]").forEach((b) =>
-    b.addEventListener("click", closeNewCompanyModal));
-  document.getElementById("crm-newco-modal")?.addEventListener("click", (e) => {
-    if (e.target.id === "crm-newco-modal") closeNewCompanyModal();
-  });
+    b.addEventListener("click", guardedNewcoClose));
   document.getElementById("newco-create")?.addEventListener("click", submitNewCompany);
   document.getElementById("newco-name")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitNewCompany();
@@ -4660,11 +5756,11 @@ function initCrmWorkspace() {
     document.getElementById(id)?.addEventListener("input", debounce(refreshCrmPlan, 250)));
   document.querySelectorAll('input[name="crm-import-mode"]').forEach((r) =>
     r.addEventListener("change", refreshCrmPlan));
+  // Backdrop clicks are deliberately NOT wired: this dialog is a workflow,
+  // and a stray click on the scrim was discarding a full configuration.
+  const guardedDiscoverClose = guardedDialogClose("crm-discover-modal", closeCrmDiscoverModal);
   document.querySelectorAll("[data-crm-discover-close]").forEach((b) =>
-    b.addEventListener("click", closeCrmDiscoverModal));
-  document.getElementById("crm-discover-modal")?.addEventListener("click", (e) => {
-    if (e.target.id === "crm-discover-modal") closeCrmDiscoverModal();   // click-outside
-  });
+    b.addEventListener("click", guardedDiscoverClose));
 
   document.getElementById("crm-intel-open-btn")?.addEventListener("click", openCrmIntelDrawer);
   document.getElementById("crm-intel-close")?.addEventListener("click", closeCrmIntelDrawer);
@@ -4672,9 +5768,16 @@ function initCrmWorkspace() {
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    closeCrmDiscoverModal();
-    closeNewCompanyModal();
-    closeCrmTopupModal();
+    // The confirm sits on top; Esc there means "keep editing".
+    const discard = document.getElementById("discard-changes-modal");
+    if (discard && discard.classList.contains("open")) {
+      closeModal("discard-changes-modal");
+      return;
+    }
+    const open = (id) => document.getElementById(id)?.classList.contains("open");
+    if (open("crm-newco-modal")) guardedNewcoClose();
+    else if (open("crm-topup-modal")) guardedTopupClose();
+    else if (open("crm-discover-modal")) guardedDiscoverClose();
   });
 
   // Filters apply as they change: text after a pause, selects immediately.
@@ -5401,6 +6504,35 @@ function renderCompanyIntel(intel, panelId = "intel-panel") {
       <div class="intel-research-note" style="margin-top:8px;font-size:0.78rem;color:#9ca3af;"></div>
     </div>`;
 
+  /* ── Provenance ────────────────────────────────────────────────────
+     How this company entered the CRM, and the audit trail of that record.
+     Placed above the workflow sections because it is the first thing asked
+     when a list is questioned ("where did these come from?"), and because
+     an unlabelled origin is worth noticing before acting on the record. */
+  const provKey = c.source || "legacy";
+  const provLabel = COMPANY_SOURCE_LABELS[provKey] || provKey;
+  const untraced = provKey === "legacy" || provKey === "crm_side_effect";
+  html += `
+    <div class="intel-section" data-no-i18n>
+      <h3>Provenance 溯源</h3>
+      <div class="cd-prov">
+        <div><span class="cd-prov-k">Company source 公司来源:</span> ${escapeHtml(provLabel)}
+          ${c.source_file ? `<span class="cd-prov-k">(${escapeHtml(c.source_file)})</span>` : ""}</div>
+        <div><span class="cd-prov-k">Contacts here 联系人来源:</span>
+          ${contactStats.count
+            ? `${contactStats.count} contact${contactStats.count === 1 ? "" : "s"} · see each record for its own contact and email source
+               ${contactStats.count} 位联系人 · 各自来源见联系人详情`
+            : `No contacts yet 暂无联系人`}</div>
+        ${untraced
+          ? `<div style="color:#b45309;">This company predates provenance tracking, so its origin was never recorded.
+               本公司创建于溯源功能之前，来源未记录。</div>`
+          : ""}
+      </div>
+      <div id="intel-audit-${c.id}" class="cd-prov" style="margin-top:8px;">
+        <span class="cd-prov-k">Loading audit trail… 加载审计记录…</span>
+      </div>
+    </div>`;
+
   // ── Recommended next step, then contact coverage ──
   const next = intelNextStep(st, contactStats);
   html += `
@@ -5480,6 +6612,30 @@ function renderCompanyIntel(intel, panelId = "intel-panel") {
     panel.dataset.companyId = String(c.id || "");
     panel.dataset.companyName = c.name || "";
     panel.innerHTML = html;
+    // Loaded after paint: the audit trail is useful but never worth delaying
+    // the record page for.
+    loadCompanyAudit(c.id);
+  }
+}
+
+/* The company audit trail: creation with its recorded source, plus any
+   later correction. Read-only — an audit log you can edit is not one. */
+async function loadCompanyAudit(companyId) {
+  const el = document.getElementById(`intel-audit-${companyId}`);
+  if (!el) return;
+  try {
+    const d = await getJSON(`/api/companies/${companyId}/activity`);
+    const items = d.activity || [];
+    if (!items.length) {
+      el.innerHTML = `<span class="cd-prov-k">No audit entries — this company predates the audit trail.
+        无审计记录 — 该公司创建于审计功能之前。</span>`;
+      return;
+    }
+    el.innerHTML = `<div class="cd-prov-k" style="margin-bottom:2px;">Audit trail 审计记录</div>`
+      + items.map((a) => `<div>· ${escapeHtml(a.description || a.activity_type)}
+          <span class="cd-prov-k">${escapeHtml(intelFmtDate(a.created_at))}</span></div>`).join("");
+  } catch (e) {
+    el.innerHTML = `<span class="cd-prov-k">Audit trail unavailable 审计记录不可用</span>`;
   }
 }
 
@@ -5760,6 +6916,7 @@ function openNewCompanyModal(prefillName) {
   const err = document.getElementById("newco-error");
   if (err) { err.style.display = "none"; err.textContent = ""; }
   m.classList.add("open");
+  snapshotDialog("crm-newco-modal");
   setTimeout(() => nameEl?.focus(), 60);
 }
 

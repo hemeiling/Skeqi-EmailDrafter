@@ -1,6 +1,7 @@
 const { Pool } = require('pg');
 const { normalizeNameKey, isInvalidCompanyName } = require('./companyKey');
 const { classifyDepartment, classifySeniority } = require('./contactClassify');
+const { buildWhere, buildOrderBy, LAST_ACTIVITY_SQL, OPTION_SQL, escapeLike, companySourceForContact } = require('./contact-query');
 
 // Enable SSL for production, for managed Postgres (Neon), or whenever the URL
 // asks for it — otherwise Neon rejects the connection when running locally.
@@ -122,6 +123,78 @@ async function initDb() {
   await pool.query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS seniority_level TEXT`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_department_category ON contacts (department_category)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_seniority_level ON contacts (seniority_level)`);
+
+  /* Grid indexes. The contact table is a server-side data grid now — every
+     column filter, sort and facet count runs in Postgres, so the columns
+     they touch need to be indexable. communications.contact_id in
+     particular was unindexed while being the join behind Activity, Draft
+     and last-activity sort: a sequential scan per contact, which is fine at
+     870 rows and quadratic at scale. */
+  /* Email provenance. Distinct from contacts.source: it records where the
+     *address* came from, which is what decides whether re-reading it is free
+     (it is, always) and whether obtaining it cost an Apollo credit. */
+  /* Company discovery provenance. The uploaded CSV/Excel supplies company
+     names, not contacts — so the file is recorded here, on the company, and
+     never on the Apollo contacts that the company name later yields.
+     source_file keeps the filename so an import can be traced back after
+     the fact. */
+  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS source text`);
+  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS source_file text`);
+  await pool.query(`UPDATE companies SET source = 'legacy' WHERE source IS NULL`);
+  // 'derived' said only "something else made this". Split into named causes.
+  await pool.query(`UPDATE companies SET source = 'crm_side_effect' WHERE source = 'derived'`);
+
+  /* Company audit trail. contacts have had contact_activity for a while;
+     companies had nothing, so how a company came to exist — and any later
+     correction to that record — left no trace at all. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS company_activity (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+      activity_type TEXT NOT NULL,
+      description TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_company_activity_company ON company_activity (company_id, created_at DESC)`);
+
+  await pool.query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS email_source text`);
+  /* Backfill once, from the contact source, for rows written before this
+     column existed. Apollo rows get 'apollo_legacy' rather than a guess:
+     search-supplied and reveal-supplied addresses are indistinguishable
+     after the fact, and inventing the difference would put a wrong number
+     in a credit-usage report. */
+  await pool.query(`
+    UPDATE contacts SET email_source = CASE
+        WHEN email IS NULL OR TRIM(email) = '' THEN 'none'
+        WHEN source = 'business_card' THEN 'business_card'
+        WHEN source = 'manual'        THEN 'manual'
+        WHEN source = 'email_import'  THEN 'email_import'
+        WHEN source = 'battery_show'  THEN 'battery_show'
+        WHEN source = 'apollo'        THEN 'apollo_legacy'
+        ELSE 'legacy'
+      END
+    WHERE email_source IS NULL`);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_source ON contacts (source)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_follow_up_status ON contacts (follow_up_status)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_company_lower ON contacts (LOWER(company))`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_company_id ON contacts (company_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_last_contacted ON contacts (last_contacted_at)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_contact ON communications (contact_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_contact_type ON communications (contact_id, comm_type) WHERE deleted_at IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_contact_activity_contact_type ON contact_activity (contact_id, activity_type)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_email_drafts_contact ON email_drafts (contact_id)`);
+  /* Prefix/contains matching on names and email needs trigram support;
+     pg_trgm is available on Neon. Skipped silently where it is not — the
+     filters still work, just without the index. */
+  try {
+    await pool.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_full_name_trgm ON contacts USING gin (full_name gin_trgm_ops)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_email_trgm ON contacts USING gin (email gin_trgm_ops)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_company_trgm ON contacts USING gin (company gin_trgm_ops)`);
+  } catch (e) {
+    console.warn('pg_trgm unavailable, text filters will not use an index:', e.message);
+  }
   // Backfill: contacts that already have an email were implicitly found
   await pool.query(`UPDATE contacts SET email_lookup_status = 'found' WHERE email IS NOT NULL AND email != '' AND email_lookup_status != 'found'`);
 
@@ -1245,13 +1318,24 @@ async function findAccountByName(name) {
 async function contactCountsByAccountNames(names) {
   const keys = (names || []).map((n) => String(n || '').trim().toLowerCase()).filter(Boolean);
   if (!keys.length) return {};
+  /* Resolve each name against BOTH accounts and companies.
+
+     Matching account names alone reported companies we hold as absent: the
+     company "ElringKlinger" is parented to the account "ElringKlinger AG",
+     and every picker in the CRM lists company names, so the lookup and the
+     thing being looked up disagreed. The join walks a company back to its
+     account, then counts across that whole account. */
   const rows = await q(`
-    SELECT LOWER(a.name) AS key, COUNT(DISTINCT c.id)::int AS n
-    FROM accounts a
+    SELECT k.name AS key, COUNT(DISTINCT c.id)::int AS n
+    FROM unnest($1::text[]) AS k(name)
+    JOIN accounts a
+      ON LOWER(a.name) = k.name
+      OR a.id = (SELECT comp0.account_id FROM companies comp0
+                  WHERE LOWER(comp0.name) = k.name AND comp0.account_id IS NOT NULL
+                  LIMIT 1)
     LEFT JOIN companies comp ON comp.account_id = a.id
     LEFT JOIN contacts c ON c.company_id = comp.id
-    WHERE LOWER(a.name) = ANY($1::text[])
-    GROUP BY LOWER(a.name)
+    GROUP BY k.name
   `, [keys]);
   const out = {};
   rows.forEach((r) => { out[r.key] = r.n; });
@@ -1336,15 +1420,47 @@ async function mergeAccounts(sourceAccountIds, targetAccountId) {
 const pick = (newVal, oldVal) => (newVal === undefined || newVal === null || newVal === '' ? oldVal : newVal);
 const pickNumber = (newVal, oldVal) => (newVal === undefined || newVal === null || newVal === '' ? oldVal : Number(newVal));
 
+/* Resolve a company by name, EXACT match first.
+
+   name_key is a normalised form ("Kautex Textron GmbH & Co. KG" and
+   "Kautex Textron GmbH & Co K.G." both reduce to "kautex textron gmbh co
+   kg"), and it is not unique. Matching on it alone could return a sibling
+   row, whose name upsertCompany would then overwrite with the name the
+   caller passed — colliding with the row that legitimately holds it and
+   failing the whole request with:
+
+     duplicate key value violates unique constraint "idx_companies_name_ci"
+
+   That aborted real Apollo searches ("Lead search failed") after the
+   credits had already been spent. Preferring an exact case-insensitive
+   name match means the row that actually owns the name wins. */
 async function findCompanyByName(name) {
   if (!name || !name.trim()) return null;
+  const exact = await q1(`SELECT * FROM companies WHERE LOWER(name) = LOWER($1) LIMIT 1`, [name.trim()]);
+  if (exact) return exact;
   const key = normalizeNameKey(name);
   if (!key) return null;
-  return q1(`SELECT * FROM companies WHERE name_key = $1 LIMIT 1`, [key]);
+  return q1(`SELECT * FROM companies WHERE name_key = $1 ORDER BY id LIMIT 1`, [key]);
 }
 
 async function getCompany(id) {
   return q1(`SELECT * FROM companies WHERE id = $1`, [id]);
+}
+
+async function logCompanyActivity(companyId, activityType, description) {
+  if (!companyId) return;
+  try {
+    await q(`INSERT INTO company_activity (company_id, activity_type, description) VALUES ($1, $2, $3)`,
+      [companyId, activityType, description || '']);
+  } catch (e) {
+    // An audit write must never take down the operation it is recording.
+    console.warn('logCompanyActivity failed:', e.message);
+  }
+}
+
+async function listCompanyActivity(companyId, limit = 50) {
+  return q(`SELECT id, activity_type, description, created_at FROM company_activity
+            WHERE company_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2`, [companyId, limit]);
 }
 
 async function upsertCompany(fields) {
@@ -1374,8 +1490,22 @@ async function upsertCompany(fields) {
   }
 
   if (existing) {
+    /* Renaming is only safe if no OTHER row already holds the incoming name.
+       companies has a unique index on LOWER(name); a normalised-key match can
+       return a sibling, and renaming it onto its twin's name aborts the whole
+       request. When the name is taken, keep the row's existing name and merge
+       the rest — the alternative is losing an entire Apollo search to a
+       cosmetic field. */
+    let incomingName = fields.name;
+    if (incomingName && incomingName.trim().toLowerCase() !== String(existing.name || '').trim().toLowerCase()) {
+      const taken = await q1(
+        `SELECT id FROM companies WHERE LOWER(name) = LOWER($1) AND id <> $2 LIMIT 1`,
+        [incomingName.trim(), existing.id]
+      );
+      if (taken) incomingName = '';        // fall through to existing.name via pick()
+    }
     const merged = {
-      name: pick(fields.name, existing.name),
+      name: pick(incomingName, existing.name),
       chinese_name: pick(fields.chinese_name, existing.chinese_name),
       industry: pick(fields.industry, existing.industry),
       booth: pick(fields.booth, existing.booth),
@@ -1389,34 +1519,70 @@ async function upsertCompany(fields) {
       mfg_location: pick(fields.mfg_location, existing.mfg_location),
       contact_tip: pick(fields.contact_tip, existing.contact_tip)
     };
+    /* First discovery wins: a company found in an uploaded list and later
+       touched by an Apollo search was still discovered from the file.
+       'legacy'/'crm_side_effect' are placeholders, so better information
+       replaces them — and that correction is recorded. */
+    const isPlaceholder = (v) => !v || v === 'legacy' || v === 'crm_side_effect';
+    const resolvedSource = !isPlaceholder(existing.source)
+      ? existing.source
+      : (fields.source || existing.source || 'legacy');
+    if (fields.source && resolvedSource !== existing.source) {
+      await logCompanyActivity(existing.id, 'source_recorded',
+        `Source ${existing.source || 'unset'} → ${resolvedSource}`
+        + `${fields.source_file ? ` (${fields.source_file})` : ''}`);
+    }
+
     await q(`
       UPDATE companies SET
         name=$1, chinese_name=$2, industry=$3, booth=$4, event_id=$5, website=$6, notes=$7,
         category=$8, priority=$9, background=$10, opportunity=$11, mfg_location=$12, contact_tip=$13,
-        account_id=$14, updated_at=NOW()
-      WHERE id=$15
+        account_id=$14, source=$15, source_file=$16, updated_at=NOW()
+      WHERE id=$17
     `, [
       merged.name, merged.chinese_name, merged.industry, merged.booth, merged.event_id,
       merged.website, merged.notes, merged.category, merged.priority, merged.background,
-      merged.opportunity, merged.mfg_location, merged.contact_tip, accountId, existing.id
+      merged.opportunity, merged.mfg_location, merged.contact_tip, accountId,
+      /* First discovery wins. A company found in an uploaded list and later
+         touched by an Apollo search was still discovered from the file, and
+         relabelling it 'apollo' would erase the only record of how it got
+         here. 'legacy'/'derived' are placeholders, so a real source replaces
+         them. */
+      resolvedSource,
+      fields.source_file || existing.source_file || '',
+      existing.id
     ]);
     return { id: existing.id, updated: true };
+  }
+
+  /* Every creation path funnels through here, so this is the one place that
+     can guarantee a source is written. An unlabelled path still produces a
+     usable row — refusing would lose real data over a metadata gap — but it
+     says so loudly, because a silent 'crm_side_effect' is how a new import
+     path would quietly stop being traceable. */
+  const createdSource = fields.source || 'crm_side_effect';
+  if (!fields.source) {
+    console.warn(`[upsertCompany] "${name}" created with no source; recorded as crm_side_effect. `
+      + 'Pass { source } from the calling path to keep provenance accurate.');
   }
 
   const [{ id }] = await q(`
     INSERT INTO companies (
       name, chinese_name, industry, booth, event_id, website, notes,
       category, priority, background, opportunity, mfg_location, contact_tip,
-      account_id, name_key
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+      account_id, name_key, source, source_file
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
     RETURNING id
   `, [
     name, fields.chinese_name || '', fields.industry || '', fields.booth || '',
     eventRow ? eventRow.id : null, fields.website || '', fields.notes || '',
     fields.category || '', fields.priority || 0, fields.background || '',
     fields.opportunity || '', fields.mfg_location || '', fields.contact_tip || '',
-    accountId, normalizeNameKey(name)
+    accountId, normalizeNameKey(name),
+    createdSource, fields.source_file || ''
   ]);
+  await logCompanyActivity(id, 'created',
+    `Created · source: ${createdSource}${fields.source_file ? ` (${fields.source_file})` : ''}`);
   return { id, updated: false };
 }
 
@@ -1438,7 +1604,7 @@ const COMPANY_CONTACT_COUNT = `
 async function listCompanySummaries() {
   return q(`
     SELECT c.id, c.name, c.chinese_name, c.industry, c.booth, c.priority,
-           c.account_id, c.booth_category,
+           c.account_id, c.booth_category, c.source, c.source_file,
            c.ai_analyzed_at, c.intelligence_reviewed_at,
            (COALESCE(c.ai_research_summary, '') <> '') AS has_summary,
            COALESCE(cc.contact_count, 0)::int AS contact_count,
@@ -1499,7 +1665,9 @@ async function insertContact(c) {
 
   let companyId = c.company_id || null;
   if (!companyId && companyText) {
-    const result = await upsertCompany({ name: companyText });
+    // The company appears because a contact is being saved; which kind of
+    // contact is what makes the record useful later.
+    const result = await upsertCompany({ name: companyText, source: companySourceForContact(c.source) });
     if (result) companyId = result.id;
   }
 
@@ -1522,13 +1690,14 @@ async function insertContact(c) {
       tags, follow_up_status, last_contacted_at,
       event_id, booth_number, meeting_date, meeting_notes, interest_level,
       products_discussed, assigned_salesperson, has_email, email_lookup_status,
-      contact_status, priority, country, department_category, seniority_level
+      contact_status, priority, country, department_category, seniority_level,
+      email_source
     ) VALUES (
       $1,  $2,  $3,  $4,  $5,  $6,  $7,  $8,  $9,  $10,
       $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
       $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
       $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
-      $41, $42
+      $41, $42, $43
     ) RETURNING id
   `, [
     first_name, last_name, c.full_name || '', c.job_title || '', c.department || '', c.seniority || '',
@@ -1545,7 +1714,9 @@ async function insertContact(c) {
     c.has_email !== undefined ? Boolean(c.has_email) : false,
     c.email ? 'found' : (c.email_lookup_status || 'not_checked'),
     c.contact_status || 'prospect', c.priority || 'medium', c.country || '',
-    departmentCategory ? departmentCategory.key : null, seniorityLevel.key
+    departmentCategory ? departmentCategory.key : null, seniorityLevel.key,
+    // An address arriving with no stated provenance is 'legacy', not a guess.
+    c.email_source || (c.email ? 'legacy' : 'none')
   ]);
   return id;
 }
@@ -1678,7 +1849,7 @@ async function updateContact(id, c) {
   let companyId = c.company_id || existing.company_id || null;
   const newCompanyName = pick(incomingCompany, existing.company);
   if (newCompanyName && (!companyId || (incomingCompany && incomingCompany !== existing.company))) {
-    const result = await upsertCompany({ name: newCompanyName });
+    const result = await upsertCompany({ name: newCompanyName, source: companySourceForContact(c.source || existing.source) });
     if (result) companyId = result.id;
   }
 
@@ -1728,6 +1899,18 @@ async function updateContact(id, c) {
     products_discussed: pick(c.products_discussed, existing.products_discussed),
     assigned_salesperson: pick(c.assigned_salesperson, existing.assigned_salesperson),
     has_email: c.has_email !== undefined ? Boolean(c.has_email) : Boolean(existing.has_email),
+    /* Provenance follows the address. An update that leaves the email alone
+       must not relabel where it came from — otherwise editing a phone number
+       would rewrite the record of who supplied the address. */
+    email_source: (() => {
+      const incoming = (c.email || '').trim();
+      const current = (existing.email || '').trim();
+      if (incoming && incoming.toLowerCase() !== current.toLowerCase()) {
+        return c.email_source || 'legacy';        // a genuinely new address
+      }
+      if (c.email_source && !existing.email_source) return c.email_source;
+      return existing.email_source || (current ? 'legacy' : 'none');
+    })(),
     email_lookup_status: (() => {
       if (c.email_lookup_status) return c.email_lookup_status;
       if (pick(c.email, existing.email) && !existing.email) return 'found';
@@ -1752,8 +1935,8 @@ async function updateContact(id, c) {
       event_id=$29,   booth_number=$30, meeting_date=$31,    meeting_notes=$32,   interest_level=$33,
       products_discussed=$34, assigned_salesperson=$35, has_email=$36,
       email_lookup_status=$37, contact_status=$38, priority=$39, country=$40,
-      department_category=$41, seniority_level=$42, updated_at=NOW()
-    WHERE id=$43
+      department_category=$41, seniority_level=$42, email_source=$43, updated_at=NOW()
+    WHERE id=$44
   `, [
     merged.first_name, merged.last_name, merged.full_name, merged.job_title, merged.department, merged.seniority,
     merged.email, merged.phone, merged.website, merged.linkedin_url, merged.company, merged.company_id,
@@ -1765,6 +1948,7 @@ async function updateContact(id, c) {
     merged.products_discussed, merged.assigned_salesperson, merged.has_email,
     merged.email_lookup_status, merged.contact_status, merged.priority, merged.country,
     departmentCategory ? departmentCategory.key : null, seniorityLevel.key,
+    merged.email_source,
     id
   ]);
 }
@@ -1907,6 +2091,130 @@ async function filterContacts(filters = {}, limit = 1000) {
     ${orderBy}
     LIMIT $${params.length}
   `, params);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Server-side grid: one page of rows, the matching total, and the facet
+   counts that populate each column menu.
+
+   The grid is specified to scale to hundreds of thousands of contacts, so
+   none of these three ever returns more than it must: the page query is
+   LIMIT/OFFSET, the count is a scalar, and the facets are grouped
+   aggregates. The browser holds one page at a time.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// Shared FROM: companies/accounts are joined because the sidebar filters
+// (trade show, booth category, account) live on them.
+const GRID_FROM = `
+  FROM contacts c
+  LEFT JOIN companies comp ON comp.id = c.company_id
+  LEFT JOIN accounts acc ON acc.id = comp.account_id`;
+
+/* Just the fields the reveal planner needs, for a bounded set of ids.
+   apollo_raw_json is TOASTed and deliberately excluded from every list
+   query; it is pulled here because deciding "free or paid" requires
+   knowing whether the payload we already own contains an address, and the
+   id list is a user selection (one page at most), not the table. */
+async function listContactsByIds(ids) {
+  const clean = (ids || []).map(Number).filter(Number.isInteger);
+  if (!clean.length) return [];
+  return q(`
+    SELECT id, full_name, email, email_source, email_lookup_status,
+           apollo_person_id, source, apollo_raw_json
+    FROM contacts WHERE id = ANY($1::int[])`, [clean]);
+}
+
+async function queryContactsPage(filters = {}, sort = null, page = 1, pageSize = 25) {
+  const { where, params } = buildWhere(filters);
+  const cols = await contactListColumns();
+  const p = params.slice();
+  p.push(pageSize); const limitP = `$${p.length}`;
+  p.push((Math.max(1, page) - 1) * pageSize); const offsetP = `$${p.length}`;
+
+  const rows = await q(`
+    SELECT ${cols},
+      COALESCE(ed.draft_count,0)::int AS draft_count, ed.latest_draft_id,
+      COALESCE(cs.comm_count,0)::int AS comm_count,
+      COALESCE(cs.comm_draft_count,0)::int AS comm_draft_count,
+      cs.last_comm_at, cs.last_comm_type,
+      -- Company discovery provenance rides along on the join the sidebar
+      -- filters already need, so the full chain (company → contact → email)
+      -- is available without a second query per row.
+      comp.source AS company_source, comp.source_file AS company_source_file,
+      ${LAST_ACTIVITY_SQL} AS last_activity_at
+    ${GRID_FROM} ${DRAFT_COUNT_JOIN} ${COMM_STATS_JOIN}
+    ${where}
+    ${buildOrderBy(sort)}
+    LIMIT ${limitP} OFFSET ${offsetP}
+  `, p);
+  return rows;
+}
+
+async function countContacts(filters = {}) {
+  const { where, params } = buildWhere(filters);
+  const r = await q1(`SELECT COUNT(*)::int AS n ${GRID_FROM} ${where}`, params);
+  return r ? r.n : 0;
+}
+
+/* Counts for one column's menu, computed with every *other* active filter
+   applied but not this column's own — so the menu shows what you could
+   switch to, not just what you already picked. That is how Excel's filter
+   dropdowns behave, and the reason a zero here is trustworthy: the option
+   really would return nothing given the rest of the filter set. */
+async function contactFacets(filters = {}, column) {
+  const { where, params } = buildWhere(filters, { skipColumn: column });
+
+  // Simple GROUP BY columns.
+  if (column === 'source' || column === 'status') {
+    const col = column === 'source' ? 'c.source' : 'c.follow_up_status';
+    const rows = await q(`
+      SELECT COALESCE(${col}, '') AS key, COUNT(*)::int AS n
+      ${GRID_FROM} ${where} GROUP BY 1`, params);
+    return rows;
+  }
+
+  if (column === 'company') {
+    // Bounded: the picker is searchable, so the menu never needs every
+    // company at once.
+    const p = params.slice();
+    const search = String(filters.facetSearch || '').trim();
+    let extra = '';
+    if (search) { p.push('%' + escapeLike(search) + '%'); extra = ` AND c.company ILIKE $${p.length} ESCAPE '\\'`; }
+    const rows = await q(`
+      SELECT c.company AS key, COUNT(*)::int AS n
+      ${GRID_FROM} ${where ? where + extra : (extra ? 'WHERE 1=1' + extra : '')}
+      GROUP BY 1 HAVING c.company IS NOT NULL AND TRIM(c.company) <> ''
+      ORDER BY n DESC, 1 ASC LIMIT 300`, p);
+    return rows;
+  }
+
+  if (column === 'tags') {
+    const p = params.slice();
+    const search = String(filters.facetSearch || '').trim();
+    let extra = '';
+    if (search) { p.push('%' + escapeLike(search) + '%'); extra = ` AND (t.value ILIKE $${p.length} ESCAPE '\\' OR t.name_cn ILIKE $${p.length} ESCAPE '\\')`; }
+    const rows = await q(`
+      SELECT t.value AS key, t.name_en, t.name_cn, COUNT(DISTINCT c.id)::int AS n
+      ${GRID_FROM}
+      JOIN contact_tags ct ON ct.contact_id = c.id
+      JOIN tags t ON t.id = ct.tag_id
+      ${where ? where + extra : (extra ? 'WHERE 1=1' + extra : '')}
+      GROUP BY t.value, t.name_en, t.name_cn
+      ORDER BY n DESC, 1 ASC LIMIT 300`, p);
+    return rows;
+  }
+
+  // Boolean-per-option columns: one COUNT(*) FILTER per option in a single
+  // pass, rather than one round trip per checkbox. The predicates are the
+  // same constants the WHERE builder uses, so a menu count and the filter
+  // it triggers cannot disagree.
+  const optionSql = OPTION_SQL[column];
+  if (!optionSql) return [];
+
+  const selects = Object.entries(optionSql)
+    .map(([key, cond]) => `COUNT(*) FILTER (WHERE ${cond})::int AS "${key}"`);
+  const row = await q1(`SELECT ${selects.join(', ')} ${GRID_FROM} ${where}`, params);
+  return Object.keys(optionSql).map((key) => ({ key, n: row ? row[key] : 0 }));
 }
 
 async function patchContactCrmFields(id, fields) {
@@ -3100,6 +3408,8 @@ async function setSetting(key, value) {
 }
 
 module.exports = {
+  queryContactsPage, countContacts, contactFacets, listContactsByIds,
+  logCompanyActivity, listCompanyActivity,
   pool,
   initDb,
   // account intelligence reports

@@ -522,8 +522,6 @@
     /* Active-filter chips: the single honest answer to "what is narrowing
        this table right now?" — previously split across two panels that
        never agreed. */
-    #crm-filter-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-    #crm-filter-summary:empty { display: none; }
     .crm-fchip {
       display: inline-flex; align-items: center; gap: 6px; max-width: 300px;
       background: var(--color-primary-soft); color: #3D1E6E; border: 1px solid #CFC4E8;
@@ -754,6 +752,28 @@
     .crm-plan-num span { font-size: 0.7rem; color: var(--color-text-tertiary); }
     .crm-plan-op { color: var(--color-text-tertiary); font-size: 0.8rem; }
     .crm-plan-get b { color: var(--color-primary); }
+    .crm-plan-row-actions { margin-top: 9px; }
+    /* Retrieval progress + outcome */
+    .reveal-progress {
+      position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 500;
+      display: flex; align-items: center; gap: 10px;
+      background: #241338; color: #fff; border-radius: var(--radius-full);
+      padding: 9px 18px; font-size: 0.82rem; box-shadow: var(--shadow-lg);
+    }
+    .reveal-progress[hidden] { display: none; }
+    .reveal-progress b { font-variant-numeric: tabular-nums; }
+
+    .topup-progress { display: flex; flex-direction: column; gap: 7px; margin-bottom: 8px; }
+    .topup-stage { display: flex; align-items: center; gap: 9px; font-size: 0.79rem; color: var(--color-text-tertiary); }
+    .topup-stage.active { color: var(--color-text); font-weight: 600; }
+    .topup-stage.done { color: #047857; }
+    .topup-dot { width: 16px; text-align: center; flex-shrink: 0; }
+    .topup-done { color: #047857; font-size: 0.88rem; margin-bottom: 6px; }
+    .topup-warn { background: #FFFBEB; border-bottom: 1px solid #FDE68A; }
+    .topup-warn b { color: #92400E; font-size: 0.82rem; }
+    .topup-failed { color: #B42318; font-size: 0.82rem; line-height: 1.6; }
+    .topup-summary { margin: 0 0 4px 18px; font-size: 0.8rem; color: var(--color-text-secondary); line-height: 1.7; }
+    .topup-summary b { color: var(--color-text); }
     .crm-plan-cost { margin-top: 7px; font-size: 0.71rem; color: var(--color-text-tertiary); line-height: 1.5; }
     .crm-plan-warn { margin-top: 6px; font-size: 0.72rem; color: var(--color-warn-text, #8A6400); }
     .crm-plan-none { margin-top: 6px; font-size: 0.72rem; color: var(--color-text-tertiary); }
@@ -962,12 +982,12 @@
     .crm-acct-table { table-layout: fixed; width: 100%; }
     .crm-acct-table th, .crm-acct-table td { vertical-align: top; }
     .crm-acct-table td { padding-top: 11px; padding-bottom: 11px; }
-    .crm-acct-table col.ca-name     { width: 26%; }
-    .crm-acct-table col.ca-industry { width: 22%; }
-    .crm-acct-table col.ca-contacts { width: 10%; }
-    .crm-acct-table col.ca-analysis { width: 15%; }
-    .crm-acct-table col.ca-tags     { width: 14%; }
-    .crm-acct-table col.ca-next     { width: 13%; }
+    .crm-acct-table col.ca-name     { width: 23%; }
+    .crm-acct-table col.ca-industry { width: 18%; }
+    .crm-acct-table col.ca-contacts { width: 9%;  }
+    .crm-acct-table col.ca-analysis { width: 14%; }
+    .crm-acct-table col.ca-tags     { width: 13%; }
+    .crm-acct-table col.ca-next     { width: 11%; }
     .crm-acct-row { cursor: pointer; }
     .crm-acct-row:hover { background: var(--color-primary-soft); }
     .ca-ok   { color: #047857; font-weight: 600; font-size: 0.8rem; }
@@ -1106,14 +1126,110 @@
     .crm-table th, .crm-table td { vertical-align: top; }
     .crm-table td { padding-top: 10px; padding-bottom: 10px; }
     .crm-table col.c-check   { width: 34px; }
-    .crm-table col.c-contact { width: 18%; }
-    .crm-table col.c-company { width: 13%; }
-    .crm-table col.c-email   { width: 20%; }
-    .crm-table col.c-activity{ width: 13%; }
-    .crm-table col.c-tags    { width: 9%;  }
-    .crm-table col.c-status  { width: 12%; }
-    .crm-table col.c-actions { width: 15%; }
+    .crm-table col.c-contact { width: 15%; }
+    .crm-table col.c-company { width: 12%; }
+    .crm-table col.c-email   { width: 15%; }
+    .crm-table col.c-activity{ width: 10%; }
+    .crm-table col.c-tags    { width: 6%;  }
+    /* Nine columns is a tight budget, and Status is the one cell holding an
+       editable control with bilingual labels: "Meeting scheduled 已约会议"
+       needs the room, and at 13% it still clipped to "Not contacted 未". */
+    .crm-table col.c-status  { width: 16%; }
+    .crm-table col.c-source  { width: 7%;  }
+    .crm-table col.c-actions { width: 12%; }
+
+    /* ── Column headers: label, sort marker, filter button ──────────────
+       The ▾ is always present rather than appearing on hover: a filter
+       affordance you have to discover by hovering is one most users never
+       find, and this grid's whole point is that filtering is one click. */
+    .crm-table thead th[data-col] { position: relative; padding-right: 20px; }
+    .crm-table thead th[data-col] .th-label { cursor: default; }
+    .th-filter {
+      position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
+      border: 0; background: transparent; cursor: pointer; padding: 2px 3px;
+      font-size: 0.7rem; line-height: 1; color: #9ca3af; border-radius: 3px;
+    }
+    .th-filter:hover { background: #e5e7eb; color: #111827; }
+    /* An active column is legible at a glance without reading the chips. */
+    .crm-table thead th.col-filtered { background: #eff6ff; }
+    .crm-table thead th.col-filtered .th-filter { color: #2563eb; background: #dbeafe; }
+    .th-sort { font-size: 0.68rem; color: #2563eb; margin-left: 3px; }
+
+    /* ── The filter popover ───────────────────────────────────────────── */
+    .col-menu {
+      position: absolute; z-index: 1200; min-width: 244px; max-width: 300px;
+      background: #fff; border: 1px solid #d1d5db; border-radius: 8px;
+      box-shadow: 0 10px 28px rgba(0,0,0,.16); padding: 6px 0; font-size: 0.8rem;
+    }
+    .col-menu .cm-section { padding: 5px 11px; }
+    .col-menu .cm-divider { height: 1px; background: #e5e7eb; margin: 5px 0; }
+    .col-menu .cm-title {
+      font-size: 0.68rem; text-transform: uppercase; letter-spacing: .04em;
+      color: #6b7280; padding: 4px 11px 2px;
+    }
+    .col-menu .cm-item {
+      display: flex; align-items: center; gap: 7px; width: 100%;
+      padding: 5px 11px; border: 0; background: none; cursor: pointer;
+      text-align: left; font-size: 0.8rem; color: #111827;
+    }
+    .col-menu .cm-item:hover { background: #f3f4f6; }
+    .col-menu .cm-item .cm-count { margin-left: auto; color: #9ca3af; font-size: 0.72rem; }
+    /* Zero-count options stay visible but read as unavailable, so an empty
+       result is predicted by the menu instead of discovered after clicking. */
+    .col-menu .cm-item.cm-zero { color: #9ca3af; }
+    .col-menu input[type="text"], .col-menu input[type="date"], .col-menu select {
+      width: 100%; box-sizing: border-box; padding: 5px 7px; font-size: 0.78rem;
+      border: 1px solid #d1d5db; border-radius: 5px;
+    }
+    .col-menu .cm-scroll { max-height: 210px; overflow-y: auto; }
+    .col-menu .cm-foot {
+      display: flex; gap: 6px; justify-content: space-between;
+      padding: 7px 11px 3px; border-top: 1px solid #e5e7eb; margin-top: 4px;
+    }
+    .col-menu .cm-radio-row { display: flex; gap: 12px; padding: 3px 11px 6px; }
+    .col-menu label.cm-inline { display: flex; align-items: center; gap: 5px; cursor: pointer; font-size: 0.78rem; }
+    .col-menu .cm-hint { padding: 2px 11px 6px; font-size: 0.7rem; color: #9ca3af; }
+
+    /* ── Active filter chips ──────────────────────────────────────────── */
+    /* A class that sets `display` outranks the UA sheet's [hidden]{display:none},
+       so the attribute alone left an empty bar on screen after Clear all. */
+    .crm-chip-row[hidden] { display: none; }
+    .crm-chip-row {
+      display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+      padding: 8px 10px; margin-bottom: 8px;
+      background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 7px;
+    }
+    .crm-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;
+      border-radius: 999px; padding: 2px 4px 2px 9px; font-size: 0.74rem;
+    }
+    .crm-chip button {
+      border: 0; background: none; cursor: pointer; color: #1e40af;
+      font-size: 0.85rem; line-height: 1; padding: 0 3px; border-radius: 50%;
+    }
+    .crm-chip button:hover { background: #bfdbfe; }
+    .crm-chip-clear {
+      margin-left: auto; cursor: pointer; font-size: 0.74rem;
+      color: #b91c1c; background: #fff; border: 1px solid #fecaca;
+      border-radius: 999px; padding: 3px 10px;
+    }
+    .crm-chip-clear:hover { background: #fef2f2; border-color: #fca5a5; }
+    .cd-prov { font-size: 0.72rem; color: #6b7280; margin: 2px 0 8px; line-height: 1.5; }
+    .cd-prov .cd-prov-k { color: #9ca3af; }
+    .cd-prov .cd-prov-paid { color: #b45309; }
+    .cd-prov .cd-prov-free { color: #15803d; }
+    .crm-acct-table col.ca-source   { width: 12%; }
+    .crm-acct-src { display: inline-flex; align-items: center; gap: 5px; font-size: 0.75rem; color: #6b7280; margin-left: auto; }
+    .ca-prov { font-size: 0.72rem; color: #6b7280; }
+    .crm-page-size { font-size: 0.78rem; padding: 3px 5px; border: 1px solid #d1d5db; border-radius: 5px; }
+    #crm-pagination { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding-top: 10px; }
     .crm-table .cell-primary, .crm-table .cell-sub { overflow-wrap: anywhere; }
+    /* The email cell is rebuilt wholesale by the enrichment code, so its
+       contents are a bare span rather than a .cell-primary and never picked
+       up the wrap rule above: a long address ran out of its column and over
+       the Activity cell next to it. */
+    .crm-table td[data-col-email], .crm-table td [id^="crm-email-cell-"] { overflow-wrap: anywhere; }
     .crm-table .cell-sub {
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden;
@@ -2103,9 +2219,13 @@
              is actually browsed by; the occasional fields sit behind
              "More filters"; everything applies immediately. ── -->
         <aside id="crm-sidebar">
+          <!-- No "Clear all" here any more: it sat next to the sidebar
+               fields but could not clear the column filters, while a second
+               identically-labelled control in the chip row could not clear
+               these. The chip row now lists every active filter and clears
+               all of them. -->
           <div class="crm-rail-head">
             <span>Filters</span>
-            <button type="button" class="crm-rail-clear" id="crm-clear-filters-btn">Clear all</button>
           </div>
 
           <div class="crm-rail-body">
@@ -2204,38 +2324,50 @@
 
         <!-- ── The record table ── -->
         <section class="crm-main-col">
-          <div id="crm-filter-summary"></div>
 
           <!-- Appears whenever the list is scoped to a single company: the
                moment the user is actually looking at "CATL, 23 contacts" is
                the moment to let them say "make it 40". -->
           <div class="crm-co-bar" id="crm-company-bar" hidden></div>
 
-          <!-- 9 columns, down from 13: title, phone, source and interaction
-               count now ride as secondary lines on the record they belong
-               to, which is how Salesforce/HubSpot list views read. -->
+          <!-- Active column filters, as removable chips. Sits directly above
+               the grid because it describes the grid: the answer to "why am
+               I only seeing 12 rows" should never be more than one glance
+               away from the rows themselves. -->
+          <div id="crm-chip-row" class="crm-chip-row" hidden data-no-i18n></div>
+
+          <!-- The data grid. Each header carries an Excel-style filter menu
+               (▼) scoped to that column; they AND together, and the sidebar
+               ANDs on top of all of them. Filtering, sorting and paging all
+               run server-side — the browser holds one page, never the table. -->
           <div class="table-wrap">
             <table class="company-table crm-table">
               <colgroup>
                 <col class="c-check"><col class="c-contact"><col class="c-company"><col class="c-email">
-                <col class="c-activity"><col class="c-tags"><col class="c-status"><col class="c-actions">
+                <col class="c-activity"><col class="c-tags"><col class="c-status"><col class="c-source"><col class="c-actions">
               </colgroup>
               <thead>
-                <tr>
+                <tr id="crm-thead-row">
                   <th class="col-check"><input type="checkbox" id="crm-select-all" title="Select all on this page"></th>
-                  <th>Contact</th>
-                  <th>Company</th>
-                  <th>Email</th>
-                  <th>Activity</th>
-                  <th>Tags</th>
-                  <th>Status</th>
-                  <th class="col-actions">Draft</th>
+                  <th data-col="contact"><span class="th-label">Contact</span><span class="th-sort"></span><button type="button" class="th-filter" data-col="contact" title="Filter and sort 筛选与排序" aria-label="Filter Contact">▾</button></th>
+                  <th data-col="company"><span class="th-label">Company</span><span class="th-sort"></span><button type="button" class="th-filter" data-col="company" title="Filter and sort 筛选与排序" aria-label="Filter Company">▾</button></th>
+                  <th data-col="email"><span class="th-label">Email</span><span class="th-sort"></span><button type="button" class="th-filter" data-col="email" title="Filter and sort 筛选与排序" aria-label="Filter Email">▾</button></th>
+                  <th data-col="activity"><span class="th-label">Activity</span><span class="th-sort"></span><button type="button" class="th-filter" data-col="activity" title="Filter and sort 筛选与排序" aria-label="Filter Activity">▾</button></th>
+                  <th data-col="tags"><span class="th-label">Tags</span><span class="th-sort"></span><button type="button" class="th-filter" data-col="tags" title="Filter and sort 筛选与排序" aria-label="Filter Tags">▾</button></th>
+                  <th data-col="status"><span class="th-label">Status</span><span class="th-sort"></span><button type="button" class="th-filter" data-col="status" title="Filter and sort 筛选与排序" aria-label="Filter Status">▾</button></th>
+                  <th data-col="source"><span class="th-label">Source</span><span class="th-sort"></span><button type="button" class="th-filter" data-col="source" title="Filter and sort 筛选与排序" aria-label="Filter Source">▾</button></th>
+                  <th class="col-actions" data-col="draft"><span class="th-label">Draft</span><span class="th-sort"></span><button type="button" class="th-filter" data-col="draft" title="Filter and sort 筛选与排序" aria-label="Filter Draft">▾</button></th>
                 </tr>
               </thead>
               <tbody id="crm-tbody"></tbody>
             </table>
           </div>
-          <div id="crm-pagination"></div>
+          <div id="crm-pagination" data-no-i18n></div>
+
+          <!-- One popover, reused by every column: only one filter menu can
+               be open at a time, so one node keeps the DOM flat and the
+               outside-click handling single-cased. -->
+          <div id="crm-col-menu" class="col-menu" hidden data-no-i18n></div>
         </section>
 
       </div><!-- /crm-layout -->
@@ -2266,17 +2398,25 @@
           <button type="button" class="crm-acct-filter" data-acct-filter="not-analyzed">Not analyzed</button>
           <button type="button" class="crm-acct-filter" data-acct-filter="needs-review">Tags need review</button>
           <button type="button" class="crm-acct-filter" data-acct-filter="ready">Ready</button>
+          <!-- Discovery provenance, as its own control: it answers a
+               different question from the state filters beside it ("where did
+               this come from" vs "what needs doing next"), and it is the one
+               the audit conversation starts from. -->
+          <label class="crm-acct-src" data-no-i18n>
+            Company source 公司来源
+            <select id="crm-acct-source" class="crm-page-size"><option value="">All 全部</option></select>
+          </label>
         </div>
 
         <div class="table-wrap">
           <table class="company-table crm-acct-table">
             <colgroup>
-              <col class="ca-name"><col class="ca-industry"><col class="ca-contacts">
+              <col class="ca-name"><col class="ca-industry"><col class="ca-source"><col class="ca-contacts">
               <col class="ca-analysis"><col class="ca-tags"><col class="ca-next">
             </colgroup>
             <thead>
               <tr>
-                <th>Company</th><th>Industry</th><th>Contacts</th>
+                <th>Company</th><th>Industry</th><th>Source</th><th>Contacts</th>
                 <th>AI analysis</th><th>Tags</th><th>Next step</th>
               </tr>
             </thead>
@@ -2332,7 +2472,7 @@
         <button class="modal-close" data-crm-discover-close>&times;</button>
         <h2>Find contacts</h2>
         <div class="contact-info">
-          Searches Apollo and saves matching contacts into your CRM for review — it does not draft emails.<br><span class="i18n-zh" style="margin-left:0;">搜索 Apollo 并将匹配的联系人保存到 CRM 供你审阅 —— 不会自动生成邮件。</span>
+          Searches Apollo and saves matching contacts into your CRM for review — it does not draft emails.
         </div>
 
         <div class="search-row">
@@ -2352,12 +2492,12 @@
             <div>
               <label for="search-per-company-limit">Target contacts per company</label>
               <input type="number" id="search-per-company-limit" value="25" min="1" max="500" />
-              <div class="crm-field-hint">How many you want to end up with. Contacts you already have count toward it.<br>你希望最终达到的数量，已有联系人计入其中。</div>
+              <div class="crm-field-hint">How many you want to end up with. Contacts you already have count toward it.</div>
             </div>
             <div>
               <label for="search-max-total">Maximum new contacts (all companies)</label>
               <input type="number" id="search-max-total" value="100" min="1" max="2000" />
-              <div class="crm-field-hint">Safety cap on this one run. 本次运行的安全上限。</div>
+              <div class="crm-field-hint">Safety cap on this one run.</div>
             </div>
           </div>
 
@@ -2406,8 +2546,8 @@
     <div class="modal-overlay" id="crm-topup-modal">
       <div class="modal">
         <button class="modal-close" data-topup-close>&times;</button>
-        <h2>Add more contacts</h2>
-        <div class="contact-info">
+        <h2 id="topup-title">Add more contacts</h2>
+        <div class="contact-info" id="topup-subtitle">
           Pulls additional contacts from Apollo for one company and appends them.
           Existing contacts, drafts, tags, notes and history are never changed.
           <br><span class="i18n-zh" style="margin-left:0;">为某一家公司从 Apollo 补充更多联系人并追加到 CRM。已有联系人、草稿、标签、备注与历史记录不会被修改。</span>
@@ -2450,7 +2590,7 @@
       <div class="modal">
         <button class="modal-close" data-newco-close>&times;</button>
         <h2>New company</h2>
-        <div class="contact-info">Creates a CRM account you can analyze and staff with contacts straight away.<br><span class="i18n-zh" style="margin-left:0;">创建一个 CRM 账户，可立即进行分析并添加联系人。</span></div>
+        <div class="contact-info">Creates a CRM account you can analyze and staff with contacts straight away.</div>
         <div class="input-wrap" style="margin-bottom:10px;">
           <label for="newco-name">Company name <span style="color:#9ca3af">(required)</span></label>
           <input type="text" id="newco-name" placeholder="e.g. Acme Battery Materials" autocomplete="off">
@@ -2752,6 +2892,12 @@
           <span style="font-size:0.75rem;font-weight:600;color:#6b7280;min-width:48px;">Email</span>
           <span id="cd-email-display" style="font-size:0.85rem;color:#374151;"></span>
         </div>
+        <!-- Provenance: where the contact came from, and separately where the
+             address came from. They differ often enough to be worth two lines
+             (a Battery Show contact can hold an Apollo-revealed address), and
+             the second line is what tells the user whether a credit was
+             spent on it. -->
+        <div id="cd-provenance" class="cd-prov" data-no-i18n></div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
           <span style="font-size:0.75rem;font-weight:600;color:#6b7280;">Communication timeline</span>
           <span id="cd-timeline-count" style="font-size:0.7rem;color:#9ca3af;"></span>
@@ -2911,6 +3057,25 @@
 </div>
 
 <!-- ── Unsaved changes confirm ── -->
+<!-- ── Discard-changes confirm for workflow dialogs ──────────────────────
+     Find contacts / Add more contacts / New company are multi-step
+     configuration, not confirmations, so closing one must be deliberate.
+     Distinct from #unsaved-changes-modal, which offers to SAVE a draft —
+     there is nothing to save here, only to keep or abandon. -->
+<div class="modal-overlay" id="discard-changes-modal">
+  <div class="modal" style="max-width:420px;">
+    <h2>Discard your changes?</h2>
+    <p style="font-size:0.85rem;color:#374151;margin-bottom:4px;" id="discard-changes-text">
+      You've configured this dialog but haven't run it yet. Closing will discard those settings.
+    </p>
+    <p style="font-size:0.8rem;color:#9ca3af;">关闭将丢弃你在此对话框中的设置。</p>
+    <div class="modal-actions">
+      <button class="btn-primary btn-sm" id="discard-keep-btn">Keep editing</button>
+      <button class="btn-sm btn-danger" id="discard-confirm-btn">Discard and close</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="unsaved-changes-modal">
   <div class="modal" style="max-width:400px;">
     <h2>You have unsaved changes</h2>

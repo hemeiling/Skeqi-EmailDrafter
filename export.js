@@ -1,6 +1,51 @@
 const ExcelJS = require('exceljs');
 const { CRM_FIELDS } = require('./leads');
 
+/* Email cells in an export must say something a salesperson can act on.
+
+   Apollo's own value for "we have one but won't hand it over" is
+   "(email available via Apollo, not returned in payload)", which in a
+   spreadsheet reads as an instruction to go back to Apollo and click
+   Reveal on every row. Exports now resolve addresses first; anything still
+   unresolved is stated plainly as unavailable rather than as a placeholder
+   that looks like a to-do. */
+const EMAIL_UNAVAILABLE = 'Email not available 邮箱不可用';
+
+function exportEmail(value) {
+  const v = String(value === undefined || value === null ? '' : value).trim();
+  if (!v) return EMAIL_UNAVAILABLE;
+  if (v.startsWith('(') || v.includes('N/A') || v.toLowerCase().includes('available via apollo')) {
+    return EMAIL_UNAVAILABLE;
+  }
+  return v;
+}
+
+/* Provenance, spelled out rather than exported as a raw key. A column
+   reading "apollo_enrichment" is a database value; "Apollo enrichment" is
+   an answer to "did this address cost us anything". */
+const { CONTACT_SOURCES, EMAIL_SOURCES, COMPANY_SOURCES } = require('./contact-query');
+const label = (list) => Object.fromEntries(list.map((o) => [o.key, `${o.label} ${o.label_cn}`]));
+const SOURCE_LABEL = label(CONTACT_SOURCES);
+const EMAIL_SOURCE_LABEL = label(EMAIL_SOURCES);
+const COMPANY_SOURCE_LABEL = label(COMPANY_SOURCES);
+
+function sourceLabel(v) { return SOURCE_LABEL[v] || v || 'Not recorded 未记录'; }
+function companySourceLabel(v) { return COMPANY_SOURCE_LABEL[v] || v || 'Not recorded 未记录'; }
+function emailSourceLabel(contact) {
+  const key = contact.email_source || (contact.email ? 'legacy' : 'none');
+  return EMAIL_SOURCE_LABEL[key] || key;
+}
+
+// Field-aware cell value, so every export format agrees on what an email is.
+function exportValue(contact, field) {
+  const raw = contact[field];
+  if (field === 'email') return exportEmail(raw);
+  if (field === 'source') return sourceLabel(raw);
+  if (field === 'company_source') return companySourceLabel(raw);
+  if (field === 'email_source') return emailSourceLabel(contact);
+  return raw;
+}
+
 function csvEscape(value) {
   const s = value === undefined || value === null ? '' : String(value);
   if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
@@ -10,7 +55,7 @@ function csvEscape(value) {
 function contactsToCsv(contacts, fields) {
   const lines = [fields.join(',')];
   for (const c of contacts) {
-    lines.push(fields.map((f) => csvEscape(c[f])).join(','));
+    lines.push(fields.map((f) => csvEscape(exportValue(c, f))).join(','));
   }
   return lines.join('\n');
 }
@@ -21,9 +66,9 @@ function xmlEscape(value) {
 }
 
 function contactsToXml(contacts) {
-  const fields = [...CRM_FIELDS, 'company'];
+  const fields = [...CRM_FIELDS, 'company', 'company_source', 'source', 'email_source'];
   const rows = contacts.map((c) => {
-    const inner = fields.map((f) => `    <${f}>${xmlEscape(c[f])}</${f}>`).join('\n');
+    const inner = fields.map((f) => `    <${f}>${xmlEscape(exportValue(c, f))}</${f}>`).join('\n');
     return `  <contact>\n${inner}\n  </contact>`;
   }).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>\n<contacts>\n${rows}\n</contacts>`;
@@ -35,9 +80,15 @@ async function contactsToXlsx(contacts) {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Contacts');
 
-  let headers = ['Name', 'Title', 'Department', 'Company', 'Email', 'LinkedIn', 'Confidence', 'Relevance', 'Location'];
-  let fields = ['name', 'title', 'department', 'company', 'email', 'linkedin', 'confidence', 'relevance', 'location'];
-  let widths = [28, 34, 22, 28, 38, 42, 13, 22, 22];
+  // The provenance chain sits together, in the order it happened, rather
+  // than being scattered across the sheet.
+  let headers = ['Name', 'Title', 'Department', 'Company', 'Email',
+                 'Company Source 公司来源', 'Contact Source 联系人来源', 'Email Source 邮箱来源',
+                 'LinkedIn', 'Confidence', 'Relevance', 'Location'];
+  let fields = ['name', 'title', 'department', 'company', 'email',
+                'company_source', 'source', 'email_source',
+                'linkedin', 'confidence', 'relevance', 'location'];
+  let widths = [28, 34, 22, 28, 38, 24, 22, 26, 42, 13, 22, 22];
 
   const hasDrafts = contacts.some((c) => c.draft_subject);
   if (hasDrafts) {
@@ -59,7 +110,7 @@ async function contactsToXlsx(contacts) {
   const draftFieldSet = new Set(['draft_subject', 'draft_body', 'draft_followup', 'draft_rationale']);
 
   contacts.forEach((contact, idx) => {
-    const rowValues = fields.map((f) => contact[f] ?? '');
+    const rowValues = fields.map((f) => exportValue(contact, f) ?? '');
     const row = ws.addRow(rowValues);
     const isEvenRow = (idx + 2) % 2 === 0;
 
