@@ -51,6 +51,24 @@ function initAppShell() {
   document.querySelectorAll(".app-nav-item").forEach((item) => {
     item.addEventListener("click", () => showView(item.dataset.navView));
   });
+
+  /* The logo and product name are global Home controls, as in Salesforce,
+     HubSpot, Microsoft 365 and Jira. Both are keyboard-operable because
+     role="button" promises that: a screen-reader user told "button" and
+     given nothing on Enter is worse served than one told nothing at all.
+
+     Views are hidden rather than torn down, and filter state lives in JS,
+     so leaving the CRM and coming back preserves the search, filters,
+     selection, paging and open tab exactly as they were. */
+  const goHome = () => showView("home");
+  ["app-brand-home", "app-title-home"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("click", goHome);
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goHome(); }
+    });
+  });
   // Dashboard cards and "查看全部" links are navigation too.
   document.querySelectorAll("[data-goto]").forEach((el) => {
     el.addEventListener("click", () => showView(el.dataset.goto));
@@ -297,6 +315,11 @@ async function loadSenderProfile() {
       document.getElementById("sender-name").value = _sender.name || "";
       document.getElementById("sender-title").value = _sender.title || "";
       document.getElementById("sender-company").value = _sender.company || "";
+      const ph = document.getElementById("sender-phone"); if (ph) ph.value = _sender.phone || "";
+      const wb = document.getElementById("sender-website"); if (wb) wb.value = _sender.website || "";
+      // Read-only: the address always follows the connected mailbox.
+      const em = document.getElementById("sender-email-display");
+      if (em) em.value = _sender.email || "(connect a mailbox in My Email Account)";
       updateUserMenuFromSender();
     }
   } catch (e) { /* silent */ }
@@ -307,6 +330,8 @@ function saveSender() {
   _sender.name    = document.getElementById("sender-name").value.trim();
   _sender.title   = document.getElementById("sender-title").value.trim();
   _sender.company = document.getElementById("sender-company").value.trim();
+  _sender.phone   = document.getElementById("sender-phone")?.value.trim() || "";
+  _sender.website = document.getElementById("sender-website")?.value.trim() || "";
   updateUserMenuFromSender();
   clearTimeout(_senderSaveTimeout);
   _senderSaveTimeout = setTimeout(() => {
@@ -316,8 +341,8 @@ function saveSender() {
     }).catch(() => {});
   }, 400);
 }
-["sender-name", "sender-title", "sender-company"].forEach(id => {
-  document.getElementById(id).addEventListener("input", saveSender);
+["sender-name", "sender-title", "sender-company", "sender-phone", "sender-website"].forEach(id => {
+  document.getElementById(id)?.addEventListener("input", saveSender);
 });
 
 /* ── CSV / Excel Upload ── */
@@ -690,7 +715,7 @@ function renderContacts(contacts, companyLabel) {
             <th>Location</th><th>Action</th>
           </tr>
         </thead>
-        <tbody>${rows}</tbody>
+        <tbody data-no-i18n>${rows}</tbody>
       </table>
     </div>`;
 
@@ -716,7 +741,7 @@ function renderOrgFallback(orgs) {
     <div class="table-wrap">
       <table class="org-table">
         <thead><tr><th>Organization</th><th>Domain</th><th>Industry</th><th>Founded</th><th>Employees (est.)</th></tr></thead>
-        <tbody>${rows}</tbody>
+        <tbody data-no-i18n>${rows}</tbody>
       </table>
     </div>`;
 }
@@ -870,9 +895,10 @@ async function openDraftModalForContact(contact, refreshFn, options = {}) {
   document.getElementById("modal-contact-info").textContent =
     `${contact.title || ""} · ${contact.company || ""} · ${contact.department || ""}`;
   document.getElementById("modal-extra-instructions").value = "";
+  document.getElementById("modal-extra-instructions").oninput = refreshPromptInspectorSoon;
   // Re-rendered per open so it reflects options changed elsewhere (e.g. in
   // the bulk bar) since this modal was last shown.
-  renderDraftOptions(document.getElementById("modal-draft-options"), "modal");
+  renderDraftOptions(document.getElementById("modal-draft-options"), "modal", refreshPromptInspectorSoon);
   openModal("email-modal");
   loadModalIntel(contact); // saved company intelligence + tags used in generation (no AI)
   loadEmailSendStatus();    // show the "sending not configured yet" banner if applicable
@@ -980,6 +1006,8 @@ async function requestDraft(contact, mode, extraInstructions, regenerate) {
         mode, extraInstructions, regenerate: Boolean(regenerate),
         includeTagIds: getModalIncludeTagIds(),
         options: currentDraftOptions(),
+        skqSelected: getModalSkqSelection(),
+        promptSections: currentPromptSections(),
       }),
     });
     const d = await r.json();
@@ -1215,10 +1243,16 @@ function renderDraftEditor(comm, contact) {
   // Sender identity: connected account name → profile name → email only. Never
   // a placeholder. If no mailbox is connected, say so.
   const fromName = senderDisplayName();
-  const fromLine = _connectedEmail
+  // _connectedEmail is filled by loadEmailSendStatus(), which may not have
+  // returned yet when the editor first renders — so a connected mailbox was
+  // being reported as "not connected". The sender profile carries the same
+  // address (it is read from the connected account server-side), so use it
+  // as the fallback before claiming there is no mailbox.
+  const fromEmail = _connectedEmail || (_sender && _sender.email) || "";
+  const fromLine = fromEmail
     ? (fromName
-        ? `${escapeHtml(fromName)} <span class="compose-from-email">&lt;${escapeHtml(_connectedEmail)}&gt;</span>`
-        : `<span class="compose-from-email">${escapeHtml(_connectedEmail)}</span>`)
+        ? `${escapeHtml(fromName)} <span class="compose-from-email">&lt;${escapeHtml(fromEmail)}&gt;</span>`
+        : `<span class="compose-from-email">${escapeHtml(fromEmail)}</span>`)
     : `<span class="compose-from-warn">Mailbox not connected — set it up in Settings</span>`;
 
   document.getElementById("modal-body").innerHTML = `
@@ -1255,7 +1289,10 @@ function renderDraftEditor(comm, contact) {
     </div>
 
     <div class="draft-section">
-      <textarea class="draft-field draft-body" id="draft-field-body" rows="11" placeholder="Write your email…">${escapeHtml(comm.body || "")}</textarea>
+      <!-- Separates the envelope from the message, so a missing greeting or
+           signature is obvious at a glance. -->
+      <div class="compose-divider"></div>
+      <textarea class="draft-field draft-body" id="draft-field-body" rows="16" placeholder="Write your email…">${escapeHtml(comm.body || "")}</textarea>
     </div>
 
     <div class="draft-section">
@@ -2820,7 +2857,12 @@ async function loadCrmContacts(query, filterPatch) {
     renderCrmFilterSummary();
     renderCrmCompanyBar();
     autoEnrichCrmPage();
-  } catch (e) { /* silent */ }
+  } catch (e) {
+    // Not silent: these renders run in sequence, so a throw in an early one
+    // skips every later one. Swallowing it hid a missing constant that had
+    // quietly killed the filter chips and the active-company bar.
+    console.error("loadCrmContacts:", e);
+  }
 }
 
 /* ── Quick Browse: a cascade, not five independent filters ────────────────
@@ -2975,18 +3017,16 @@ function renderCrmCompanyList() {
     return `
       <div class="crm-co-item${active.has(lc(c.name)) ? " active" : ""}" data-cid="${c.id}" title="${escapeHtml(c.name)}${c.booth ? " · 展位 " + escapeHtml(c.booth) : ""}">
         <div class="crm-co-top">
-          <span class="crm-co-name">${escapeHtml(c.chinese_name || c.name)}</span>
+          <span class="crm-co-name" data-no-i18n>${escapeHtml(c.chinese_name || c.name)}</span>
           ${c.booth ? `<span class="crm-co-booth">${escapeHtml(c.booth)}</span>` : ""}
           <span class="crm-co-n ${n ? "has" : "none"}">${n}</span>
         </div>
         <div class="crm-co-tools">
-          ${c.booth ? `<button class="crm-co-tool" data-act="map" data-cid="${c.id}" title="在展位图中定位">🗺</button>` : ""}
-          <button class="crm-co-tool" data-act="fill" data-cid="${c.id}" title="填入搜索框">⬆</button>
-          ${n ? `<button class="crm-co-tool" data-act="view" data-cid="${c.id}" title="查看 ${n} 位联系人">👥</button>` : ""}
+          ${c.booth ? `<button class="crm-co-tool" data-act="map" data-cid="${c.id}" title="Locate on the booth map">🗺</button>` : ""}
         </div>
       </div>`;
   }).join("") + (list.length > shown.length
-    ? `<div style="padding:6px;font-size:0.68rem;color:#9ca3af;">Showing the first ${shown.length} — narrow with the search above</div>`
+    ? `<div style="padding:6px;font-size:0.68rem;color:#9ca3af;">Showing the first ${shown.length} — narrow with the search above<br>仅显示前 ${shown.length} 家，请用上方搜索缩小范围</div>`
     : "");
 
   const find = (el) => _crmCompanies.find((c) => c.id === Number(el.dataset.cid));
@@ -3004,8 +3044,6 @@ function renderCrmCompanyList() {
     const co = find(b);
     if (!co) return;
     if (b.dataset.act === "map") openCompanyOnMap(co);
-    else if (b.dataset.act === "fill") fillCompanyIntoSearch(co);
-    else setCrmAccounts([co.name], { toggle: true });
   }));
 }
 
@@ -3066,50 +3104,31 @@ async function refreshCrmCompanies() {
   renderCrmCompanyList();
 }
 
-// Drops the company into the existing Search Companies box rather than firing
-// Apollo directly — you stay in control of when a search (and its credits) runs,
-// and it reuses the pipeline that already handles dedupe and company linking.
-function fillCompanyIntoSearch(co) {
-  const input = document.getElementById("company-input");
-  if (!input) return;
-  // That box treats commas as the separator between companies, so a name that
-  // contains one ("AGC Chemicals Americas, Inc.") has to be flattened first —
-  // otherwise the tail is searched, and filed, as a company of its own.
-  const clean = co.name.replace(/,/g, " ").replace(/\s+/g, " ").trim();
-  const existing = input.value.split(",").map((s) => s.trim()).filter(Boolean);
-  if (!existing.some((e) => lc(e) === lc(clean))) {
-    existing.push(clean);
-    input.value = existing.join(", ");
-  }
-  input.scrollIntoView({ behavior: "smooth", block: "center" });
-  input.focus();
-  input.style.transition = "box-shadow .2s, border-color .2s";
-  input.style.boxShadow = "0 0 0 3px rgba(78,42,132,0.25)";
-  input.style.borderColor = "var(--color-primary)";
-  setTimeout(() => { input.style.boxShadow = ""; input.style.borderColor = ""; }, 1400);
-}
-
 /* Active-filter chips.
 
    The old summary reported only the account filter, which meant the table
-   could be narrowed by five other things with nothing on screen saying so —
-   the direct cause of "why am I seeing 26 contacts?". Every applied filter
-   now gets a chip, and every chip can be removed from where it is shown.
-   Chips clear a whole group; the rail is still where individual values are
-   added and removed. */
+   could be narrowed by five other things with nothing on screen saying so.
+   Every applied filter now gets a chip, and every chip can be removed from
+   where it is shown. Chips clear a whole group; the rail is where individual
+   values are added and removed. */
 const CRM_FILTER_CHIPS = [
-  { key: "accounts",            label: "Company",   list: true,
+  { key: "accounts", label: "Company", list: true,
     clear: () => { setCrmAccounts([]); return null; } },
-  { key: "show_event",          label: "Show",      clear: () => { _qbShow = ""; _qbCats = []; return null; } },
-  { key: "booth_categories",    label: "Category",  list: true,  clear: () => { _qbCats = []; return null; },
+  { key: "show_event", label: "Show",
+    clear: () => { _qbShow = ""; _qbCats = []; return null; } },
+  { key: "booth_categories", label: "Category", list: true,
+    clear: () => { _qbCats = []; return null; },
     describe: (keys) => keys.map((k) => (BOOTH_CATEGORY_META[k] || [k])[0]) },
-  { key: "event",               label: "Event",     input: "crm-filter-event" },
-  { key: "industry",            label: "Industry",  input: "crm-filter-industry" },
-  { key: "follow_up_status",    label: "Status",    input: "crm-filter-status", describe: (v) => [String(v).replace(/_/g, " ")] },
-  { key: "assigned_salesperson", label: "Owner",    input: "crm-filter-owner" },
-  { key: "department_categories", label: "Department", list: true, clear: () => { deptSelect.clearAll(); return { department_categories: [] }; },
+  { key: "event", label: "Event", input: "crm-filter-event" },
+  { key: "industry", label: "Industry", input: "crm-filter-industry" },
+  { key: "follow_up_status", label: "Status", input: "crm-filter-status",
+    describe: (v) => [String(v).replace(/_/g, " ")] },
+  { key: "assigned_salesperson", label: "Owner", input: "crm-filter-owner" },
+  { key: "department_categories", label: "Department", list: true,
+    clear: () => { deptSelect.clearAll(); return { department_categories: [] }; },
     describe: (keys) => keys.map((k) => (_departmentOptions.find((d) => d.key === k) || {}).label || k) },
-  { key: "seniority_levels",    label: "Seniority", list: true,  clear: () => { senioritySelect.clearAll(); return { seniority_levels: [] }; },
+  { key: "seniority_levels", label: "Seniority", list: true,
+    clear: () => { senioritySelect.clearAll(); return { seniority_levels: [] }; },
     describe: (keys) => keys.map((k) => (_seniorityOptions.find((d) => d.key === k) || {}).label || k) },
 ];
 
@@ -3124,7 +3143,7 @@ function renderCrmFilterSummary() {
     if (!values.length) return;
     const shown = f.describe ? f.describe(values) : values;
     const text = shown.length > 2 ? `${shown[0]} +${shown.length - 1}` : shown.join(", ");
-    chips.push(`<span class="crm-fchip"><b>${escapeHtml(f.label)}:</b><span>${escapeHtml(text)}</span>
+    chips.push(`<span class="crm-fchip"><b>${escapeHtml(f.label)}:</b><span data-no-i18n>${escapeHtml(text)}</span>
       <button type="button" data-fkey="${f.key}" title="Remove this filter">&times;</button></span>`);
   });
 
@@ -3140,6 +3159,19 @@ function renderCrmFilterSummary() {
    the company name again — while the user was already looking at that exact
    company's list. When the list is scoped to one company this states what
    they hold and offers to change it, pre-filled. */
+/* The active company.
+
+   Selecting a company in Matching companies makes it the working context,
+   and this bar is that context made visible: who it is, what is known about
+   it, and the two things you can do next. Previously the row offered a "fill
+   into search" button that wrote into a field inside a closed dialog, so it
+   appeared to do nothing at all — the capability existed but the path to it
+   was invisible.
+
+   Research and contacts are deliberately side by side. They are two
+   capabilities acting on one company, not two separate workflows, and which
+   one comes first depends on what the account is missing — so the bar says
+   which that is rather than making the user work it out. */
 function renderCrmCompanyBar() {
   const bar = document.getElementById("crm-company-bar");
   if (!bar) return;
@@ -3148,18 +3180,49 @@ function renderCrmCompanyBar() {
 
   const name = accounts[0];
   const n = _crmContacts.length;
+  // Analysis state comes from the company summaries the Companies tab uses;
+  // if they aren't loaded yet, fetch them and re-render rather than guessing.
+  const meta = _crmAccounts.find((c) => lc(c.name) === lc(name));
+  if (!meta && !_crmAccounts.length) { loadCrmAccounts().then(renderCrmCompanyBar); }
+
+  const analyzed = meta ? (Boolean(meta.ai_analyzed_at) || meta.has_summary || meta.tag_count > 0) : null;
+  const tagCount = meta ? (meta.tag_count || 0) : 0;
+
+  // Exactly one recommendation, matching the account record page's logic.
+  let hint = "";
+  if (analyzed === false) hint = `Not researched yet — start with Research company. 尚未研究`;
+  else if (n === 0) hint = `No contacts yet — import them from Apollo. 暂无联系人`;
+  else if (analyzed && tagCount && meta && !meta.confirmed_count) hint = `${tagCount} tags awaiting review. 个标签待确认`;
+
+  const bits = [
+    `${n} contact${n !== 1 ? "s" : ""} 位联系人`,
+    analyzed === null ? "" : (analyzed ? `analyzed 已分析${tagCount ? ` · ${tagCount} tags 个标签` : ""}` : "not analyzed 未分析"),
+  ].filter(Boolean);
+
   bar.innerHTML = `
-    <span class="crm-co-bar-name">${escapeHtml(name)}</span>
-    <span class="crm-co-bar-meta">${n} contact${n !== 1 ? "s" : ""} in your CRM</span>
+    <span class="crm-co-bar-name" data-no-i18n>${escapeHtml(name)}</span>
+    <span class="crm-co-bar-meta">${bits.join(" · ")}</span>
+    ${hint ? `<span class="crm-co-bar-hint">${escapeHtml(hint)}</span>` : ""}
     <span class="crm-co-bar-actions">
-      <button type="button" class="btn-sm btn-primary" id="crm-co-bar-more">Get more contacts</button>
+      <button type="button" class="btn-sm btn-ghost" id="crm-co-bar-research">Research company</button>
+      <button type="button" class="btn-sm btn-primary" id="crm-co-bar-more">${n ? "Add more contacts" : "Import contacts"}</button>
     </span>`;
   bar.hidden = false;
+
+  // Company Intelligence for this exact company — the same record page the
+  // Companies tab opens, so there is one place an account is worked.
+  document.getElementById("crm-co-bar-research")?.addEventListener("click", async () => {
+    if (!_crmAccounts.length) await loadCrmAccounts();
+    const co = _crmAccounts.find((c) => lc(c.name) === lc(name));
+    if (co) openCrmAccount(co.id, co.name);
+    else showMessage(`No saved company record for “${name}” yet.`, "warn");
+  });
+
   document.getElementById("crm-co-bar-more")?.addEventListener("click", () => {
-    // Open on a useful target rather than one that would retrieve nothing.
-    const t = document.getElementById("search-per-company-limit");
-    if (t && Number(t.value) <= n) t.value = Math.min(500, n + 25);
-    openCrmDiscoverModal(name);
+    // Open on a target that would actually fetch something.
+    const t = document.getElementById("topup-target");
+    if (t) t.value = Math.min(500, Math.max(Number(t.value) || 0, n + 25));
+    openCrmTopupModal(name);
   });
 }
 
@@ -3257,7 +3320,7 @@ function renderCrmTable(contacts) {
   const pageSlice = contacts.slice(pageStart, pageEnd);
 
   document.getElementById("crm-count").textContent =
-    `${total} contact${total !== 1 ? "s" : ""}`;
+    `${total} contact${total !== 1 ? "s" : ""} 位联系人`;
 
   if (!total) {
     document.getElementById("crm-tbody").innerHTML = `
@@ -3304,23 +3367,23 @@ function renderCrmTable(contacts) {
     // autoEnrichCrmPage() replaces its contents wholesale.
     return `<tr>
       <td class="col-check"><input type="checkbox" class="crm-check" data-idx="${i}"></td>
-      <td>
+      <td data-no-i18n>
         <div class="cell-primary" style="font-weight:600;">${escapeHtml(c.full_name || "Unnamed")}</div>
         ${c.job_title ? `<div class="cell-sub">${escapeHtml(c.job_title)}</div>` : ""}
       </td>
-      <td>
+      <td data-no-i18n>
         <div class="cell-primary">${escapeHtml(c.company || "—")}</div>
         <div class="cell-sub"><span class="badge badge-source">${escapeHtml(c.source || "manual")}</span></div>
       </td>
       <td>
-        <div id="crm-email-cell-${i}">${emailCell}</div>
+        <div id="crm-email-cell-${i}" data-no-i18n>${emailCell}</div>
         ${c.phone ? `<div class="cell-sub">${escapeHtml(c.phone)}</div>` : ""}
       </td>
       <td>
         <div class="cell-primary cell-nowrap">${lastActivity}${lastType}</div>
         <div class="cell-sub">${commCount ? `${commCount} interaction${commCount !== 1 ? "s" : ""}${commDraftCount ? ` · ${commDraftCount} draft${commDraftCount !== 1 ? "s" : ""}` : ""}` : "No interactions"}</div>
       </td>
-      <td><input type="text" class="crm-tags-input" data-id="${c.id}" value="${escapeAttr(c.tags || "")}"
+      <td data-no-i18n><input type="text" class="crm-tags-input" data-id="${c.id}" value="${escapeAttr(c.tags || "")}"
             style="font-size:12px;padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;" placeholder="tags…"></td>
       <td>
         <select class="crm-status-select" data-id="${c.id}" style="font-size:12px;padding:3px 4px;border:1px solid #d1d5db;border-radius:4px;">
@@ -3368,7 +3431,7 @@ function renderCrmPagination(total, totalPages) {
   if (totalPages <= 1) { el.innerHTML = ""; return; }
   el.innerHTML = `
     <button class="btn-sm btn-ghost" id="crm-prev-btn" ${_crmPage <= 1 ? "disabled" : ""}>← Prev</button>
-    <span style="font-size:0.85rem;color:#555;">Page ${_crmPage} of ${totalPages}</span>
+    <span style="font-size:0.85rem;color:#555;">Page 第 ${_crmPage} / ${totalPages} 页</span>
     <button class="btn-sm btn-ghost" id="crm-next-btn" ${_crmPage >= totalPages ? "disabled" : ""}>Next →</button>`;
   document.getElementById("crm-prev-btn").addEventListener("click", () => {
     if (_crmPage > 1) { _crmPage--; renderCrmTable(_crmContacts); autoEnrichCrmPage(); }
@@ -3658,6 +3721,9 @@ function crmRowToDraftFormat(c) {
   return {
     name: c.full_name, title: c.job_title, company: c.company, department: c.department,
     email: c.email, linkedin: c.linkedin_url, contact_id: c.id, apollo_id: c.apollo_person_id,
+    // Carried separately because Apollo masks surnames ("Dory Tu***g"): the
+    // greeting rule needs a clean first name, not the display name.
+    first_name: c.first_name, last_name: c.last_name,
   };
 }
 
@@ -4083,7 +4149,7 @@ function renderCrmPlan(plans) {
         : `How many more Apollo holds is unknown until the first search.`;
       return `
       <div class="crm-plan-row">
-        <div class="crm-plan-co">${escapeHtml(p.company)}${p.known ? "" : `<span class="crm-plan-new">not yet in your CRM</span>`}</div>
+        <div class="crm-plan-co">${escapeHtml(p.company)}${p.known ? "" : `<span class="crm-plan-new">not yet in your CRM 尚未加入 CRM</span>`}</div>
         <div class="crm-plan-math">
           <span class="crm-plan-num"><b>${p.current}</b><span>now</span></span>
           <span class="crm-plan-op">→</span>
@@ -4281,14 +4347,14 @@ function renderCrmAccounts() {
         ? `<span class="ca-ok">Analyzed</span><div class="cell-sub">date not recorded</div>`
         : `<span class="ca-none">Not analyzed</span>`;
     const tags = a.tag_count
-      ? `${a.tag_count} tag${a.tag_count !== 1 ? "s" : ""}<div class="cell-sub">${a.confirmed_count ? `${a.confirmed_count} confirmed` : "none confirmed"}</div>`
+      ? `${a.tag_count} tag${a.tag_count !== 1 ? "s" : ""} 个标签<div class="cell-sub">${a.confirmed_count ? `${a.confirmed_count} confirmed 个已确认` : "none confirmed 无已确认"}</div>`
       : `<span class="ca-none">—</span>`;
     return `<tr class="crm-acct-row" data-acct-id="${a.id}" data-acct-name="${escapeAttr(a.name)}">
-      <td>
+      <td data-no-i18n>
         <div class="cell-primary" style="font-weight:600;">${escapeHtml(a.name)}</div>
         ${a.chinese_name ? `<div class="cell-sub">${escapeHtml(a.chinese_name)}</div>` : ""}
       </td>
-      <td><div class="cell-primary">${escapeHtml(a.industry || "—")}</div>${a.booth ? `<div class="cell-sub">展位 ${escapeHtml(a.booth)}</div>` : ""}</td>
+      <td data-no-i18n><div class="cell-primary">${escapeHtml(a.industry || "—")}</div>${a.booth ? `<div class="cell-sub">展位 ${escapeHtml(a.booth)}</div>` : ""}</td>
       <td>${a.contact_count ? `<b>${a.contact_count}</b>` : `<span class="ca-none">0</span>`}</td>
       <td>${analysis}</td>
       <td>${tags}</td>
@@ -4303,7 +4369,7 @@ function renderCrmAccounts() {
   const pag = document.getElementById("crm-acct-pagination");
   pag.innerHTML = totalPages <= 1 ? "" : `
     <button class="btn-sm btn-ghost" id="crm-acct-prev" ${_crmAcctPage <= 1 ? "disabled" : ""}>← Prev</button>
-    <span style="font-size:0.85rem;color:#555;">Page ${_crmAcctPage} of ${totalPages} · ${list.length} companies</span>
+    <span style="font-size:0.85rem;color:#555;">Page 第 ${_crmAcctPage} / ${totalPages} 页 · ${list.length} 家公司</span>
     <button class="btn-sm btn-ghost" id="crm-acct-next" ${_crmAcctPage >= totalPages ? "disabled" : ""}>Next →</button>`;
   document.getElementById("crm-acct-prev")?.addEventListener("click", () => { _crmAcctPage--; renderCrmAccounts(); });
   document.getElementById("crm-acct-next")?.addEventListener("click", () => { _crmAcctPage++; renderCrmAccounts(); });
@@ -4325,8 +4391,239 @@ function openCrmAccount(id, name) {
   addCrmIntelCompany(id, name);
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   Add more contacts · 补充联系人
+
+   Apollo enrichment for a company already in the CRM, as opposed to
+   "Find contacts" (discovery, may be a company you don't hold) and
+   "New contact" (manual, one person).
+
+   It is the same append-only pipeline the account record page uses —
+   /api/leads/plan to say what will happen, then /api/leads/search in
+   append mode — so the guarantees are identical: dedupe against what you
+   already hold, fetch only the shortfall, never rewrite an existing row.
+   ══════════════════════════════════════════════════════════════════════ */
+
+let _topupSeq = 0;
+
+/* Which company the dialog should open on, and why.
+
+   Two sources of context, in this order:
+
+     1. The active company filter. If the list is already scoped to one
+        company that is an explicit choice the user made, so it beats
+        anything inferred from free text.
+     2. The global search box — but only when the term resolves to exactly
+        one company. "Zach" matches the contact Zachary and no company; a
+        term matching several companies is equally unusable. In both cases
+        guessing would be worse than not guessing, so the field is left
+        empty and the candidates are offered instead.
+
+   Returns { name, source, suggestions }. `name` empty means "don't
+   prefill"; `suggestions` is what to show when we declined to guess. */
+function resolveTopupCompany() {
+  const scoped = (_crmActiveFilters.accounts || [])[0];
+  if (scoped) return { name: scoped, source: "filter", suggestions: [] };
+
+  const term = crmSearchTerm();
+  if (!term) return { name: "", source: "none", suggestions: [] };
+
+  const t = lc(term);
+  const exact = _crmAccounts.find((c) => lc(c.name) === t || lc(c.chinese_name || "") === t);
+  if (exact) return { name: exact.name, source: "search-exact", suggestions: [] };
+
+  const matches = _crmAccounts.filter((c) =>
+    lc(c.name).includes(t) || lc(c.chinese_name || "").includes(t));
+  if (matches.length === 1) return { name: matches[0].name, source: "search-unique", suggestions: [] };
+
+  // Ambiguous, or the term describes a person rather than a company.
+  return {
+    name: "",
+    source: matches.length ? "ambiguous" : "no-company-match",
+    suggestions: matches
+      .slice()
+      .sort((a, b) => (b.contact_count || 0) - (a.contact_count || 0))
+      .slice(0, 6),
+  };
+}
+
+function renderTopupContext(res) {
+  const box = document.getElementById("topup-context");
+  if (!box) return;
+  const term = crmSearchTerm();
+
+  if (res.source === "filter") {
+    box.innerHTML = `<span class="topup-ctx-note">Using the company this list is filtered to. 已使用当前筛选的公司。</span>`;
+  } else if (res.source === "search-exact" || res.source === "search-unique") {
+    box.innerHTML = `<span class="topup-ctx-note">Matched “${escapeHtml(term)}” from the search bar. 已根据搜索栏内容匹配。</span>`;
+  } else if (res.suggestions.length) {
+    box.innerHTML = `<span class="topup-ctx-note">“${escapeHtml(term)}” matches several companies — pick one: 匹配到多家公司，请选择：</span>
+      <span class="topup-sugs">${res.suggestions.map((c) =>
+        `<button type="button" class="topup-sug" data-topup-pick="${escapeAttr(c.name)}"
+           ><span data-no-i18n>${escapeHtml(c.name)}</span> <span class="topup-sug-n">${c.contact_count}</span></button>`).join("")}</span>`;
+  } else if (term) {
+    box.innerHTML = `<span class="topup-ctx-note">“${escapeHtml(term)}” doesn't match a saved company — choose one above. 未匹配到已保存的公司，请在上方选择。</span>`;
+  } else {
+    box.innerHTML = "";
+  }
+
+  box.querySelectorAll("[data-topup-pick]").forEach((b) => b.addEventListener("click", () => {
+    const input = document.getElementById("topup-company");
+    if (input) input.value = b.dataset.topupPick;
+    box.innerHTML = "";
+    refreshTopupPlan();
+  }));
+}
+
+async function openCrmTopupModal(prefillCompany) {
+  const m = document.getElementById("crm-topup-modal");
+  if (!m) return;
+
+  // The picker lists companies already in the CRM; this is enrichment, not
+  // discovery, so a name that isn't saved yet belongs in "Find contacts".
+  if (!_crmAccounts.length) await loadCrmAccounts();
+  const list = document.getElementById("topup-company-list");
+  if (list) {
+    list.innerHTML = _crmAccounts
+      .slice()
+      .sort((a, b) => (b.contact_count || 0) - (a.contact_count || 0))
+      .map((c) => `<option value="${escapeAttr(c.name)}">${escapeHtml(c.chinese_name || "")} · ${c.contact_count} contacts</option>`)
+      .join("");
+  }
+
+  // An explicit caller (the company context bar) wins; otherwise infer from
+  // the filter, then the search box. Prefilling only fills the field — it
+  // never starts an import, and the plan preview it triggers is read-only
+  // and free (/api/leads/plan never contacts Apollo).
+  const res = prefillCompany
+    ? { name: prefillCompany, source: "filter", suggestions: [] }
+    : resolveTopupCompany();
+  const input = document.getElementById("topup-company");
+  if (input) input.value = res.name;
+  renderTopupContext(res);
+
+  m.classList.add("open");
+  refreshTopupPlan();
+  // Land on the number when the company is settled, on the company when not.
+  setTimeout(() => (res.name ? document.getElementById("topup-target") : input)?.focus(), 60);
+}
+
+function closeCrmTopupModal() {
+  document.getElementById("crm-topup-modal")?.classList.remove("open");
+}
+
+async function refreshTopupPlan() {
+  const name = (document.getElementById("topup-company")?.value || "").trim();
+  const target = Math.max(1, Math.min(Number(document.getElementById("topup-target")?.value) || 50, 500));
+  const box = document.getElementById("topup-plan");
+  const runBtn = document.getElementById("topup-run");
+  const current = document.getElementById("topup-current");
+  const seq = ++_topupSeq;
+
+  if (!name) {
+    box.hidden = true;
+    if (current) current.textContent = "";
+    if (runBtn) { runBtn.disabled = true; runBtn.textContent = "Append contacts"; }
+    return;
+  }
+
+  try {
+    const d = await getJSON(`/api/leads/plan?companies=${encodeURIComponent(name)}`
+      + `&target=${target}&maxTotal=${target}&mode=append`);
+    if (seq !== _topupSeq) return;                 // a newer edit already answered
+    const p = (d.plans || [])[0];
+    if (!p) return;
+
+    if (current) current.textContent = `${p.current} in CRM now 当前已有`;
+
+    if (!p.known) {
+      box.innerHTML = `<div class="crm-plan-row"><div class="crm-plan-cost">
+        “${escapeHtml(name)}” isn't in your CRM yet — use <b>Find contacts</b> to discover it first.
+        <br><span class="i18n-zh" style="margin-left:0;">该公司尚未加入 CRM，请先使用「查找联系人」。</span>
+      </div></div>`;
+      box.hidden = false;
+      if (runBtn) { runBtn.disabled = true; runBtn.textContent = "Append contacts"; }
+      return;
+    }
+
+    box.innerHTML = `
+      <div class="crm-plan-head">What this will do</div>
+      <div class="crm-plan-row">
+        <div class="crm-plan-co" data-no-i18n>${escapeHtml(p.company)}</div>
+        <div class="crm-plan-math">
+          <span class="crm-plan-num"><b>${p.current}</b><span>now</span></span>
+          <span class="crm-plan-op">→</span>
+          <span class="crm-plan-num"><b>${p.target}</b><span>target</span></span>
+          <span class="crm-plan-op">=</span>
+          <span class="crm-plan-num crm-plan-get"><b>${p.willRetrieve > 0 ? "+" + p.willRetrieve : "0"}</b><span>to retrieve</span></span>
+        </div>
+        <div class="crm-plan-cost">${p.searchRequests
+          ? `~${p.searchRequests} Apollo search request(s), plus up to ${p.emailLookups} email lookup(s).`
+          : "No Apollo requests — nothing to fetch"}</div>
+        ${p.willRetrieve === 0 && p.current >= p.target
+          ? `<div class="crm-plan-none">Already at or above the target — raise it to pull more.</div>` : ""}
+      </div>
+      <div class="crm-plan-foot"><b>Append only.</b> The ${p.current} contact${p.current !== 1 ? "s" : ""} already saved are left exactly as they are. 已保存的 ${p.current} 位联系人保持不变。</div>`;
+    box.hidden = false;
+    if (runBtn) {
+      runBtn.disabled = p.willRetrieve === 0;
+      runBtn.textContent = p.willRetrieve > 0
+        ? `Append ${p.willRetrieve} contact${p.willRetrieve !== 1 ? "s" : ""} 追加 ${p.willRetrieve} 位联系人`
+        : "Nothing to append";
+    }
+  } catch (e) {
+    if (seq !== _topupSeq) return;
+    box.hidden = true;
+  }
+}
+
+async function runCrmTopup() {
+  const name = (document.getElementById("topup-company")?.value || "").trim();
+  const target = Math.max(1, Math.min(Number(document.getElementById("topup-target")?.value) || 50, 500));
+  const btn = document.getElementById("topup-run");
+  if (!name || !btn) return;
+
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Appending…";
+  try {
+    const r = await fetch("/api/leads/search", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      // force:false is what makes this append rather than re-query.
+      body: JSON.stringify({ companies: name, force: false, perCompanyLimit: target, maxTotal: target, departments: [] }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) { showMessage(d.error || "Import failed.", "error"); btn.textContent = original; btn.disabled = false; return; }
+
+    const s = (d.summaries || [])[0];
+    showMessage(s
+      ? `${name}: appended ${s.importedCount} new contact(s); ${s.alreadyHeldCount || 0} already in your CRM were left untouched. 已追加 ${s.importedCount} 位新联系人。`
+      : `${name}: import finished.`, "info");
+    closeCrmTopupModal();
+    refreshUsage();
+    loadBrowseSelectors();
+    loadCrmAccounts();
+    // Show the result: scope the list to the company just enriched.
+    setCrmAccounts([name]);
+  } catch (e) {
+    showMessage("Network error: " + e.message, "error");
+    btn.textContent = original; btn.disabled = false;
+  }
+}
+
 function initCrmWorkspace() {
   document.getElementById("crm-find-btn")?.addEventListener("click", () => openCrmDiscoverModal());
+
+  // ── Add more contacts ──
+  document.getElementById("crm-topup-btn")?.addEventListener("click", () => openCrmTopupModal());
+  document.querySelectorAll("[data-topup-close]").forEach((b) =>
+    b.addEventListener("click", closeCrmTopupModal));
+  document.getElementById("crm-topup-modal")?.addEventListener("click", (e) => {
+    if (e.target.id === "crm-topup-modal") closeCrmTopupModal();
+  });
+  document.getElementById("topup-company")?.addEventListener("input", debounce(refreshTopupPlan, 300));
+  document.getElementById("topup-target")?.addEventListener("input", debounce(refreshTopupPlan, 250));
+  document.getElementById("topup-run")?.addEventListener("click", runCrmTopup);
 
   // ── Object tabs ──
   document.querySelectorAll("[data-crm-tab]").forEach((tab) =>
@@ -4377,6 +4674,7 @@ function initCrmWorkspace() {
     if (e.key !== "Escape") return;
     closeCrmDiscoverModal();
     closeNewCompanyModal();
+    closeCrmTopupModal();
   });
 
   // Filters apply as they change: text after a pause, selects immediately.
@@ -5019,11 +5317,11 @@ function intelContactsSection(c, contacts, st) {
   const body = n === 0
     ? `<div class="ic-empty">
          <div class="ic-empty-title">No contacts yet</div>
-         <div class="ic-empty-hint">Nobody at this company is in your CRM. Pull them from Apollo using the default executive + specialist departments, or pick your own.</div>
+         <div class="ic-empty-hint">Nobody at this company is in your CRM. Pull them from Apollo using the default executive + specialist departments, or pick your own.<br>该公司目前没有联系人。可使用默认的高管 + 专业岗位部门从 Apollo 获取，也可自行选择部门。</div>
        </div>`
     : `<div class="ic-stats">
-         <span class="ic-stat"><b>${n}</b> contact${n !== 1 ? "s" : ""}</span>
-         <span class="ic-stat"><b>${withEmail}</b> with email</span>
+         <span class="ic-stat"><b>${n}</b> contact${n !== 1 ? "s" : ""} 位联系人</span>
+         <span class="ic-stat"><b>${withEmail}</b> with email 含邮箱</span>
          ${lastAdded ? `<span class="ic-stat">last added <b>${escapeHtml(lastAdded)}</b></span>` : ""}
          ${ownN !== n ? `<span class="ic-stat ic-stat-soft">${ownN} on this company record, the rest on related entities</span>` : ""}
        </div>`;
@@ -5209,13 +5507,26 @@ async function onIntelPanelClick(e) {
       return;
     }
 
+    /* "View in CRM" — cross from analysing an account to working it.
+
+       This dates from when Company Intelligence was a slide-over drawer:
+       it closed the drawer (now a no-op) and re-showed the CRM view it was
+       already inside, but never switched the object tab — so the user stayed
+       on the Companies tab looking at the same record.
+
+       It also scoped by free-text search. The account filter is the right
+       instrument: it matches exactly, drives the filter chip and the
+       active-company bar, and survives paging. The search box is cleared so
+       a stale term can't imply a scope that isn't being applied — with a
+       structured filter present the server ignores `q` entirely, so leaving
+       text there would misreport what the list is showing. */
     if (action === "open-crm") {
       const name = panel.dataset.companyName || "";
-      if (typeof closeCrmIntelDrawer === "function") closeCrmIntelDrawer();
-      showView("crm");
+      if (!name) return;
       const box = document.getElementById("crm-search-input");
-      if (box) box.value = name;
-      loadCrmContacts(name);
+      if (box) box.value = "";
+      showCrmTab("contacts");
+      setCrmAccounts([name]);     // filter chip + active-company bar + reload
       return;
     }
 
@@ -5236,7 +5547,7 @@ async function onIntelPanelClick(e) {
                Costs about ${p.searchRequests} Apollo search request(s), plus up to ${p.emailLookups} email lookup(s).
                Existing contacts are kept as they are.</div>
              <div class="ic-plan-row">
-               <button class="btn-orange btn-sm" data-intel-action="import-contacts-confirm">Import ${p.willRetrieve} contact(s)</button>
+               <button class="btn-orange btn-sm" data-intel-action="import-contacts-confirm">Import ${p.willRetrieve} contact${p.willRetrieve !== 1 ? "s" : ""} 导入 ${p.willRetrieve} 位联系人</button>
                <button class="btn-ghost btn-sm" data-intel-action="import-cancel">Cancel</button>
              </div>`
           : `<div class="ic-plan-line">Already at ${p.current} — raise the target above ${p.current} to pull more.</div>`;
@@ -5671,11 +5982,28 @@ function renderModalIntel(d, contact) {
       ${!roleChips && !contact.department ? '<span style="font-size:0.76rem;color:#cbd5e1;">none</span>' : ""}
     </div></div>`;
 
-  // Real, deterministic SKQ grounding (auto-matched to tags, sent to the prompt)
+  /* SKQ capabilities are SUGGESTIONS, opt-in. Nothing here reaches the prompt
+     until it is ticked: sending every tag match turned each email into a
+     catalogue dump of whatever the tags happened to hit. The free-text row
+     exists because the catalogue can't anticipate every angle, and a
+     capability the sender knows is relevant beats a matched one that isn't. */
   const skq = (d.preview && d.preview.skq) || [];
-  html += `<div class="intel-cat"><div class="intel-cat-title">Recommended SKQ Capabilities <span style="font-weight:400;color:#9ca3af;">(auto-matched, sent to the prompt)</span></div>
-      <div>${skq.length ? skq.map((m) => `<span class="intel-chip" style="background:#eef2ff;border-color:#c7d2fe;">${escapeHtml(skqLabel(m))}</span>`).join("") : '<span style="font-size:0.76rem;color:#cbd5e1;">no direct SKQ match for these tags yet</span>'}</div>
-      <div style="font-size:0.74rem;color:#9ca3af;margin-top:4px;">Attachments are recommended in Phase 2, never auto-attached.</div></div>`;
+  html += `<div class="intel-cat"><div class="intel-cat-title">Recommended SKQ Capabilities
+        <span style="font-weight:400;color:#9ca3af;">(suggestions — tick the ones to send)</span></div>
+      <div class="skq-picks">${skq.length
+        ? skq.map((m) => {
+            const nm = skqLabel(m);
+            return `<label class="intel-chip skq-pick" style="background:#eef2ff;border-color:#c7d2fe;cursor:pointer;">
+              <input type="checkbox" class="skq-check" value="${escapeAttr(nm)}" style="margin-right:5px;vertical-align:-1px;">
+              ${escapeHtml(nm)}</label>`;
+          }).join("")
+        : '<span style="font-size:0.76rem;color:#cbd5e1;">no direct SKQ match for these tags yet</span>'}</div>
+      <div class="skq-custom-row">
+        <input type="text" id="modal-skq-custom" placeholder="Add another capability, then press Enter"
+               autocomplete="off">
+      </div>
+      <div class="skq-chosen" id="modal-skq-chosen"></div>
+      <div style="font-size:0.74rem;color:#9ca3af;margin-top:4px;">Nothing is sent to the prompt unless selected. Attachments are recommended in Phase 2, never auto-attached.</div></div>`;
 
   const st = d.status || {};
   const analyzed = st.analyzed_at ? `Last analyzed ${intelFmtDate(st.analyzed_at)}` : (st.analyzed ? "Previously analyzed" : "Not analyzed yet");
@@ -5690,11 +6018,58 @@ function renderModalIntel(d, contact) {
   // re-rendered on every open, so wire it here rather than relying on delegation).
   const inspectBtn = document.getElementById("modal-intel-inspect");
   if (inspectBtn) inspectBtn.addEventListener("click", openPromptInspector);
+  initModalSkqPicker();
+}
+
+/* ── SKQ capability selection (opt-in) ───────────────────────────────── */
+
+let _modalSkqCustom = [];        // capabilities typed in by hand
+
+function renderModalSkqChosen() {
+  const box = document.getElementById("modal-skq-chosen");
+  if (!box) return;
+  box.innerHTML = _modalSkqCustom.map((nm, i) =>
+    `<span class="intel-chip" style="background:#ecfdf5;border-color:#6ee7b7;">${escapeHtml(nm)}
+       <button type="button" data-skq-remove="${i}" title="Remove">×</button></span>`).join("");
+  box.querySelectorAll("[data-skq-remove]").forEach((b) => b.addEventListener("click", () => {
+    _modalSkqCustom.splice(Number(b.dataset.skqRemove), 1);
+    renderModalSkqChosen();
+    refreshPromptInspectorSoon();
+  }));
+}
+
+function initModalSkqPicker() {
+  _modalSkqCustom = [];
+  renderModalSkqChosen();
+  // Capability selection changes the Product Context section.
+  document.querySelectorAll(".skq-check").forEach((c) =>
+    c.addEventListener("change", refreshPromptInspectorSoon));
+  const input = document.getElementById("modal-skq-custom");
+  if (!input) return;
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const v = input.value.trim();
+    if (!v || _modalSkqCustom.some((x) => x.toLowerCase() === v.toLowerCase())) { input.value = ""; return; }
+    _modalSkqCustom.push(v);
+    input.value = "";
+    renderModalSkqChosen();
+    refreshPromptInspectorSoon();
+  });
+}
+
+// What the draft/inspect endpoints receive. Empty array = send no capability
+// block at all, which is the default.
+function getModalSkqSelection() {
+  const ticked = [...document.querySelectorAll(".skq-check:checked")].map((c) => c.value);
+  return ticked.concat(_modalSkqCustom);
 }
 
 /* ── Prompt Analytics: the exact assembled prompt + tag/token analysis (0 tokens) ── */
-async function openPromptInspector() {
-  console.log("Prompt Inspector clicked");   // debug: confirm the click fires
+async function openPromptInspector(opts) {
+  // A fresh open starts from the assembled prompt; a refresh triggered by an
+  // option change keeps the user's section edits and reapplies them on top.
+  if (!opts || !opts.keepEdits) _piEdits = {};
   // Portal-safety: hoist to <body> so it escapes any stacking context and (with
   // its higher z-index) renders ABOVE the draft modal instead of behind it.
   const modal = document.getElementById("prompt-inspector-modal");
@@ -5715,6 +6090,7 @@ async function openPromptInspector() {
         mode: _modalSelectedMode,
         extraInstructions: (document.getElementById("modal-extra-instructions") || {}).value?.trim() || "",
         options: currentDraftOptions(),
+        skqSelected: getModalSkqSelection(),
         includeTagIds: getModalIncludeTagIds(),
       }),
     });
@@ -5810,15 +6186,53 @@ function renderPromptInspector(d) {
       <span class="pi-bar-tok">${s.tokens}</span></div>`).join("");
   html += `<div class="pi-bar-row" style="font-weight:700;"><span class="pi-bar-label">Total</span><span class="pi-bar"></span><span class="pi-bar-tok">${tok.total}</span></div></div>`;
 
-  // 5) Prompt sections (real text, collapsible) + full final prompt
-  html += `<div class="pi-card"><div class="pi-h">Prompt sections <span class="pi-sub">— the actual text sent, split by section</span></div>`;
-  html += (d.sections || []).map((s) => `
-    <details class="pi-section"><summary>${escapeHtml(s.label)} <span class="pi-sub">· ${s.tokens} tok</span></summary>
-      <pre class="pi-pre">${escapeHtml(s.text)}</pre></details>`).join("");
+  /* 5) Prompt sections — editable.
+
+     Each section is a textarea rather than one giant block, so the structure
+     survives editing and a change is scoped to the part it belongs to. The
+     sections concatenate back to the exact prompt, so leaving them untouched
+     sends precisely what the assembler produced.
+
+     Edits are per-draft and in-memory: nothing is persisted, and reopening
+     the Inspector rebuilds from the current context. */
+  // Edits are keyed by SECTION KEY, not index: changing language or tags
+  // re-assembles the prompt and can add or drop sections, which would shift
+  // every index and silently move an edit onto the wrong section.
+  _piBaseline = (d.sections || []).map((s) => ({ key: s.key, label: s.label, text: s.text, tokens: s.tokens }));
+  Object.keys(_piEdits).forEach((k) => {           // drop edits whose section vanished
+    if (!_piBaseline.some((s) => s.key === k)) delete _piEdits[k];
+  });
+  html += `<div class="pi-card">
+    <div class="pi-h">Prompt sections
+      <span class="pi-sub">— editable; what you leave here is what gets sent</span>
+      <button type="button" class="btn-sm btn-ghost" id="pi-reset-all" style="float:right;">Reset all sections</button>
+    </div>
+    <div class="pi-edit-note" id="pi-edit-note"></div>`;
+  html += _piBaseline.map((s) => {
+    const cur = s.key in _piEdits ? _piEdits[s.key] : s.text;
+    const dirty = cur !== s.text;
+    return `
+    <details class="pi-section" ${s.key === "instructions" || dirty ? "open" : ""}>
+      <summary>${escapeHtml(s.label)} <span class="pi-sub">· ${s.tokens || 0} tok</span>
+        <span class="pi-edited" data-pi-flag="${escapeAttr(s.key)}" ${dirty ? "" : "hidden"}>edited</span></summary>
+      <!-- The leading newline is deliberate: HTML drops a newline immediately
+           after <textarea>, so without it every section that starts with one
+           (most of them) would silently lose it the moment it was edited. -->
+      <textarea class="pi-edit" data-pi-key="${escapeAttr(s.key)}" rows="${Math.min(18, Math.max(3, cur.split("\n").length))}">
+${escapeHtml(cur)}</textarea>
+      <button type="button" class="btn-sm btn-ghost pi-reset" data-pi-reset="${escapeAttr(s.key)}">Reset this section</button>
+    </details>`;
+  }).join("");
   html += `</div>`;
 
-  html += `<div class="pi-h" style="margin-top:8px;">Final prompt sent to the LLM</div>
-    <pre class="pi-final" id="pi-final-prompt">${escapeHtml(d.prompt || "")}</pre>`;
+  /* The compiled prompt: the assembled sections with the user's edits applied,
+     i.e. exactly what Generate Draft would send right now. Rebuilt on every
+     edit so the sections above and this can never disagree. */
+  html += `<div class="pi-h" style="margin-top:8px;">Compiled Prompt 编译后的提示词
+      <span class="pi-sub">— exactly what will be sent if you generate now</span>
+      <span class="pi-live" id="pi-live-badge">live</span>
+      <span class="pi-sub" id="pi-compiled-meta"></span></div>
+    <pre class="pi-final" id="pi-final-prompt"></pre>`;
 
   body.innerHTML = html;
 
@@ -5837,13 +6251,112 @@ function renderPromptInspector(d) {
 
   // Click a used tag → highlight its occurrences in the final prompt.
   body.querySelectorAll("tr.pi-used").forEach((tr) => tr.addEventListener("click", () => highlightTagInPrompt(tr.dataset.val)));
+  initPromptEditor(body);
+}
+
+/* ── Live prompt composer ───────────────────────────────────────────────
+   _piBaseline holds the assembled sections; _piEdits holds only what the
+   user changed, keyed by section key. "Reset" is therefore just forgetting
+   an entry, and an edit survives a re-assembly triggered by changing the
+   language, tags or capabilities.
+
+   The Compiled Prompt is derived from those two, never stored — so the
+   sections and the preview cannot drift apart. Text edits recompile
+   locally (no network); anything that changes the ASSEMBLED text re-runs
+   the 0-token inspect endpoint and reapplies the edits on top. */
+let _piBaseline = [];
+let _piEdits = {};
+
+function piCompiledText() {
+  return _piBaseline.map((s) => (s.key in _piEdits ? _piEdits[s.key] : s.text)).join("");
+}
+
+function piRenderCompiled() {
+  const pre = document.getElementById("pi-final-prompt");
+  if (!pre) return;
+  const text = piCompiledText();
+  pre.textContent = text;                       // textContent: no escaping needed
+  const meta = document.getElementById("pi-compiled-meta");
+  if (meta) meta.textContent = `· ${text.length.toLocaleString()} chars · ~${Math.ceil(text.length / 4).toLocaleString()} tokens`;
+  const badge = document.getElementById("pi-live-badge");
+  if (badge) {                                   // brief pulse so a rebuild is visible
+    badge.classList.remove("pulse");
+    void badge.offsetWidth;
+    badge.classList.add("pulse");
+  }
+  piSyncNote();
+}
+
+function piSyncNote() {
+  const note = document.getElementById("pi-edit-note");
+  const n = Object.keys(_piEdits).length;
+  if (!note) return;
+  note.innerHTML = n
+    ? `<b>${n} section${n !== 1 ? "s" : ""} edited.</b> The Compiled Prompt below reflects your edits and is what the next draft will send. 下次生成将使用你编辑后的提示词。`
+    : "";
+  note.classList.toggle("on", n > 0);
+}
+
+function initPromptEditor(root) {
+  const recompile = debounce(piRenderCompiled, 300);   // per the 300-500ms ask
+
+  root.querySelectorAll(".pi-edit").forEach((ta) => {
+    ta.addEventListener("input", () => {
+      const key = ta.dataset.piKey;
+      const base = (_piBaseline.find((x) => x.key === key) || {}).text || "";
+      if (ta.value === base) delete _piEdits[key]; else _piEdits[key] = ta.value;
+      const flag = root.querySelector(`[data-pi-flag="${CSS.escape(key)}"]`);
+      if (flag) flag.hidden = ta.value === base;
+      recompile();
+    });
+  });
+
+  // Resets are deliberate, so they recompile immediately rather than debounced.
+  root.querySelectorAll("[data-pi-reset]").forEach((b) => b.addEventListener("click", () => {
+    const key = b.dataset.piReset;
+    const ta = root.querySelector(`[data-pi-key="${CSS.escape(key)}"]`);
+    if (!ta) return;
+    ta.value = (_piBaseline.find((x) => x.key === key) || {}).text || "";
+    delete _piEdits[key];
+    const flag = root.querySelector(`[data-pi-flag="${CSS.escape(key)}"]`);
+    if (flag) flag.hidden = true;
+    piRenderCompiled();
+  }));
+
+  document.getElementById("pi-reset-all")?.addEventListener("click", () => {
+    _piEdits = {};
+    root.querySelectorAll(".pi-edit").forEach((ta) => {
+      ta.value = (_piBaseline.find((x) => x.key === ta.dataset.piKey) || {}).text || "";
+    });
+    root.querySelectorAll("[data-pi-flag]").forEach((f) => { f.hidden = true; });
+    piRenderCompiled();
+  });
+
+  piRenderCompiled();
+}
+
+/* Re-assemble from the server when something upstream of the text changes —
+   language, tone, length, CTA, tag selection, SKQ capabilities. Only runs
+   while the Inspector is open, and the inspect endpoint spends no tokens. */
+const refreshPromptInspectorSoon = debounce(() => {
+  const modal = document.getElementById("prompt-inspector-modal");
+  if (!modal || !modal.classList.contains("open")) return;
+  openPromptInspector({ keepEdits: true });
+}, 350);
+
+/* What the draft request should carry: null when nothing was edited, so an
+   untouched Inspector leaves the normal assembly path alone. */
+function currentPromptSections() {
+  if (!_piBaseline.length || !Object.keys(_piEdits).length) return null;
+  return _piBaseline.map((s) => ({ key: s.key, text: s.key in _piEdits ? _piEdits[s.key] : s.text }));
 }
 const APPROX_LABEL = "4 chars/token";
 
 function highlightTagInPrompt(value) {
   const pre = document.getElementById("pi-final-prompt");
-  if (!pre || !_lastInspect) return;
-  const raw = _lastInspect.prompt || "";
+  if (!pre) return;
+  // Search what is actually on screen — the compiled prompt including edits.
+  const raw = piCompiledText();
   if (!value) { pre.innerHTML = escapeHtml(raw); return; }
   // Escape the prompt, then wrap escaped occurrences of the (escaped) value in <mark>.
   const escVal = escapeHtml(value);
@@ -5887,6 +6400,7 @@ function highlightTagInPrompt(value) {
       const id = Number(cb.dataset.tagId);
       if (cb.checked) _modalSelectedTagIds.add(id); else _modalSelectedTagIds.delete(id);
       updateModalIntelBadge();
+      refreshPromptInspectorSoon();
     });
     // The Prompt Inspector button is wired directly in renderModalIntel (guaranteed).
   }
@@ -6403,7 +6917,7 @@ function updateAutoConfigNote(provider) {
   const host = emVal("em-org-smtp_host"), port = emVal("em-org-smtp_port"), enc = emVal("em-org-smtp_encryption");
   if (host && port) {
     el.style.display = "";
-    el.innerHTML = `✓ SMTP/IMAP settings configured automatically — <strong>${esc(host)}:${esc(port)}</strong> (${esc((enc || "").toUpperCase())}). You don't need to change anything below.`;
+    el.innerHTML = `✓ SMTP/IMAP settings configured automatically — <strong>${esc(host)}:${esc(port)}</strong> (${esc((enc || "").toUpperCase())}). You don't need to change anything below.<br><span class="i18n-zh" style="margin-left:0;">SMTP / IMAP 设置已自动配置，下方内容无需修改。</span>`;
   } else if (provider === "custom_imap") {
     el.style.display = "";
     el.style.color = "#b45309"; el.style.background = "#fffbeb"; el.style.borderColor = "#fde68a";
@@ -6628,7 +7142,7 @@ function updateEmailChecklist() {
     ["Authorized email domain", domainOk, domain ? "@" + domain + (email && !domainOk ? " — your email must match" : "") : "not set"],
     ["Mailbox email", emailOk, emailOk ? email : "required"],
     ["Password / app password", secretOk, secretOk ? "provided" : "required"],
-    ["Connection verified", testedOk, tested === "failed" ? "failed — see result below" : testedOk ? "connected ✓" : "not verified"],
+    ["Connection verified", testedOk, tested === "failed" ? "failed 失败 — see result below 见下方结果" : testedOk ? "connected 已连接 ✓" : "not verified 未验证"],
   ];
   el.innerHTML = items.map(([k, ok, v]) =>
     `<div class="em-check-item ${ok ? "done" : ""}"><span>${ok ? "✅" : "⚠️"}</span><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join("");
@@ -6761,7 +7275,7 @@ async function loadEmailHistory() {
     if (!tests.length) { el.innerHTML = `<div style="color:#9ca3af;font-size:0.85rem;padding:8px 0;">No tests run yet.</div>`; return; }
     el.innerHTML = `<div style="overflow-x:auto;"><table class="em-history">
       <thead><tr><th>When</th><th>Test</th><th>Target</th><th>Result</th><th>Detail</th></tr></thead>
-      <tbody>${tests.map((t) => `
+      <tbody data-no-i18n>${tests.map((t) => `
         <tr>
           <td>${esc(new Date(t.created_at).toLocaleString())}</td>
           <td>${esc(EM_TEST_KIND[t.kind] || t.kind || "—")}${t.scope === "org" ? ' <span class="em-badge gray" style="font-size:0.62rem;">org</span>' : ""}</td>

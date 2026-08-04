@@ -15,72 +15,72 @@
 
 const DEPARTMENT_TAXONOMY = [
   {
-    key: 'procurement', label: 'Procurement',
+    key: 'procurement', label: 'Procurement 采购',
     titleTerms: ['procurement', 'purchasing', 'buyer', 'vendor management'],
     deptTerms: ['procurement', 'purchasing'],
   },
   {
-    key: 'strategic_sourcing', label: 'Strategic Sourcing',
+    key: 'strategic_sourcing', label: 'Strategic Sourcing 战略寻源',
     titleTerms: ['strategic sourcing', 'sourcing manager', 'sourcing director', 'category manager', 'capital equipment'],
     deptTerms: ['sourcing'],
   },
   {
-    key: 'supply_chain', label: 'Supply Chain',
+    key: 'supply_chain', label: 'Supply Chain 供应链',
     titleTerms: ['supply chain', 'logistics', 'materials management'],
     deptTerms: ['supply chain', 'logistics'],
   },
   {
-    key: 'operations', label: 'Operations',
+    key: 'operations', label: 'Operations 运营',
     titleTerms: ['operations manager', 'operations director', 'vp operations', 'coo', 'chief operating officer'],
     deptTerms: ['operations'],
   },
   {
-    key: 'manufacturing', label: 'Manufacturing',
+    key: 'manufacturing', label: 'Manufacturing 制造',
     titleTerms: ['manufacturing', 'production manager', 'production director', 'assembly'],
     deptTerms: ['manufacturing', 'production', 'assembly'],
   },
   {
-    key: 'engineering', label: 'Engineering',
+    key: 'engineering', label: 'Engineering 工程',
     titleTerms: ['engineer', 'engineering manager', 'engineering director', 'process development'],
     deptTerms: ['engineering', 'r&d', 'research', 'development'],
   },
   {
-    key: 'quality', label: 'Quality',
+    key: 'quality', label: 'Quality 质量',
     titleTerms: ['quality manager', 'quality engineer', 'quality director', 'quality assurance', 'quality control', 'inspection'],
     deptTerms: ['quality'],
   },
   {
-    key: 'digital_manufacturing', label: 'Digital Manufacturing / Automation',
+    key: 'digital_manufacturing', label: 'Digital Manufacturing / Automation 数字化制造 / 自动化',
     titleTerms: ['automation', 'mes manager', 'digital manufacturing', 'smart factory', 'industry 4', 'ot manager', 'robotics'],
     deptTerms: ['automation', 'digital', 'mes', 'smart factory'],
   },
   {
-    key: 'it', label: 'Information Technology',
+    key: 'it', label: 'Information Technology 信息技术',
     titleTerms: ['information technology', 'it director', 'it manager', 'cio', 'chief information officer', 'systems administrator'],
     deptTerms: ['it', 'information technology', 'technology'],
   },
   {
-    key: 'finance', label: 'Finance',
+    key: 'finance', label: 'Finance 财务',
     titleTerms: ['finance', 'cfo', 'chief financial officer', 'controller', 'accounting'],
     deptTerms: ['finance', 'accounting'],
   },
   {
-    key: 'executive', label: 'Executive Leadership',
+    key: 'executive', label: 'Executive Leadership 高层管理',
     titleTerms: ['chief', 'president', 'ceo', 'cto', 'coo', 'cfo', 'cio', 'cmo', 'vp', 'vice president'],
     deptTerms: ['executive', 'c-suite', 'c_suite'],
   },
   {
-    key: 'maintenance', label: 'Maintenance',
+    key: 'maintenance', label: 'Maintenance 设备维护',
     titleTerms: ['maintenance manager', 'maintenance director', 'reliability engineer', 'facilities manager'],
     deptTerms: ['maintenance', 'facilities'],
   },
   {
-    key: 'ehs', label: 'EHS',
+    key: 'ehs', label: 'EHS 环境健康安全',
     titleTerms: ['ehs', 'environmental health and safety', 'safety manager', 'safety director'],
     deptTerms: ['ehs', 'safety', 'environmental'],
   },
   {
-    key: 'plant_management', label: 'Plant Management',
+    key: 'plant_management', label: 'Plant Management 工厂管理',
     titleTerms: ['plant manager', 'plant director', 'factory manager', 'factory director', 'site manager'],
     deptTerms: ['plant'],
   },

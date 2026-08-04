@@ -29,6 +29,98 @@ function customerProfileBlock(context = {}) {
   return s;
 }
 
+/* What the user typed into "Additional instructions", given its own block.
+
+   It used to be one bullet inside a general "Additional context" list, on
+   equal footing with an event name — so a direct instruction ("mention our
+   new automation line, offer a factory tour") competed with background
+   detail and often lost. It is the most specific thing the user said about
+   this one email, so it is stated last, labelled as an instruction, and
+   given explicit precedence over the generic requirements above it.
+
+   Returns '' when there are none, so prompts are unchanged without them. */
+function senderInstructionBlock(context = {}) {
+  const v = String(context.extraInstructions || '').trim();
+  if (!v) return '';
+  return (
+    `\n\nSender's instructions for THIS email (highest priority — follow these even where they ` +
+    `conflict with the numbered requirements above; if they ask for something specific, it must ` +
+    `appear in the email):\n${v}\n`
+  );
+}
+
+/* Event / company notes. Shared by every mode so the default cold-outreach
+   prompt stops being the only one that silently discards them. */
+function backgroundContextBlock(context = {}) {
+  const lines = [];
+  if (context.eventName) lines.push(`- Event: ${context.eventName}`);
+  if (context.companyNotes) lines.push(`- Company notes: ${context.companyNotes}`);
+  if (!lines.length) return '';
+  return `\n\nAdditional context (use this to personalize the email; don't invent beyond it):\n${lines.join('\n')}\n`;
+}
+
+/* Greeting + signature: the two things generated drafts kept omitting.
+
+   Emails were opening straight into the pitch ("Scaling cylindrical cell
+   supply...") because the prompt only ever said "Sign off as: X" — it named
+   an identity but never required a greeting, an introduction or a signature
+   block. These make the whole envelope explicit.
+
+   Nothing here is inferred. The greeting uses the recipient fields we
+   actually hold, and the signature lists only the sender details that are
+   configured — a plausible but invented phone number or address is worse
+   than an absent one. */
+function greetingRule(contact = {}) {
+  const first = String(contact.first_name || '').trim();
+  const full = String(contact.name || '').trim();
+  const last = String(contact.last_name || '').trim();
+  if (first) return `Greet them by first name: "Hi ${first},"`;
+  if (full) {
+    // Apollo obfuscates surnames ("Dory Tu***g"), so a masked name must never
+    // be printed — fall back to the clean leading token when there is one.
+    const lead = full.split(/\s+/)[0];
+    if (lead && !lead.includes('*')) return `Greet them as "Hi ${lead}," using only their first name.`;
+    return `Greet them as "Hi ${full}," using the full name exactly as written.`;
+  }
+  if (last) return `Greet them as "Dear Mr./Ms. ${last}," choosing the honorific only if the contact's gender is unambiguous from the information given; otherwise use "Dear ${last},".`;
+  return `Open with a professional greeting such as "Hello," — do not invent a name.`;
+}
+
+function signatureBlock(sender = {}) {
+  const lines = [];
+  if (sender.name) lines.push(sender.name);
+  if (sender.title) lines.push(sender.title);
+  if (sender.company) lines.push(sender.company);
+  if (sender.email) lines.push(sender.email);
+  if (sender.phone) lines.push(sender.phone);
+  if (sender.website) lines.push(sender.website);
+  if (!lines.length) return 'Close with "Best regards," followed by [Your Name] as a placeholder.';
+  return (
+    `Close with "Best regards," (or the equivalent in the email's language) on its own line, ` +
+    `then this signature block EXACTLY as given, one item per line, adding nothing and inventing ` +
+    `no extra contact details:\n${lines.join('\n')}`
+  );
+}
+
+/* The structural requirements every draft must satisfy. Appended to each
+   mode so a mode can change the angle without dropping the envelope. */
+function emailStructureBlock(contact = {}, sender = {}) {
+  const intro = sender.name
+    ? `Introduce the sender in the second sentence: their name${sender.title ? ', role' : ''}${sender.company ? ' and company' : ''} — e.g. "My name is ${sender.name}${sender.title ? ', ' + sender.title : ''}${sender.company ? ' at ' + sender.company : ''}." Do this once, briefly, and never repeat it later in the email.`
+    : `Introduce the sender briefly in the second sentence.`;
+  return (
+    `\n\nEmail structure (required — a draft missing any of these is incomplete):\n` +
+    `1. Greeting on its own line. ${greetingRule(contact)}\n` +
+    `2. ${intro}\n` +
+    `3. A personalized opening tied to this recipient or their company.\n` +
+    `4. The value proposition — what is being offered and why it matters to them.\n` +
+    `5. A clear call to action.\n` +
+    `6. ${signatureBlock(sender)}\n` +
+    `Separate these with blank lines so the result reads as a finished email, not a paragraph. ` +
+    `Do NOT start the email with the pitch.\n`
+  );
+}
+
 function buildPrompt(contact, sender, context = {}) {
   const name = contact.name || 'there';
   const title = contact.title || 'leader';
@@ -75,14 +167,19 @@ function buildPrompt(contact, sender, context = {}) {
     `- Department: ${dept}\n` +
     `${emailNote}` +
     `${linkedin ? `- LinkedIn: ${linkedin}\n` : ''}` +
-    `${senderBlock}${customerProfileBlock(context)}\n\n` +
+    `${senderBlock}${backgroundContextBlock(context)}${customerProfileBlock(context)}\n\n` +
     `Now write the outreach email. Requirements:\n` +
     `1. First person, from the sender's voice\n` +
     `2. Open with a specific, relevant observation about the recipient's role or company (not a generic compliment)\n` +
     `3. In one sentence, connect what the sender offers to a real challenge or goal the recipient likely faces in their ${dept} role\n` +
     `4. 4-6 sentences total — conversational, not salesy\n` +
     `5. Close with a low-pressure CTA: suggest a 20-30 min call\n` +
-    `6. ${signOffLine}\n` +
+    `${emailStructureBlock(contact, sender)}` +
+    `\nWrite it the way one person emails another, not the way a template fills slots: vary the\n` +
+    `sentence lengths, use ordinary contractions, and cut any phrase that could appear in an email\n` +
+    `to a different company. Avoid opening with "I hope this finds you well", "I came across", or\n` +
+    `"I wanted to reach out".\n` +
+    `${senderInstructionBlock(context)}` +
     `${draftOptionsBlock(context.options)}` +
     `\nAlso provide:\n` +
     `- subject: a compelling subject line (under 10 words, no clickbait)\n` +
@@ -103,16 +200,20 @@ function buildPrompt(contact, sender, context = {}) {
 // company notes, event context, and free-text instructions from the CRM.
 // =========================================================================
 
+// Labels are bilingual at the source: they are served to the client and
+// rendered inside <option> elements, which cannot carry the markup the
+// client-side pass uses. `label` stays the display string; `label_en` is
+// kept for anything that needs the English alone (prompts, logs, exports).
 const DRAFT_MODES = {
-  cold_outreach: { label: 'Standard cold outreach (original)' },
-  procurement_outreach: { label: 'Procurement outreach' },
-  engineering_outreach: { label: 'Engineering outreach' },
-  conference_outreach: { label: 'Conference outreach (e.g. The Battery Show)' },
-  general_follow_up: { label: 'General follow-up' },
-  company_innovations: { label: "Sharing company innovations" },
-  partnership_intro: { label: 'Partnership introduction' },
-  sales_outreach: { label: 'Sales outreach' },
-  post_meeting_follow_up: { label: 'Post-meeting follow-up' }
+  cold_outreach:        { label_en: 'Standard cold outreach (original)', label: 'Standard cold outreach 标准陌生开发' },
+  procurement_outreach: { label_en: 'Procurement outreach',             label: 'Procurement outreach 采购部门开发' },
+  engineering_outreach: { label_en: 'Engineering outreach',             label: 'Engineering outreach 工程部门开发' },
+  conference_outreach:  { label_en: 'Conference outreach',              label: 'Conference outreach 展会开发' },
+  general_follow_up:    { label_en: 'General follow-up',                label: 'General follow-up 常规跟进' },
+  company_innovations:  { label_en: 'Sharing company innovations',      label: 'Company innovations 公司创新分享' },
+  partnership_intro:    { label_en: 'Partnership introduction',         label: 'Partnership introduction 合作介绍' },
+  sales_outreach:       { label_en: 'Sales outreach',                   label: 'Sales outreach 销售开发' },
+  post_meeting_follow_up:{ label_en: 'Post-meeting follow-up',          label: 'Post-meeting follow-up 会后跟进' }
 };
 
 function listDraftModes() {
@@ -209,10 +310,26 @@ const DRAFT_TONES = {
   formal:       { label: 'Formal',       instruction: 'Formal and deferential: full sentences, honorifics where natural, no contractions.' },
 };
 
+/* Language applies to the WHOLE email, not just the body: subject, greeting,
+   call to action and sign-off included. Saying so explicitly is what stops
+   the model producing an English subject over a Chinese body. */
 const DRAFT_LANGUAGES = {
-  english: { label: 'English',        instruction: 'Write the entire email, subject line and follow-up in English.' },
-  chinese: { label: '中文',            instruction: 'Write the entire email, subject line and follow-up in Simplified Chinese (简体中文), using natural business Chinese rather than a translation of English phrasing.' },
-  match:   { label: 'Match recipient', instruction: "Infer the recipient's working language from their name, company and location, and write the entire email in that language. If it is genuinely unclear, use English." },
+  english: {
+    label: 'English', unit: 'words',
+    instruction: 'Write the ENTIRE email in English — subject line, greeting, body, call to action, sign-off and the follow-up line. Use English business conventions for the greeting and closing.',
+  },
+  chinese: {
+    label: 'Chinese 中文', unit: 'chars',
+    instruction: 'Write the ENTIRE email in Simplified Chinese (简体中文) — subject line, greeting, body, call to action, sign-off and the follow-up line. Use natural business Chinese and Chinese salutation/closing conventions (e.g. 您好 / 此致敬礼), not a literal translation of English phrasing.',
+  },
+  bilingual: {
+    label: 'Bilingual 双语', unit: 'both',
+    instruction: 'Write the email BILINGUALLY: first the complete English version, then a horizontal rule line "---", then the complete Simplified Chinese version. Both versions must carry the same message, greeting, call to action and sign-off — the Chinese half is a natural business-Chinese rendering, not a literal translation. The subject line must contain both, as "English subject / 中文主题".',
+  },
+  match: {
+    label: 'Match recipient 匹配收件人', unit: 'words',
+    instruction: "Infer the recipient's working language from their name, company and location, and write the ENTIRE email in that language — subject, greeting, body, call to action and sign-off. If it is genuinely unclear, use English.",
+  },
 };
 
 const DRAFT_CTAS = {
@@ -256,14 +373,17 @@ function draftOptionsSignature(raw) {
 function draftOptionsBlock(raw) {
   const o = normalizeDraftOptions(raw);
 
-  // Chinese is written in characters, not space-delimited words, and asking
+  // Chinese is written in characters, not space-delimited words, so asking
   // for "60 words" of Chinese means nothing. One English word is roughly 1.8
-  // Chinese characters, so the budget is restated in the unit the model is
-  // actually producing.
-  const zh = o.language === 'chinese';
-  const budget = zh
-    ? `约 ${Math.round(o.words[0] * 1.8)}-${Math.round(o.words[1] * 1.8)} 个汉字 (about ${Math.round(o.words[0] * 1.8)}-${Math.round(o.words[1] * 1.8)} Chinese characters)`
-    : `about ${o.words[0]}-${o.words[1]} words`;
+  // Chinese characters. Bilingual states both, because each half is measured
+  // in its own unit and the total is naturally about double.
+  const unit = (DRAFT_LANGUAGES[o.language] || {}).unit || 'words';
+  const zhLo = Math.round(o.words[0] * 1.8), zhHi = Math.round(o.words[1] * 1.8);
+  const budget = unit === 'chars'
+    ? `约 ${zhLo}-${zhHi} 个汉字 (about ${zhLo}-${zhHi} Chinese characters)`
+    : unit === 'both'
+      ? `about ${o.words[0]}-${o.words[1]} words for the English version AND 约 ${zhLo}-${zhHi} 个汉字 for the Chinese version (each half separately, not combined)`
+      : `about ${o.words[0]}-${o.words[1]} words`;
 
   // A word budget alone loses to the numbered requirements above, which each
   // demand their own sentence: asking for 50-80 words while still requiring an
@@ -318,7 +438,7 @@ function buildContextBlocks(contact, sender, context) {
   const contextLines = [];
   if (context.eventName) contextLines.push(`- Event: ${context.eventName}`);
   if (context.companyNotes) contextLines.push(`- Company notes: ${context.companyNotes}`);
-  if (context.extraInstructions) contextLines.push(`- Sender's specific instructions for this email: ${context.extraInstructions}`);
+
   const contextBlock = contextLines.length ? `\n\nAdditional context (use this to personalize the email; don't invent beyond it):\n${contextLines.join('\n')}` : '';
 
   return {
@@ -338,7 +458,7 @@ function buildPromptForMode(mode, contact, sender, context = {}) {
   const reqList = requirements.map((r, i) => `${i + 1}. ${r}`).join('\n');
 
   return (
-    `You are drafting a "${DRAFT_MODES[mode].label}" email on behalf of a specific person.\n` +
+    `You are drafting a "${DRAFT_MODES[mode].label_en || DRAFT_MODES[mode].label}" email on behalf of a specific person.\n` +
     `\nRecipient:\n` +
     `- Name: ${name}\n` +
     `- Title: ${title}\n` +
@@ -349,7 +469,8 @@ function buildPromptForMode(mode, contact, sender, context = {}) {
     `${senderBlock}` +
     `${contextBlock}${customerProfileBlock(context)}\n\n` +
     `Now write the email. Requirements:\n${reqList}\n` +
-    `${requirements.length + 1}. ${signOffLine}\n` +
+    `${emailStructureBlock(contact, sender)}` +
+    `${senderInstructionBlock(context)}` +
     `${draftOptionsBlock(context.options)}` +
     `\nAlso provide:\n` +
     `- subject: a compelling subject line (under 10 words, no clickbait)\n` +
@@ -423,7 +544,15 @@ async function draftEmail(contact, sender, mode, context) {
     return { ...offlineStub(contact, sender, mode, context), claude_configured: false };
   }
 
-  const prompt = buildPromptForMode(mode, contact, sender, context);
+  /* An edited prompt from the Prompt Inspector wins over the assembled one.
+
+     The Inspector splits the prompt into contiguous sections that concatenate
+     back to it byte-for-byte, so an edit changes exactly what the user
+     changed and nothing else. It is per-draft: nothing is persisted, so the
+     next draft starts from the assembled prompt again. */
+  const prompt = (context && typeof context.promptOverride === 'string' && context.promptOverride.trim())
+    ? context.promptOverride
+    : buildPromptForMode(mode, contact, sender, context);
 
   try {
     const res = await fetch(CLAUDE_MESSAGES_URL, {

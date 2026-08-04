@@ -2037,7 +2037,7 @@ function buildCustomerProfile(company, companyTags, contactTags, taxonomy, inclu
 // Assemble the full draft context (customer profile + SKQ grounding + company
 // notes/event) from saved data. DB-only, no AI. Shared by /api/draft-email and
 // the Prompt Inspector so what you preview is exactly what gets sent.
-async function buildDraftContext(contact, mode, extraInstructions, resolvedContactId, includeTagIds, options) {
+async function buildDraftContext(contact, mode, extraInstructions, resolvedContactId, includeTagIds, options, skqSelected) {
   const context = {};
   // Length/tone/language/CTA travel with the rest of the context so the
   // Prompt Inspector previews exactly the prompt that will be sent.
@@ -2073,14 +2073,13 @@ async function buildDraftContext(contact, mode, extraInstructions, resolvedConta
       tagsUsed = profile.count;
       breakdown = profile.breakdown;
       // Deterministic product grounding — retrieve matching SKQ modules from DB.
+      // These are RECOMMENDATIONS. They are always computed so the UI can show
+      // them, but nothing reaches the prompt unless the user picked it: sending
+      // every match made each email a catalogue dump of whatever the tags
+      // happened to hit, which is the opposite of a focused first touch.
       skqModules = await matchSkqForTags(profile.productValues);
-      if (skqModules.length) {
-        context.skqCapabilities =
-          `Relevant SKQ capabilities (from SKQ's module catalog — include only those that fit this email):\n` +
-          skqModules.map((m) => `- ${m.name_en}${m.name_cn ? ' / ' + m.name_cn : ''}`).join('\n');
-      }
     }
-    if (mode && mode !== 'cold_outreach') {
+    {
       const notesParts = [companyRow.notes, companyRow.background, companyRow.opportunity].filter(Boolean);
       if (notesParts.length) context.companyNotes = notesParts.join(' | ');
       if (companyRow.event_id) {
@@ -2090,7 +2089,22 @@ async function buildDraftContext(contact, mode, extraInstructions, resolvedConta
       }
     }
   }
-  return { context, tagsUsed, breakdown, skqModules, companyId: companyRow ? companyRow.id : null,
+  // Selected capabilities: names the user ticked, plus any they typed in.
+  // Free text is allowed because the catalogue can't anticipate every angle,
+  // and an unmatched capability the sender knows is relevant is more useful
+  // than a matched one that isn't.
+  const picked = []
+    .concat(Array.isArray(skqSelected) ? skqSelected : [])
+    .map((x) => String(x || '').trim())
+    .filter(Boolean);
+  if (picked.length) {
+    context.skqCapabilities =
+      `SKQ capabilities the sender chose for THIS email (use these, and only these):\n` +
+      picked.map((nm) => `- ${nm}`).join('\n');
+  }
+
+  return { context, tagsUsed, breakdown, skqModules, skqSelected: picked,
+    companyId: companyRow ? companyRow.id : null,
     companyTags: rawCompanyTags, contactTags: rawContactTags, includeTagIds, tagConfig };
 }
 
@@ -2121,8 +2135,12 @@ const PROMPT_ANCHORS = [
   { re: /\nSender \(the person writing/, key: 'sender', label: 'Sender' },
   { re: /\nAdditional context/, key: 'additional', label: 'Additional Context' },
   { re: /Customer Profile\n/, key: 'company', label: 'Company Context (tags)' },
-  { re: /Relevant SKQ capabilities/, key: 'product', label: 'Product Context (SKQ)' },
+  { re: /SKQ capabilities the sender chose/, key: 'product', label: 'Product Context (SKQ)' },
   { re: /\n(Now write|Now write the)/, key: 'rules', label: 'Email Rules & CTA' },
+  // Its own section, so "are my instructions actually in there?" is answered
+  // by looking rather than by reading the whole prompt.
+  { re: /\nSender's instructions for THIS email/, key: 'instructions', label: "Your Additional Instructions" },
+  { re: /\nOutput controls/, key: 'controls', label: 'Length · Tone · Language' },
   { re: /\nAlso provide:/, key: 'output', label: 'Output Format' },
 ];
 function sectionizePrompt(prompt) {
@@ -2159,7 +2177,9 @@ app.post('/api/draft-email', async (req, res) => {
     // Length / tone / language / CTA. Unknown or absent values fall back to
     // the defaults, so an old client that sends none behaves exactly as before.
     const resolvedOptions = normalizeDraftOptions(req.body.options);
-    const optionsSignature = draftOptionsSignature(req.body.options);
+    let optionsSignature = draftOptionsSignature(req.body.options);
+    const skqSig = (Array.isArray(req.body.skqSelected) ? req.body.skqSelected : []).join('~');
+    if (skqSig) optionsSignature += `|skq:${skqSig}`;
 
     // Reuse an existing draft for the same (contact, mode, instructions,
     // generation options) instead of calling Claude again -- unless the user
@@ -2190,18 +2210,34 @@ app.post('/api/draft-email', async (req, res) => {
       }
     }
 
+    /* A prompt edited in the Prompt Inspector replaces the assembled one.
+       Sections arrive in order and are concatenated; sectionizePrompt splits
+       on contiguous boundaries, so an untouched set rebuilds the original
+       exactly and only real edits change anything.
+
+       Recorded in the options signature too, so an edited draft is never
+       silently reused for a later request that didn't edit the prompt. */
+    const promptSections = Array.isArray(req.body.promptSections) ? req.body.promptSections : null;
+    const promptOverride = promptSections && promptSections.length
+      ? promptSections.map((x) => String((x && x.text) || '')).join('')
+      : '';
+
     // Assemble the draft context from saved intelligence (AI tags used by
     // default, confidence-tiered) + deterministic SKQ grounding. No AI here.
-    const built = await buildDraftContext(contact, mode, extraInstructions, resolvedContactId, req.body.includeTagIds, req.body.options);
+    const built = await buildDraftContext(contact, mode, extraInstructions, resolvedContactId, req.body.includeTagIds, req.body.options, req.body.skqSelected);
     const context = built.context;
+    if (promptOverride) context.promptOverride = promptOverride;
     const tagsUsed = built.tagsUsed;
 
     // About to spend tokens — enforce the budget.
     const blocked = await checkAiBudget();
     if (blocked) return res.status(429).json(blocked);
 
+    // Ignore whatever identity the client posted: the signature must reflect
+    // the configured profile and the connected mailbox, or it is a guess.
+    const signingSender = await effectiveSenderIdentity(reqUser(req), sender);
     const _t0 = Date.now();
-    const draft = await draftEmail(contact, sender, mode, context);
+    const draft = await draftEmail(contact, signingSender, mode, context);
     const _ms = Date.now() - _t0;
 
     // Record the real AI draft call.
@@ -2252,7 +2288,7 @@ app.post('/api/draft-email/inspect', async (req, res) => {
     if (!contact) return res.status(400).json({ error: 'No contact provided' });
     const resolvedContactId = contactId || contact.contact_id;
     const resolvedMode = mode || 'cold_outreach';
-    const built = await buildDraftContext(contact, resolvedMode, extraInstructions || '', resolvedContactId, includeTagIds, options);
+    const built = await buildDraftContext(contact, resolvedMode, extraInstructions || '', resolvedContactId, includeTagIds, options, req.body.skqSelected);
     let priorSummary = null;
     if (resolvedContactId) {
       try {
@@ -2260,7 +2296,8 @@ app.post('/api/draft-email/inspect', async (req, res) => {
         priorSummary = `${(timeline || []).length} prior interaction(s) on record`;
       } catch { priorSummary = null; }
     }
-    const prompt = buildPromptForMode(resolvedMode, contact, sender || {}, built.context);
+    const inspectSender = await effectiveSenderIdentity(reqUser(req), sender);
+    const prompt = buildPromptForMode(resolvedMode, contact, inspectSender, built.context);
 
     // ── Prompt Analytics ──────────────────────────────────────────────────
     const sections = sectionizePrompt(prompt);
@@ -2608,10 +2645,39 @@ app.delete('/api/contacts/:id/tags/:tagId', async (req, res) => {
 // Sender profile
 // =========================================================================
 
-app.get('/api/settings/sender', async (req, res) => {
+/* The identity a draft signs off with.
+
+   Assembled from two places rather than one: the profile holds who the
+   sender is (name/title/company/phone/website), while the address comes
+   from the mailbox they actually send through. Taking the address from the
+   connected account is what stops the model inventing one — a signature
+   with a plausible but wrong email is worse than no signature. */
+async function effectiveSenderIdentity(userId, overrides) {
+  let profile = {};
   try {
     const raw = await getSetting('sender_profile');
-    res.json({ ok: true, sender: raw ? JSON.parse(raw) : { name: '', title: '', company: '' } });
+    if (raw) profile = JSON.parse(raw) || {};
+  } catch (e) { profile = {}; }
+
+  let account = null;
+  try { account = await getEmailUserAccount(userId); } catch (e) { account = null; }
+
+  const o = overrides || {};
+  return {
+    name:    o.name    || profile.name    || (account && account.sender_name)  || '',
+    title:   o.title   || profile.title   || '',
+    company: o.company || profile.company || '',
+    // Address always follows the sending account when one is connected.
+    email:   (account && account.sender_email) || profile.email || '',
+    phone:   profile.phone   || '',
+    website: profile.website || '',
+  };
+}
+
+app.get('/api/settings/sender', async (req, res) => {
+  try {
+    const sender = await effectiveSenderIdentity(reqUser(req));
+    res.json({ ok: true, sender });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load sender profile' });
   }
@@ -2619,8 +2685,8 @@ app.get('/api/settings/sender', async (req, res) => {
 
 app.post('/api/settings/sender', async (req, res) => {
   try {
-    const { name = '', title = '', company = '' } = req.body || {};
-    await setSetting('sender_profile', JSON.stringify({ name, title, company }));
+    const { name = '', title = '', company = '', phone = '', website = '' } = req.body || {};
+    await setSetting('sender_profile', JSON.stringify({ name, title, company, phone, website }));
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to save sender profile' });
