@@ -12,7 +12,7 @@ const express = require('express');
 const { CLAUDE_API_KEY, isClaudeConfigured } = require('./config');
 const { recordAiEvent, WEB_SEARCH_USD_PER_CALL } = require('./usage');
 
-const CLAUDE_MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
+const CLAUDE_MESSAGES_URL = process.env.CLAUDE_MESSAGES_URL || 'https://api.anthropic.com/v1/messages';
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const MAX_TOKENS = 16000;
 const MAX_TOOL_ITER = 8;          // safety bound on the agentic search loop
@@ -42,6 +42,66 @@ function countSearches(content) {
   ).length;
 }
 
+/* A single request may legitimately take minutes: this is an agentic loop
+   with server-side web search, and observed successful sections have run
+   230-300s end to end. The deadline is per HTTP request, not per section, and
+   is set well above that so a slow-but-working call is never cut off — its
+   job is to stop a dead socket from hanging the section forever. */
+const REQUEST_TIMEOUT_MS = Number(process.env.CLAUDE_REQUEST_TIMEOUT_MS) || 180000;   // 3 min per HTTP request
+const MAX_ATTEMPTS = Number(process.env.CLAUDE_MAX_ATTEMPTS) || 3;
+const RETRY_BASE_MS = Number(process.env.CLAUDE_RETRY_BASE_MS) || 1500;
+
+/* Node's fetch reports every network-level failure as the same three words:
+   "fetch failed". The reason it actually failed -- DNS, reset connection,
+   TLS, timeout -- is on err.cause, which was being discarded. That is why a
+   failed section could only ever say "fetch failed", and why this function
+   exists rather than a bare err.message. */
+function describeFetchError(err) {
+  if (err && err.name === 'AbortError') {
+    return `Request timed out after ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s`;
+  }
+  const cause = err && err.cause;
+  if (cause) {
+    const code = cause.code || cause.errno;
+    const detail = cause.message && cause.message !== err.message ? cause.message : '';
+    if (code) return `${err.message} (${code}${detail ? `: ${detail}` : ''})`;
+    if (detail) return `${err.message} (${detail})`;
+  }
+  return (err && err.message) || 'Unknown network error';
+}
+
+/* Which failures are worth trying again. A transient one -- socket reset,
+   rate limit, overloaded API -- is retried; a 401 or a malformed request is
+   not, because retrying it just burns time and produces the same answer. */
+function isRetryable(err) {
+  if (err && err.name === 'AbortError') return true;
+  if (err && err.status) return err.status === 429 || err.status >= 500;
+  return Boolean(err && err.cause);       // any network-level throw
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* One HTTP request to the API, with a deadline. Separated so the retry loop
+   below has something to retry. */
+async function postToClaude(body) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(CLAUDE_MESSAGES_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': CLAUDE_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+      signal: ac.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Agentic call: Claude may search several times before answering. Server-side
 // tools resolve on Anthropic's side, so a `pause_turn` is resumed by replaying
 // the assistant turn rather than by us executing anything.
@@ -58,25 +118,47 @@ async function callClaude({ model, prompt, useSearch, meta }) {
     const body = { model, max_tokens: MAX_TOKENS, messages };
     if (useSearch) body.tools = [WEB_SEARCH_TOOL];
 
-    const resp = await fetch(CLAUDE_MESSAGES_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': CLAUDE_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(body),
-    });
+    /* Retry loop. A transient blip used to cost the whole section: one throw
+       anywhere in a multi-minute agentic call dropped it to fallback
+       boilerplate and the run continued as though nothing had happened. */
+    let resp = null;
+    let lastError = null;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        resp = await postToClaude(body);
+        if (resp.ok) { lastError = null; break; }
 
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      const msg = (err && err.error && err.error.message) || `HTTP ${resp.status}`;
+        const errBody = await resp.json().catch(() => ({}));
+        const msg = (errBody && errBody.error && errBody.error.message) || `HTTP ${resp.status}`;
+        const httpErr = new Error(msg);
+        httpErr.status = resp.status;
+        lastError = httpErr;
+        if (!isRetryable(httpErr) || attempt === MAX_ATTEMPTS) break;
+      } catch (netErr) {
+        lastError = new Error(describeFetchError(netErr));
+        lastError.cause = netErr;
+        if (!isRetryable(netErr) || attempt === MAX_ATTEMPTS) break;
+      }
+      // Exponential backoff: 1.5s, 3s. Enough for a reset socket or a brief
+      // rate limit, short enough not to stall a six-section report.
+      const wait = RETRY_BASE_MS * Math.pow(2, attempt - 1);
+      console.warn(`[account_research] ${meta && meta.section || 'section'} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${lastError.message} — retrying in ${wait}ms`);
+      await sleep(wait);
+    }
+
+    if (lastError) {
+      /* Recorded before throwing. Network-level failures previously bypassed
+         recordAiEvent entirely -- it only ran for !resp.ok -- so a section
+         that died on a dropped connection left no trace in the AI usage
+         dashboard at all. A failure you cannot see is a failure you cannot
+         diagnose later. */
       recordAiEvent({
         feature: 'account_research', sub_feature: meta && meta.section,
-        model, status: 'error', error_message: msg,
+        model, status: 'error', error_message: lastError.message,
         response_ms: Date.now() - started, user_id: meta && meta.userId,
       });
-      throw new Error(msg);
+      console.error(`[account_research] ${meta && meta.section || 'section'} failed after ${MAX_ATTEMPTS} attempt(s): ${lastError.message}`);
+      throw lastError;
     }
 
     const data = await resp.json();
@@ -253,4 +335,4 @@ function createRouter(db) {
   return router;
 }
 
-module.exports = { createRouter, DEFAULT_MODEL, WEB_SEARCH_USD_PER_CALL };
+module.exports = { __test: { callClaude, describeFetchError, isRetryable }, createRouter, DEFAULT_MODEL, WEB_SEARCH_USD_PER_CALL };
