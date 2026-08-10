@@ -500,6 +500,32 @@ textarea.editable{resize:vertical;overflow:auto;min-height:36px}
 .sha{flex-shrink:0}.shb{white-space:nowrap}.phase-a>div{min-width:0;flex:1}.src-url{word-break:break-all}
 .btn-ppt:disabled{opacity:.45;cursor:not-allowed}
 
+
+    /* ── Target Company autocomplete ─────────────────────────────────── */
+    .ac-wrap { position: relative; }
+    .ac-list {
+      position: absolute; z-index: 60; left: 0; right: 0; top: calc(100% + 4px);
+      background: #fff; border: 1px solid #cbd5e1; border-radius: 8px;
+      box-shadow: 0 10px 26px rgba(0,0,0,.14); max-height: 260px; overflow-y: auto;
+    }
+    .ac-list[hidden] { display: none; }
+    .ac-head {
+      font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+      color: #94a3b8; padding: 8px 12px 4px;
+    }
+    .ac-item {
+      display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+      cursor: pointer; font-size: 13px;
+    }
+    .ac-item:hover, .ac-item.is-active { background: #EEF2FF; }
+    .ac-item .ac-name { font-weight: 600; color: #0f172a; }
+    .ac-item .ac-url  { color: #94a3b8; font-size: 11px; margin-left: auto; }
+    .ac-item .ac-del  {
+      border: 0; background: none; color: #94a3b8; cursor: pointer;
+      font-size: 15px; line-height: 1; padding: 0 2px; border-radius: 4px;
+    }
+    .ac-item .ac-del:hover { background: #e2e8f0; color: #b91c1c; }
+    .ac-empty { padding: 10px 12px; font-size: 12px; color: #94a3b8; }
 </style>
 <script src="vendor/pptxgenjs/pptxgen.bundle.js"></script>
 <script src="vendor/docx/index.iife.js"></script>
@@ -560,7 +586,15 @@ textarea.editable{resize:vertical;overflow:auto;min-height:36px}
           </div>
           <div class="field-group">
             <label>目标公司名称 <span class="zh-l">· Target Company</span> <span class="req">*</span></label>
-            <input id="inp-target" type="text" placeholder="例如 United Parcel Service · 联合包裹"/>
+            <!-- Combobox: type to filter, or click to see companies already
+                 researched. Replaces the separate Saved Targets card, which
+                 made selecting a company a detour to another part of the page. -->
+            <div class="ac-wrap">
+              <input id="inp-target" type="text" autocomplete="off" role="combobox"
+                     aria-expanded="false" aria-autocomplete="list" aria-controls="target-ac"
+                     placeholder="例如 United Parcel Service · 联合包裹 — 点击查看已研究公司"/>
+              <div id="target-ac" class="ac-list" role="listbox" hidden></div>
+            </div>
           </div>
           <div class="field-group">
             <label>目标公司网站 <span class="zh-l">· Target Website</span> <span class="opt-tag">可选</span></label>
@@ -632,21 +666,6 @@ textarea.editable{resize:vertical;overflow:auto;min-height:36px}
       </div>
     </div>
 
-    <!-- 已保存目标 -->
-    <div class="ar-card">
-      <div class="ar-card-head"><span class="ar-card-title">已保存目标 · Saved Targets</span></div>
-      <div class="ar-card-body">
-        <div class="field-group" style="margin-bottom:0">
-          <label>选择一个已保存的目标以快速填充上方表单</label>
-          <div style="display:flex;gap:8px">
-            <select id="savedCompanies" onchange="loadSaved(this.value)" style="flex:1">
-              <option value="">— 选择已保存目标 · Select saved target —</option>
-            </select>
-            <button class="btn-mini" onclick="saveCompany()">💾 保存</button>
-          </div>
-        </div>
-      </div>
-    </div>
 
     <div class="btn-row">
       <button class="btn-gen" id="btnGen" onclick="onGenerateClick()">
@@ -1162,25 +1181,126 @@ async function saveResearchCache(type, key, data, costUSD) {
 }
 const LS_KEY='acctPlan_savedCompanies';
 function loadSavedCompanies(){try{return JSON.parse(localStorage.getItem(LS_KEY)||'[]');}catch(_){return[];}}
-function saveCompany(){
-  const name=document.getElementById('inp-target').value.trim(),url=document.getElementById('inp-target-url').value.trim();
-  if(!name)return;
-  const list=loadSavedCompanies().filter(c=>c.name!==name);
-  list.unshift({name,url,saved:Date.now()});
-  localStorage.setItem(LS_KEY,JSON.stringify(list.slice(0,20)));
-  renderSavedDropdown();
+
+/* Records a company as researched. Called after a report is generated, not
+   before: the list is "companies you have reports for", so adding a name the
+   moment it is typed would fill it with abandoned attempts and typos. */
+function rememberCompany(name,url){
+  const n=(name||'').trim(); if(!n) return;
+  const list=loadSavedCompanies().filter(c=>c.name.toLowerCase()!==n.toLowerCase());
+  list.unshift({name:n,url:(url||'').trim(),saved:Date.now()});
+  try{ localStorage.setItem(LS_KEY,JSON.stringify(list.slice(0,40))); }catch(_){}
 }
-function renderSavedDropdown(){
-  const list=loadSavedCompanies(),sel=document.getElementById('savedCompanies');
-  if(!sel)return;
-  sel.innerHTML='<option value="">— Saved targets · 已保存目标 —</option>'+list.map(c=>`<option value="${esc(c.name)}|${esc(c.url)}">${esc(c.name)}</option>`).join('');
+
+function forgetCompany(name){
+  const list=loadSavedCompanies().filter(c=>c.name.toLowerCase()!==(name||'').toLowerCase());
+  try{ localStorage.setItem(LS_KEY,JSON.stringify(list)); }catch(_){}
 }
-function loadSaved(val){
-  if(!val)return;
-  const[name,url]=val.split('|');
-  document.getElementById('inp-target').value=name||'';
-  document.getElementById('inp-target-url').value=url||'';
-  document.getElementById('savedCompanies').value='';
+
+/* Companies offered in the dropdown: those saved locally, plus the targets of
+   every stored report. The repository is the authority on what has actually
+   been researched, so a report generated on another device still shows up.
+   This does not duplicate Report History — that lists reports and versions;
+   this is only a way to fill in the field. */
+let _acCompanies=null, _acIndex=-1, _acItems=[];
+async function acCompanies(){
+  if(_acCompanies) return _acCompanies;
+  const merged=new Map();
+  loadSavedCompanies().forEach(c=>merged.set(c.name.toLowerCase(),{name:c.name,url:c.url||'',ts:c.saved||0}));
+  try{
+    const r=await fetch(getBase()+'/api/reports');
+    if(r.ok){
+      const d=await r.json();
+      (d.reports||[]).forEach(rep=>{
+        const k=(rep.target||'').toLowerCase(); if(!k) return;
+        const prev=merged.get(k);
+        const ts=new Date(rep.createdAt||0).getTime()||0;
+        if(!prev || ts>prev.ts) merged.set(k,{name:rep.target,url:(prev&&prev.url)||rep.turl||'',ts});
+      });
+    }
+  }catch(e){ /* offline: local list alone is still useful */ }
+  _acCompanies=[...merged.values()].sort((a,b)=>b.ts-a.ts);
+  return _acCompanies;
+}
+function acInvalidate(){ _acCompanies=null; }
+
+function acClose(){
+  const box=document.getElementById('target-ac');
+  if(box){ box.hidden=true; box.innerHTML=''; }
+  const inp=document.getElementById('inp-target');
+  if(inp) inp.setAttribute('aria-expanded','false');
+  _acIndex=-1; _acItems=[];
+}
+
+function acPick(c){
+  document.getElementById('inp-target').value=c.name;
+  // Only fill the URL from the saved entry; never clear one the user typed.
+  const u=document.getElementById('inp-target-url');
+  if(u && c.url) u.value=c.url;
+  acClose();
+}
+
+async function acOpen(filter){
+  const inp=document.getElementById('inp-target'), box=document.getElementById('target-ac');
+  if(!inp||!box) return;
+  const all=await acCompanies();
+  const q=(filter||'').trim().toLowerCase();
+  const list=q ? all.filter(c=>c.name.toLowerCase().includes(q)) : all;
+  _acItems=list.slice(0,12); _acIndex=-1;
+
+  if(!_acItems.length){
+    box.innerHTML=`<div class="ac-empty">${q?'No matching company · 无匹配公司':'No researched companies yet · 暂无已研究公司'}</div>`;
+    box.hidden=false; inp.setAttribute('aria-expanded','true');
+    return;
+  }
+  box.innerHTML=`<div class="ac-head">Previously researched · 已研究公司</div>`+
+    _acItems.map((c,i)=>`<div class="ac-item" role="option" data-i="${i}">
+        <span class="ac-name">${esc(c.name)}</span>
+        ${c.url?`<span class="ac-url">${esc(c.url.replace(/^https?:\/\//,''))}</span>`:''}
+        <button class="ac-del" data-del="${esc(c.name)}" title="Remove from list · 从列表移除">×</button>
+      </div>`).join('');
+  box.hidden=false; inp.setAttribute('aria-expanded','true');
+
+  box.querySelectorAll('.ac-item').forEach(el=>{
+    el.addEventListener('mousedown',ev=>{           // mousedown: fires before blur
+      if(ev.target.closest('.ac-del')) return;
+      ev.preventDefault(); acPick(_acItems[Number(el.dataset.i)]);
+    });
+  });
+  box.querySelectorAll('.ac-del').forEach(btn=>{
+    btn.addEventListener('mousedown',ev=>{
+      ev.preventDefault(); ev.stopPropagation();
+      forgetCompany(btn.dataset.del); acInvalidate();
+      acOpen(document.getElementById('inp-target').value);
+    });
+  });
+}
+
+function acHighlight(delta){
+  if(!_acItems.length) return;
+  _acIndex=(_acIndex+delta+_acItems.length)%_acItems.length;
+  const box=document.getElementById('target-ac');
+  box.querySelectorAll('.ac-item').forEach((el,i)=>el.classList.toggle('is-active',i===_acIndex));
+}
+
+function initTargetAutocomplete(){
+  const inp=document.getElementById('inp-target');
+  if(!inp) return;
+  inp.addEventListener('focus',()=>acOpen(inp.value));
+  inp.addEventListener('click',()=>acOpen(inp.value));
+  inp.addEventListener('input',()=>acOpen(inp.value));
+  inp.addEventListener('keydown',e=>{
+    const box=document.getElementById('target-ac');
+    if(!box||box.hidden){ if(e.key==='ArrowDown') acOpen(inp.value); return; }
+    if(e.key==='ArrowDown'){ e.preventDefault(); acHighlight(1); }
+    else if(e.key==='ArrowUp'){ e.preventDefault(); acHighlight(-1); }
+    else if(e.key==='Enter'){ if(_acIndex>=0){ e.preventDefault(); acPick(_acItems[_acIndex]); } }
+    else if(e.key==='Escape'){ acClose(); }
+  });
+  inp.addEventListener('blur',()=>setTimeout(acClose,120));
+  document.addEventListener('click',e=>{
+    if(!e.target.closest('.ac-wrap')) acClose();
+  });
 }
 
 /* ════ PROGRESS ════ */
@@ -2401,6 +2521,7 @@ async function persistReport(auto){
     if(btn){ btn.textContent = (auto?'✅ Auto-saved v':'✅ Saved v')+data.version; }
     setTimeout(restore, 2500);
     refreshArStats();                      // the "saved reports" card, immediately
+    acInvalidate();                        // a new report means a new offerable company
     return data;
   }catch(e){
     if(btn){ btn.textContent='⚠️ Not saved · 未保存'; btn.style.background='#B91C1C'; }
@@ -2495,8 +2616,8 @@ function initApp() {
     tog.classList.toggle('open');
   });
 
-  // Saved companies dropdown
-  renderSavedDropdown();
+  // Target Company autocomplete (replaces the Saved Targets card)
+  initTargetAutocomplete();
 
   // Disable PPT until report generated
   updatePptButton();
@@ -2614,8 +2735,6 @@ async function generate(forceRefresh = false) {
   setProg(0, 'Starting · 开始');
   const oldR = document.getElementById('retryAllBtn'); if (oldR) oldR.remove();
 
-  // Save target company to localStorage
-  saveCompany();
 
   _lastRunLoadedFromRepo = false;
   // Reuse a previously saved report instead of calling Claude again — but
@@ -2775,6 +2894,11 @@ async function generate(forceRefresh = false) {
 
   // Persist before anything else can navigate away from it.
   autoSaveAfterGenerate(successCount, total);
+
+  /* Offer this company in the Target field from now on. Recorded here rather
+     than when Generate was clicked, so the list holds companies that actually
+     produced a report instead of every abandoned attempt. */
+  if (rendered > 0) { rememberCompany(target, turl); acInvalidate(); }
 
   if (fallbackCount > 0) {
     const failedLabels = Object.entries(results).filter(([,v])=>v==='fallback')
