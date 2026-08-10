@@ -32,6 +32,26 @@ test.before(async () => {
       res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '1' });
       return res.end(JSON.stringify({ error: { message: 'rate limited' } }));
     }
+    if (mode === 'tool_use') {
+      // First turn asks for a client-side tool; second turn answers normally.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (hits === 1) {
+        return res.end(JSON.stringify({
+          content: [{ type: 'tool_use', id: 'tu_1', name: 'some_tool', input: { q: 'x' } }],
+          usage: { input_tokens: 3, output_tokens: 1 },
+          stop_reason: 'tool_use',
+        }));
+      }
+      return res.end(JSON.stringify({
+        content: [{ type: 'text', text: '{"ok":true}' }],
+        usage: { input_tokens: 5, output_tokens: 2 },
+        stop_reason: 'end_turn',
+      }));
+    }
+    if (mode === 'no_blocks') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ content: [], usage: {}, stop_reason: 'tool_use' }));
+    }
     if (mode === 'bad_gateway') {
       res.writeHead(502, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ error: { message: 'Bad gateway' } }));
@@ -168,4 +188,19 @@ test('describeFetchError names the underlying code', () => {
   const out = describeFetchError(err);
   assert.match(out, /ECONNRESET/);
   assert.notEqual(out, 'fetch failed');
+});
+
+test('an unexpected client-side tool_use turn is relayed, not fatal', async () => {
+  // Previously this threw "Unexpected stop_reason: tool_use" and lost the
+  // whole section. The original standalone app relayed it; that is safer.
+  withMode('tool_use');
+  const r = await call();
+  assert.match(r.text, /ok/);
+  assert.equal(hits, 2, 'should have continued the conversation, not given up');
+});
+
+test('a tool_use turn with no blocks is still an error', async () => {
+  // Relaying nothing would loop to the iteration cap for no reason.
+  withMode('no_blocks');
+  await assert.rejects(call, /no tool_use blocks/);
 });

@@ -293,6 +293,39 @@ async function callClaude({ model, prompt, useSearch, meta }) {
       continue;
     }
 
+    /* A client-side tool request. We declare only the server-side web_search
+       tool, whose loop resumes through pause_turn above, so this should not
+       occur -- and the previous code treated it as unreachable and threw
+       "Unexpected stop_reason: tool_use", losing the section outright.
+
+       The original standalone app relayed these instead, and that is the
+       safer behaviour: acknowledge each block so the conversation can
+       continue rather than dying on a turn we merely did not expect. The
+       reply echoes the request rather than executing anything -- we have no
+       client-side tool to execute -- so this is a continuation, not a real
+       tool result. It is logged because if it ever fires, the tool
+       configuration is what actually needs looking at. MAX_TOOL_ITER still
+       bounds the loop. */
+    if (data.stop_reason === 'tool_use') {
+      const toolUseBlocks = content.filter((b) => b.type === 'tool_use');
+      if (!toolUseBlocks.length) {
+        throw new Error('stop_reason=tool_use but no tool_use blocks in the response');
+      }
+      logAttempt({ ev: 'client_tool_use', host: API_HOST, section, iter,
+                   tools: toolUseBlocks.map((b) => b.name).join(','),
+                   note: 'unexpected for a server-side search tool; relaying to continue' });
+      messages.push({ role: 'assistant', content });
+      messages.push({
+        role: 'user',
+        content: toolUseBlocks.map((tu) => ({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: tu.input ? JSON.stringify(tu.input) : '{}',
+        })),
+      });
+      continue;
+    }
+
     if (data.stop_reason === 'end_turn' || data.stop_reason === 'max_tokens' || finalText) {
       if (!finalText) throw new Error(`No text in response (stop_reason=${data.stop_reason})`);
       const { cost_usd } = recordAiEvent({
