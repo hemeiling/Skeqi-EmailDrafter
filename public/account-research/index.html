@@ -649,7 +649,7 @@ textarea.editable{resize:vertical;overflow:auto;min-height:36px}
     </div>
 
     <div class="btn-row">
-      <button class="btn-gen" id="btnGen" onclick="generate()">
+      <button class="btn-gen" id="btnGen" onclick="onGenerateClick()">
         <span id="bIcon">🔍</span><span id="bTxt">生成双语报告 · Generate Bilingual Report</span>
       </button>
       <button class="btn-demo" onclick="openRepoModal()">📚 报告库 · Repository</button>
@@ -1046,6 +1046,45 @@ const STEPS=[
   {id:'s5',label:'Competitive landscape & pain points · 竞争与痛点',  src:'AI analysis'},
   {id:'s6',label:'Stakeholders & next steps · 利益相关者',            src:'AI generation'},
 ];
+/* Section id -> the key its data lands under. saveAccountReport() reads the
+   data keys while the generator tracked status by step id, so the two never
+   lined up: every section was recorded "live" regardless of what happened,
+   including ones that fell back to placeholder text. */
+const SECTION_DATA_KEY = { s1:'od', s2:'fd', s3:'sd', s4:'nd', s5:'cd', s6:'sal' };
+const REPORT_SECTION_KEYS = ['od','fd','sd','nd','cd','sal'];
+const SECTION_LABEL = {
+  od:'Company overview & profile · 公司概述',
+  fd:'Financial data · 财务数据',
+  sd:'Strategy & technology · 战略与技术',
+  nd:'Recent news & press releases · 近期新闻',
+  cd:'Competitive landscape & pain points · 竞争与痛点',
+  sal:'Stakeholders & next steps · 利益相关者',
+};
+
+/* Markers the fallback templates emit. Needed because reports saved before
+   the status bug was fixed claim every section is "live" — their stored
+   status cannot be trusted, so the content is inspected as well. */
+const FALLBACK_MARKERS = [
+  'data not available', 'could not retrieve', 'research failed',
+  '[placeholder', 'placeholder —', 'unavailable', '暂无数据', '获取失败',
+];
+
+function sectionLooksLikeFallback(value){
+  if(value === undefined || value === null) return true;
+  let text;
+  try { text = JSON.stringify(value); } catch(e){ return true; }
+  if(!text || text === '{}' || text === '[]' || text === '""') return true;
+  const low = text.toLowerCase();
+  return FALLBACK_MARKERS.some(m => low.includes(m));
+}
+
+/* Which sections of a stored report are actually usable. Returns the missing
+   ones so the caller can say which, rather than "incomplete". */
+function missingSections(D){
+  if(!D) return REPORT_SECTION_KEYS.slice();
+  return REPORT_SECTION_KEYS.filter(k => sectionLooksLikeFallback(D[k]));
+}
+
 let _stepStatus={},_currentData=null,_pptData=null;
 
 /* ════ UI ════ */
@@ -2474,6 +2513,23 @@ if (document.readyState === 'loading') {
 } else {
   initApp();
 }
+/* The primary button has two meanings and used to signal the second while
+   still performing the first: after loading a saved report it relabelled
+   itself "Regenerate" but kept calling generate() with no argument, so
+   forceRefresh stayed false and the click re-loaded the very same saved
+   record. Clicking "Regenerate" could therefore never regenerate.
+
+   The two actions are now distinct and named:
+     Generate / Regenerate — always performs live research
+     Load saved report     — only ever displays a stored, complete report  */
+let _lastRunLoadedFromRepo = false;
+
+function onGenerateClick() {
+  // Once a report is on screen, the button means "do it again, for real".
+  const force = _lastRunLoadedFromRepo || Boolean(_currentData);
+  generate(force);
+}
+
 /* ════ REUSE EXISTING REPORT ════ */
 // Look for a previously saved report matching target+seller and load it
 // without calling Claude at all. Returns true if a report was loaded.
@@ -2493,6 +2549,18 @@ async function tryLoadExistingReport(target, seller) {
     if (!data2.ok || !data2.report) return false;
     const D = data2.report;
 
+    /* A saved record is not automatically a usable report. This one is only
+       allowed to stand in for live research if every section has real
+       content — otherwise the run silently "completes" with placeholder text
+       and no research is ever performed. An incomplete record falls through
+       to live research rather than being displayed. */
+    const missing = missingSections(D);
+    if (missing.length) {
+      console.warn(`[generate] saved report v${match.version} is incomplete `
+        + `(${missing.length}/6 sections missing: ${missing.join(', ')}) — running live research instead`);
+      return false;
+    }
+
     const prevUsage = D._usage || {};
     const savedCost = (match.usage && match.usage.costUSD) || prevUsage.costUSD || 0;
     D._usage = {
@@ -2511,12 +2579,14 @@ async function tryLoadExistingReport(target, seller) {
     document.getElementById('report').classList.add('show');
     document.getElementById('report').scrollIntoView({ behavior:'smooth', block:'start' });
     updatePptButton();
-    setProg(100, `Loaded from repository · 已从报告库加载 (v${match.version})`, '#0369A1');
+    _lastRunLoadedFromRepo = true;
+    setProg(100, `Loaded saved report · 已加载已保存报告 (v${match.version})`, '#0369A1');
     showBanner(
       `<div style="font-weight:700;margin-bottom:6px">📚 Loaded existing report from repository · 已从报告库加载现有报告</div>`
       + `<div style="font-size:12px">A saved report for <strong>${esc(target)}</strong> / <strong>${esc(seller)}</strong> already exists `
-      + `(v${match.version}, saved ${new Date(match.createdAt).toLocaleDateString()}). No new Claude API calls were made. `
-      + `Click <strong>🔄 Regenerate</strong> to refresh with live research.</div>`,
+      + `(v${match.version}, saved ${new Date(match.createdAt).toLocaleDateString()}) and every section has content. `
+      + `No Claude API calls were made. `
+      + `Click <strong>🔄 Regenerate</strong> for fresh live research.</div>`,
       '#E0F2FE', '#BAE6FD', '#0C4A6E');
     return true;
   } catch(e) {
@@ -2547,7 +2617,9 @@ async function generate(forceRefresh = false) {
   // Save target company to localStorage
   saveCompany();
 
-  // Reuse a previously saved report instead of calling Claude again
+  _lastRunLoadedFromRepo = false;
+  // Reuse a previously saved report instead of calling Claude again — but
+  // only a complete one; see tryLoadExistingReport().
   if (!forceRefresh) {
     setProg(2, 'Checking report repository · 检查报告库…');
     if (await tryLoadExistingReport(target, seller)) {
@@ -2632,7 +2704,9 @@ async function generate(forceRefresh = false) {
           results[id] = 'success';
           document.getElementById('retry-'+id)?.remove();
           saveResearchCache(id, cacheKey, parsed2, resp2.costUSD);
-          if (_currentData) { _currentData = Object.assign(_currentData, { od, fd, sd, nd, cd, sal, _sectionStatus: results, _usage: _usageTotals }); _pptData = _currentData; render(_currentData); }
+          if (_currentData) { _currentData = Object.assign(_currentData, { od, fd, sd, nd, cd, sal,
+              _sectionStatus: Object.fromEntries(Object.entries(results).map(([sid,st])=>[SECTION_DATA_KEY[sid]||sid, st])),
+              _usage: _usageTotals }); _pptData = _currentData; render(_currentData); }
         } catch(e2) {
           console.error(`[generate] retry ${id} ❌`, e2.message);
           setStepUI(id, 'fallback', e2.message);
@@ -2659,7 +2733,17 @@ async function generate(forceRefresh = false) {
   const _potentialCost = _usageTotals.costUSD + _usageTotals.estimatedSavingsUSD;
   _usageTotals.estimatedSavingsPct = _potentialCost > 0 ? (_usageTotals.estimatedSavingsUSD / _potentialCost) * 100 : 0;
 
-  const D = { target, turl, seller, surl, od, fd, sd, nd, cd, sal, _sectionStatus: results, _usage: _usageTotals };
+  /* Re-key the status map to the data keys saveAccountReport() reads. Written
+     under the step ids, it silently never matched and every section was
+     persisted as "live" — which is how a report of mostly placeholder text
+     came to look complete enough to load instead of researching. */
+  const statusByDataKey = {};
+  Object.entries(results).forEach(([sid, st]) => {
+    const dk = SECTION_DATA_KEY[sid];
+    if (dk) statusByDataKey[dk] = st;
+  });
+  const D = { target, turl, seller, surl, od, fd, sd, nd, cd, sal,
+              _sectionStatus: statusByDataKey, _usage: _usageTotals };
   _currentData = D;
   _pptData     = D;
   render(D);
@@ -2672,11 +2756,22 @@ async function generate(forceRefresh = false) {
   const fallbackCount = Object.values(results).filter(v=>v==='fallback').length;
   const total         = Object.keys(results).length;
 
+  /* "Complete" now means content exists, not that the loop finished. A run
+     where every section fell back used to end on a full green bar. */
+  const missingNow = missingSections(D);
+  const rendered = total - missingNow.length;
+
   let statusText, statusColor;
-  if (successCount === total)   { statusText='Complete · 完成 ✅'; statusColor=''; }
-  else if (successCount === 0)  { statusText='Failed — server error or no API key · 失败'; statusColor='#B91C1C'; }
-  else                          { statusText=`Partially Complete · 部分完成 — ${successCount}/${total} sections live`; statusColor='#D97706'; }
-  setProg(100, statusText, statusColor);
+  if (successCount === total && !missingNow.length) {
+    statusText = 'Complete · 完成 ✅'; statusColor = '';
+  } else if (rendered === 0) {
+    statusText = 'Failed — no section produced content · 失败，未生成任何内容'; statusColor = '#B91C1C';
+  } else {
+    statusText = `Partially Complete · 部分完成 — ${rendered}/${total} sections with content`;
+    statusColor = '#D97706';
+  }
+  // The bar tracks real content, so an empty report cannot show a full bar.
+  setProg(Math.max(5, Math.round((rendered / total) * 100)), statusText, statusColor);
 
   // Persist before anything else can navigate away from it.
   autoSaveAfterGenerate(successCount, total);
