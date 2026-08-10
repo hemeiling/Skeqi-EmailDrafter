@@ -423,7 +423,7 @@ textarea.editable {
 .kpi-v { word-break: break-all; font-size: clamp(14px, 4vw, 26px); }
 
 /* Step-src column — prevent overflow */
-.step-src { min-width: 80px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-src { min-width: 80px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
 .step-row { min-width: 0; }
 .step-lbl { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
@@ -1395,12 +1395,23 @@ function showBanner(html_content,bg,border,textColor){
   banner.style.cssText=`margin-top:14px;background:${bg};border:1px solid ${border};border-radius:8px;padding:14px 16px;font-size:13px;color:${textColor}`;
   banner.innerHTML=html_content;wrap.appendChild(banner);
 }
+/* The retry button is a sibling of the status label, not a child of it.
+
+   .step-src truncates: max-width 200px, overflow hidden, nowrap. A button
+   appended inside it is pushed past that width by a long status message and
+   clipped out of view — present in the DOM, reported as visible, but
+   unclickable because the label's own box swallows the pointer. A failed
+   section whose reason happened to be wordy therefore could not be retried
+   at all, which is exactly when retrying matters. */
 function addRetryBtn(stepId,retryFn){
   const sr=document.getElementById(stepId+'-src');if(!sr)return;
+  const row=sr.parentNode||sr;
   const old=document.getElementById('retry-'+stepId);if(old)old.remove();
   const btn=document.createElement('button');btn.id='retry-'+stepId;btn.textContent='↺ Retry';
-  btn.style.cssText='margin-left:6px;background:#0369A1;color:#fff;border:none;border-radius:4px;padding:2px 8px;font-size:10px;font-weight:700;cursor:pointer;font-family:inherit';
-  btn.onclick=retryFn;sr.appendChild(btn);
+  btn.style.cssText='margin-left:6px;flex:0 0 auto;background:#0369A1;color:#fff;border:none;'
+    +'border-radius:4px;padding:2px 8px;font-size:10px;font-weight:700;cursor:pointer;font-family:inherit';
+  btn.onclick=retryFn;
+  row.appendChild(btn);
 }
 function addRetryAllBtn(fn){
   const wrap=document.getElementById('progWrap'),old=document.getElementById('retryAllBtn');if(old)old.remove();
@@ -2859,9 +2870,23 @@ async function generate(forceRefresh = false) {
           if (_currentData) { _currentData = Object.assign(_currentData, { od, fd, sd, nd, cd, sal,
               _sectionStatus: Object.fromEntries(Object.entries(results).map(([sid,st])=>[SECTION_DATA_KEY[sid]||sid, st])),
               _usage: _usageTotals }); _pptData = _currentData; render(_currentData); }
+
+          /* Persist the repair. Repairing one section used to update the
+             screen and the section cache but never the stored report, so the
+             record kept the old fallback status and content: reload, and the
+             repair was gone. A full run auto-saves; a single-section repair
+             is the same kind of change to the same report and has to save
+             too, or "retry" only appears to work. */
+          const fixedMissing = missingSections(_currentData);
+          const saved = await persistReport(true);
+          if (saved) {
+            showSaveNote(`✅ ${label.split('·')[0].trim()} repaired and saved as v${saved.version}`
+              + (fixedMissing.length ? ` (${6 - fixedMissing.length}/6 sections with content)` : ' — report now complete 6/6')
+              + ` · 已修复并保存为第 ${saved.version} 版`);
+          }
         } catch(e2) {
-          console.error(`[generate] retry ${id} ❌`, e2.message);
-          setStepUI(id, 'fallback', e2.message);
+          console.error(`[generate] retry ${id} ❌`, e2.kind || 'error', e2.message);
+          setStepUI(id, 'fallback', (e2.kind ? (FAULT_LABEL[e2.kind] || e2.kind) + ' — ' : '') + e2.message);
         }
       });
     }
