@@ -20,3 +20,11 @@ docs/diagrams2/
 
 # 从会话临时目录抢救出的早期文档快照 —— 非最终版，待人工确认后再决定是否入库
 docs/_recovered/
+
+# docs/ 根目录下的规划/计划类文稿：属于工作底稿，随时改动，不进版本库。
+# 只匹配根目录，docs/build/README.md 等子目录内的文档照常跟踪。
+# 确需入库的单个文件可用 git add -f 强制添加。
+# Planning drafts at the docs/ root: working documents, not repo content.
+# Root-level only -- docs/build/README.md and other subdirectory docs stay
+# tracked. Force a specific one in with `git add -f` if it belongs here.
+docs/*.md
