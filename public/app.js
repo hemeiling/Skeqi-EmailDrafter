@@ -7618,19 +7618,56 @@ function aiuQuery() {
   return p.toString();
 }
 
+/* A fetch with no timeout has no failure state — it just never settles, and
+   the caller's spinner spins forever. That is what a request caught by a
+   server restart looks like: not an error anyone can see or retry, just a
+   page that appears to be loading. Every panel that opens with a spinner
+   needs a deadline and a way back. */
+async function fetchWithTimeout(url, ms = 20000, options = {}) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    return await fetch(url, { ...options, signal: ac.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function aiuErrorHtml(messageEn, messageCn) {
+  return `<div style="text-align:center;padding:28px 12px;">
+    <div class="msg-error" style="display:inline-block;text-align:left;max-width:520px;">
+      ${escapeHtml(messageEn)}<br><span style="opacity:.8">${escapeHtml(messageCn)}</span>
+    </div>
+    <div style="margin-top:12px;"><button class="btn-sm btn-primary" id="aiu-retry">Try again 重试</button></div>
+  </div>`;
+}
+
 async function loadAiUsage() {
   _aiuLoaded = true;
   const body = document.getElementById("aiu-body");
   body.innerHTML = '<div style="text-align:center;padding:32px 0;"><span class="spinner"></span> Loading…</div>';
+  const fail = (en, cn) => {
+    body.innerHTML = aiuErrorHtml(en, cn);
+    document.getElementById("aiu-retry")?.addEventListener("click", loadAiUsage);
+  };
   try {
-    const r = await fetch("/api/ai-usage?" + aiuQuery());
+    const r = await fetchWithTimeout("/api/ai-usage?" + aiuQuery());
+    if (!r.ok) return fail(`Usage data request failed (HTTP ${r.status}).`, `用量数据请求失败（HTTP ${r.status}）。`);
     const d = await r.json();
-    if (!d.ok) { body.innerHTML = `<div class="msg-error">${escapeHtml(d.error || "Failed")}</div>`; return; }
+    if (!d.ok) return fail(d.error || "Failed to load usage data.", "加载用量数据失败。");
     _aiuData = d;
     renderAiUsageDashboard(d);
     _aiuEventsPage = 0;
     loadAiUsageEvents();
-  } catch (e) { body.innerHTML = `<div class="msg-error">${escapeHtml(e.message)}</div>`; }
+  } catch (e) {
+    if (e.name === "AbortError") {
+      // Distinguished deliberately: "timed out" tells the user the server
+      // stopped answering, which is a different action from "reload".
+      return fail("Timed out waiting for usage data — the server did not respond.",
+                  "等待用量数据超时，服务器未响应。");
+    }
+    fail(e.message || "Network error.", "网络错误。");
+  }
 }
 
 function aiuBucketLabel(x) {
