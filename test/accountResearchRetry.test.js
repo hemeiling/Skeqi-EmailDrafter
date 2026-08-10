@@ -204,3 +204,17 @@ test('a tool_use turn with no blocks is still an error', async () => {
   withMode('no_blocks');
   await assert.rejects(call, /no tool_use blocks/);
 });
+
+test('the client-side headers ceiling is lifted above the request timeout', () => {
+  // s3 of the live run died twice at ~301s against a 420s AbortController:
+  // Node's default headersTimeout is 300s and sits beneath it, so the
+  // AbortController was never the binding deadline. A dispatcher whose
+  // headers ceiling is below REQUEST_TIMEOUT_MS silently reintroduces that.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'accountResearch.js'), 'utf8');
+  assert.match(src, /dispatcher: CLAUDE_DISPATCHER/, 'the dispatcher is not attached to the request');
+  const headers = Number(process.env.CLAUDE_HEADERS_TIMEOUT_MS) || 900000;
+  const request = Number(process.env.CLAUDE_REQUEST_TIMEOUT_MS) || 420000;
+  assert.ok(headers > request,
+    `headersTimeout (${headers}ms) must exceed REQUEST_TIMEOUT_MS (${request}ms), or the client aborts first`);
+  assert.ok(headers > 300000, 'must be above the 300s default that killed s3');
+});

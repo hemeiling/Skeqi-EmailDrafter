@@ -9,6 +9,12 @@
 //      original app (and this project's research.js) never accounted for.
 
 const express = require('express');
+/* undici's own fetch, not the global one. Node bundles its own copy of
+   undici internally, and a dispatcher built from the standalone package is
+   rejected by it ("invalid onRequestStart method") — the two are different
+   implementations. Taking both fetch and Agent from the same package keeps
+   them compatible. */
+const { Agent, fetch: undiciFetch } = require('undici');
 const { CLAUDE_API_KEY, isClaudeConfigured } = require('./config');
 const { recordAiEvent, WEB_SEARCH_USD_PER_CALL } = require('./usage');
 
@@ -60,6 +66,31 @@ function countSearches(content) {
      SECTION_DEADLINE_MS — the whole section including retries. Stops three
                            doomed attempts from silently costing nine minutes. */
 const REQUEST_TIMEOUT_MS  = Number(process.env.CLAUDE_REQUEST_TIMEOUT_MS)  || 420000;  // 7 min
+
+/* Node's HTTP client applies its own headersTimeout of 300s, *below* any
+   AbortController we set. A non-streaming research call sends nothing until
+   the whole answer is ready, so a section that needs longer than five
+   minutes to think is killed by the client before the server has done
+   anything wrong.
+
+   Measured, not inferred: s3 of the live Tesla run died twice at 301004ms
+   and 301022ms while REQUEST_TIMEOUT_MS was 420000. Two independent
+   attempts landing within 18ms of 300s is the default, not the network.
+   This is also the original "fetch failed" — it predates every timeout this
+   file has ever set, and the standalone app would hit it identically.
+
+   The dispatcher below lifts that ceiling so the AbortController is once
+   again the binding deadline. Note this is a floor-raise, not a fix for
+   long calls in general: a five-minute silent request is fragile through
+   any proxy or load balancer with its own idle timeout. The durable answer
+   is streaming (stream: true), where tokens arrive continuously and no
+   idle timer ever fires; that wants live validation before it lands. */
+const CLAUDE_DISPATCHER = new Agent({
+  headersTimeout: Number(process.env.CLAUDE_HEADERS_TIMEOUT_MS) || 900000,   // 15 min
+  bodyTimeout:    Number(process.env.CLAUDE_BODY_TIMEOUT_MS)    || 900000,
+  keepAliveTimeout: 60000,
+  connections: 8,
+});
 const SECTION_DEADLINE_MS = Number(process.env.CLAUDE_SECTION_DEADLINE_MS) || 780000;  // 13 min
 const MAX_ATTEMPTS        = Number(process.env.CLAUDE_MAX_ATTEMPTS)        || 3;
 const RETRY_BASE_MS       = Number(process.env.CLAUDE_RETRY_BASE_MS)       || 1500;
@@ -131,7 +162,7 @@ async function postToClaude(body, budgetMs) {
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   const startedAt = Date.now();
   try {
-    const resp = await fetch(CLAUDE_MESSAGES_URL, {
+    const resp = await undiciFetch(CLAUDE_MESSAGES_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -140,6 +171,7 @@ async function postToClaude(body, budgetMs) {
       },
       body: JSON.stringify(body),
       signal: ac.signal,
+      dispatcher: CLAUDE_DISPATCHER,     // lifts the 300s headers ceiling
     });
     return { resp, ms: Date.now() - startedAt, timeoutMs };
   } catch (err) {

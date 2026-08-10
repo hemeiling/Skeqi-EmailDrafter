@@ -1088,12 +1088,44 @@ const FALLBACK_MARKERS = [
   '[placeholder', 'placeholder —', 'unavailable', '暂无数据', '获取失败',
 ];
 
-function sectionLooksLikeFallback(value){
+/* Fields that legitimately carry words like "unavailable" as their own
+   value. A source entry marked {"status":"unavailable"} describes one
+   citation that could not be checked; it says nothing about whether the
+   section has content. Scanning the raw JSON matched those and reported a
+   good section as a fallback — s1 of the live Tesla run was flagged missing
+   on exactly this, while its 4.4KB of research was intact. */
+const NON_PROSE_KEYS = new Set(['status','type','url','href','link','source','sources','id','date','icon','color']);
+
+function prosePayload(value){
+  // Keep only the parts a fallback template would fill with apology text.
+  const walk = (v) => {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'string') return v + ' ';
+    if (Array.isArray(v)) return v.map(walk).join('');
+    if (typeof v === 'object') {
+      return Object.entries(v)
+        .filter(([k]) => !NON_PROSE_KEYS.has(k.toLowerCase()))
+        .map(([, x]) => walk(x)).join('');
+    }
+    return '';
+  };
+  try { return walk(value); } catch(e){ return ''; }
+}
+
+function sectionLooksLikeFallback(value, recordedStatus){
   if(value === undefined || value === null) return true;
   let text;
   try { text = JSON.stringify(value); } catch(e){ return true; }
   if(!text || text === '{}' || text === '[]' || text === '""') return true;
-  const low = text.toLowerCase();
+
+  /* The recorded status is authoritative when present — it is what the
+     generator observed. Marker matching is only a fallback for records
+     written before the status keys were fixed, which claim everything is
+     "live" and cannot be trusted. */
+  if(recordedStatus === 'success' || recordedStatus === 'live') return false;
+  if(recordedStatus === 'fallback') return true;
+
+  const low = prosePayload(value).toLowerCase();
   return FALLBACK_MARKERS.some(m => low.includes(m));
 }
 
@@ -1101,7 +1133,8 @@ function sectionLooksLikeFallback(value){
    ones so the caller can say which, rather than "incomplete". */
 function missingSections(D){
   if(!D) return REPORT_SECTION_KEYS.slice();
-  return REPORT_SECTION_KEYS.filter(k => sectionLooksLikeFallback(D[k]));
+  const st = (D && D._sectionStatus) || {};
+  return REPORT_SECTION_KEYS.filter(k => sectionLooksLikeFallback(D[k], st[k]));
 }
 
 let _stepStatus={},_currentData=null,_pptData=null;
