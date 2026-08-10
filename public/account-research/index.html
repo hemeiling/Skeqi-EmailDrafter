@@ -687,6 +687,8 @@ textarea.editable{resize:vertical;overflow:auto;min-height:36px}
       <button class="rbtn" onclick="generate(true)" style="background:var(--teal)" title="Force a fresh research pass, bypassing cached results · 强制重新研究，不使用缓存">🔄 Regenerate</button>
     </div>
   </div>
+  <!-- Whether this report is in the database, stated rather than assumed. -->
+  <div id="autoSaveNote" style="display:none;font-size:12px;padding:6px 14px;"></div>
 
   <!-- USAGE & COST -->
   <div class="src-panel" id="usagePanel" style="margin-bottom:26px;display:none">
@@ -2265,6 +2267,7 @@ async function loadReportFromRepo(id){
     document.getElementById('inp-seller').value=D.seller||'';
     document.getElementById('inp-seller-url').value=D.surl||'';
     _currentData=D; _pptData=D;
+    markReportSaved(D, data.version);
     render(D);
     document.getElementById('report').classList.add('show');
     closeRepoModal();
@@ -2296,23 +2299,117 @@ async function deleteReportFromRepo(id){
     alert('Failed to delete report · 删除报告失败: '+e.message);
   }
 }
-async function saveCurrentReport(){
-  if(!_currentData || !_currentData.target){ alert('Generate a report first · 请先生成报告'); return; }
-  const btn=document.getElementById('btnSaveRepo');
-  const origText=btn.textContent;
-  btn.disabled=true; btn.textContent='Saving… · 保存中…';
+/* ── Persistence ──────────────────────────────────────────────────────
+   A report costs real Claude tokens to produce. Until now the only thing
+   that ever wrote one to the database was a click on "Save to Repository":
+   generate, navigate away, and the spend was gone with it. That is why the
+   repository held one report after weeks of use.
+
+   Generation now persists on its own. The button remains, for saving a new
+   version after hand-editing, and an unsaved edit is guarded on unload. */
+
+let _savedSnapshot = null;      // JSON of _currentData as last persisted
+let _lastSavedVersion = null;
+
+function reportIsDirty(){
+  if(!_currentData || !_currentData.target) return false;
+  if(_savedSnapshot === null) return true;                 // never persisted
+  try { return JSON.stringify(_currentData) !== _savedSnapshot; }
+  catch(e){ return true; }                                 // unserialisable: assume unsaved
+}
+
+/* Writes _currentData to the repository. `auto` only changes how the result
+   is announced — a background save must never interrupt with a dialog, while
+   a save the user asked for has to say plainly if it failed. */
+async function persistReport(auto){
+  if(!_currentData || !_currentData.target || !_currentData.seller) return null;
+  const btn = document.getElementById('btnSaveRepo');
+  const restore = () => { if(btn){ btn.disabled=false; btn.textContent = _lastSavedVersion
+      ? '💾 Save new version · 另存新版本' : '💾 Save to Repository · 保存到报告库'; } };
+  if(btn){ btn.disabled=true; btn.textContent = auto ? 'Auto-saving… · 自动保存中…' : 'Saving… · 保存中…'; }
   try{
     const r=await fetch(getBase()+'/api/reports',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_currentData)});
     const data=await r.json();
     if(!r.ok||!data.ok) throw new Error(data.error||('Server error '+r.status));
-    btn.textContent='✅ Saved v'+data.version;
+    _lastSavedVersion = data.version;
+    try { _savedSnapshot = JSON.stringify(_currentData); } catch(e){ _savedSnapshot = null; }
+    if(btn){ btn.textContent = (auto?'✅ Auto-saved v':'✅ Saved v')+data.version; }
+    setTimeout(restore, 2500);
+    refreshArStats();                      // the "saved reports" card, immediately
+    return data;
   }catch(e){
-    alert('Failed to save report · 保存报告失败: '+e.message);
-    btn.textContent=origText;
-  }finally{
-    setTimeout(()=>{ btn.disabled=false; btn.textContent=origText; },2000);
+    if(btn){ btn.textContent='⚠️ Not saved · 未保存'; btn.style.background='#B91C1C'; }
+    // A failed auto-save is reported in place rather than as an alert: the
+    // user did not ask for this write, so it must not block them — but it
+    // must not be silent either, or the report is lost exactly as before.
+    if(auto) showSaveWarning(e.message);
+    else alert('Failed to save report · 保存报告失败: '+e.message);
+    setTimeout(()=>{ if(btn) btn.style.background='#0369A1'; restore(); }, 3500);
+    return null;
   }
 }
+
+function showSaveWarning(msg){
+  const el=document.getElementById('autoSaveNote');
+  if(!el) return;
+  el.style.display='';
+  el.style.color='#B91C1C';
+  el.textContent='⚠️ Auto-save failed — use 💾 Save to keep this report. 自动保存失败，请手动保存。 ('+msg+')';
+}
+
+function showSaveNote(text){
+  const el=document.getElementById('autoSaveNote');
+  if(!el) return;
+  el.style.display='';
+  el.style.color='#15803D';
+  el.textContent=text;
+}
+
+/* A report just loaded from the repository is by definition already saved.
+   Without this it would count as dirty and prompt on every navigation. */
+function markReportSaved(D, version){
+  try { _savedSnapshot = JSON.stringify(D); } catch(e){ _savedSnapshot = null; }
+  if(version != null) _lastSavedVersion = version;
+  const btn = document.getElementById('btnSaveRepo');
+  if(btn) btn.textContent = '💾 Save new version · 另存新版本';
+  showSaveNote(version != null
+    ? `Loaded v${version} from the repository — already saved. 已从报告库加载第 ${version} 版。`
+    : 'Loaded from the repository — already saved. 已从报告库加载。');
+}
+
+async function saveCurrentReport(){
+  if(!_currentData || !_currentData.target){ alert('Generate a report first · 请先生成报告'); return; }
+  await persistReport(false);
+}
+
+/* Called once a generation run finishes. A run where every section fell back
+   produced no research at all — saving it would fill the repository with
+   boilerplate that looks like a report. Anything with at least one live
+   section is worth keeping: it cost money, and a partial report is still
+   the thing the user asked for. */
+async function autoSaveAfterGenerate(successCount, total){
+  if(successCount === 0){
+    showSaveWarning('no sections generated — nothing worth saving 未生成任何内容');
+    const el=document.getElementById('autoSaveNote');
+    if(el) el.textContent='Not auto-saved — no sections were generated. 未自动保存：没有生成任何章节。';
+    return;
+  }
+  const saved = await persistReport(true);
+  if(saved){
+    showSaveNote(`✅ Auto-saved to the repository as v${saved.version}`
+      + (successCount<total?` (${successCount}/${total} sections live)`:'')
+      + ` · 已自动保存为第 ${saved.version} 版`);
+  }
+}
+
+/* An edit made after the auto-save is the one thing that can still be lost,
+   so it is the one thing worth interrupting a navigation for. */
+window.addEventListener('beforeunload', function(e){
+  if(!reportIsDirty()) return;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
 
 /* ════ INIT ════ */
 function initApp() {
@@ -2383,6 +2480,7 @@ async function tryLoadExistingReport(target, seller) {
       estimatedSavingsPct: 100,
     };
     _currentData = D; _pptData = D;
+    markReportSaved(D, match.version);
     render(D);
     document.getElementById('report').classList.add('show');
     document.getElementById('report').scrollIntoView({ behavior:'smooth', block:'start' });
@@ -2552,6 +2650,9 @@ async function generate(forceRefresh = false) {
   else if (successCount === 0)  { statusText='Failed — server error or no API key · 失败'; statusColor='#B91C1C'; }
   else                          { statusText=`Partially Complete · 部分完成 — ${successCount}/${total} sections live`; statusColor='#D97706'; }
   setProg(100, statusText, statusColor);
+
+  // Persist before anything else can navigate away from it.
+  autoSaveAfterGenerate(successCount, total);
 
   if (fallbackCount > 0) {
     const failedLabels = Object.entries(results).filter(([,v])=>v==='fallback')

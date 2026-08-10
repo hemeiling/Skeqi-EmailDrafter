@@ -181,9 +181,9 @@ function createRouter(db) {
 
   router.get('/api/reports/:id', async (req, res) => {
     try {
-      const report = await db.getAccountReport(req.params.id);
-      if (!report) return res.status(404).json({ ok: false, error: 'Report not found' });
-      res.json({ ok: true, report });
+      const found = await db.getAccountReport(req.params.id);
+      if (!found) return res.status(404).json({ ok: false, error: 'Report not found' });
+      res.json({ ok: true, report: found.report, version: found.version });
     } catch (err) {
       res.status(500).json({ ok: false, error: err.message });
     }

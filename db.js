@@ -3024,9 +3024,13 @@ async function listAccountReports(search) {
   `, params);
 }
 
+/* Returns the stored report plus the version it was saved as. The version
+   lives in its own column rather than inside `data`, and the loader needs it
+   to tell the user which version is on screen. */
 async function getAccountReport(id) {
-  const rows = await q(`SELECT data FROM account_reports WHERE id = $1`, [id]);
-  return rows.length ? rows[0].data : null;
+  const rows = await q(`SELECT data, version FROM account_reports WHERE id = $1`, [id]);
+  if (!rows.length) return null;
+  return { report: rows[0].data, version: rows[0].version };
 }
 
 async function deleteAccountReport(id) {
