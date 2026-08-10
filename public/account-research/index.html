@@ -1165,6 +1165,24 @@ function setStepUI(id,state,note){
     if(sr&&note){sr.style.color='#B91C1C';sr.style.fontWeight='600';sr.textContent='⚠ '+shortErr(note);}}
   _stepStatus[id]=state;
 }
+/* What each failure class means, in the user's terms. "fetch failed" told
+   nobody anything; "Upstream API error (502)" tells them it is not their
+   network and not their key. */
+const FAULT_LABEL = {
+  timeout:          'Timed out 超时',
+  rate_limited:     'Rate limited 触发限流',
+  overloaded:       'API overloaded API 过载',
+  upstream_5xx:     'Upstream API error 上游服务错误',
+  auth:             'Auth error 认证失败',
+  bad_request:      'Bad request 请求无效',
+  dns:              'DNS failure 域名解析失败',
+  connection_reset: 'Connection dropped 连接中断',
+  connect_timeout:  'Connect timeout 连接超时',
+  tls:              'TLS error 证书错误',
+  network:          'Network error 网络错误',
+  deadline:         'Section deadline reached 超出本节时限',
+};
+
 function shortErr(msg){
   if(!msg)return'error';
   if(msg.includes('401'))return'Auth error (401)';
@@ -1200,12 +1218,20 @@ function addRetryAllBtn(fn){
 }
 
 /* ════ BACKEND ════ */
-async function callStep(prompt,useSearch){
+async function callStep(prompt,useSearch,section){
   const base=getBase(),search=(document.getElementById('inp-search')||{}).value==='yes'&&useSearch,
         model=(document.getElementById('inp-model')||{}).value||'claude-sonnet-4-6';
-  console.log(`[callStep] model=${model} useSearch=${search} promptLen=${prompt.length}`);
-  const resp=await fetch(base+'/api/research',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,useSearch:search,model})});
-  if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e.error||`Server error ${resp.status}`);}
+  console.log(`[callStep] section=${section||'?'} model=${model} useSearch=${search} promptLen=${prompt.length}`);
+  // `section` was never sent, so every usage event recorded a null
+  // sub_feature and no failure could be attributed to the step that caused it.
+  const resp=await fetch(base+'/api/research',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,useSearch:search,model,section})});
+  if(!resp.ok){
+    const e=await resp.json().catch(()=>({}));
+    const err=new Error(e.error||`Server error ${resp.status}`);
+    err.kind=e.kind||null; err.trace=e.trace||null; err.httpRequests=e.httpRequests||null;
+    if(e.trace) console.error(`[callStep] ${section} attempts:`, e.trace);
+    throw err;
+  }
   const data=await resp.json();
   if(!data.ok)throw new Error(data.error||'Unknown server error');
   console.log(`[callStep] ✅ text length: ${data.text.length} · tokens in/out: ${data.usage?.inputTokens||0}/${data.usage?.outputTokens||0} · cost≈$${(data.costUSD||0).toFixed(4)}`);
@@ -2582,7 +2608,7 @@ async function generate(forceRefresh = false) {
     }
 
     try {
-      const resp   = await callStep(promptFn(), true);
+      const resp   = await callStep(promptFn(), true, id);
       recordUsage(id, label, resp);
       const parsed = pJSON(resp.text);
       onSuccess(parsed);
@@ -2591,13 +2617,14 @@ async function generate(forceRefresh = false) {
       console.log(`[generate] ${id} ✅`);
       saveResearchCache(id, cacheKey, parsed, resp.costUSD);
     } catch(e) {
-      console.error(`[generate] ${id} ❌`, e.message);
-      setStepUI(id, 'fallback', e.message);
+      console.error(`[generate] ${id} ❌`, e.kind||'error', e.message);
+      // The kind says what to do about it; the message alone rarely did.
+      setStepUI(id, 'fallback', (e.kind? FAULT_LABEL[e.kind]||e.kind : '')+(e.kind?' — ':'')+e.message);
       results[id] = 'fallback';
       addRetryBtn(id, async () => {
         setStepUI(id, 'run');
         try {
-          const resp2   = await callStep(promptFn(), true);
+          const resp2   = await callStep(promptFn(), true, id);
           recordUsage(id, label, resp2);
           const parsed2 = pJSON(resp2.text);
           onSuccess(parsed2);

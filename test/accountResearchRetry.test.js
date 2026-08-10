@@ -10,6 +10,8 @@
  */
 process.env.CLAUDE_MESSAGES_URL = 'http://127.0.0.1:0/v1/messages';  // replaced in before()
 process.env.CLAUDE_REQUEST_TIMEOUT_MS = '900';
+process.env.CLAUDE_SECTION_DEADLINE_MS = '9000';
+process.env.CLAUDE_RETRY_CAP_MS = '200';
 process.env.CLAUDE_MAX_ATTEMPTS = '3';
 process.env.CLAUDE_RETRY_BASE_MS = '40';
 process.env.CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || 'test-key';
@@ -18,7 +20,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 
-let server, mode = 'ok', hits = 0, callClaude, describeFetchError, isRetryable;
+let server, mode = 'ok', hits = 0, callClaude, describeFetchError, classifyFailure;
 
 test.before(async () => {
   server = http.createServer((req, res) => {
@@ -27,8 +29,12 @@ test.before(async () => {
     if (mode === 'hang') return;                                  // never answers
     if (mode === 'flaky' && hits < 3) { req.socket.destroy(); return; }
     if (mode === 'ratelimit') {
-      res.writeHead(429, { 'content-type': 'application/json' });
+      res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '1' });
       return res.end(JSON.stringify({ error: { message: 'rate limited' } }));
+    }
+    if (mode === 'bad_gateway') {
+      res.writeHead(502, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ error: { message: 'Bad gateway' } }));
     }
     if (mode === 'auth') {
       res.writeHead(401, { 'content-type': 'application/json' });
@@ -44,7 +50,7 @@ test.before(async () => {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   process.env.CLAUDE_MESSAGES_URL = `http://127.0.0.1:${server.address().port}/v1/messages`;
 
-  ({ callClaude, describeFetchError, isRetryable } = require('../accountResearch').__test);
+  ({ callClaude, describeFetchError, classifyFailure } = require('../accountResearch').__test);
 });
 
 test.after(async () => {
@@ -102,12 +108,58 @@ test('a hung connection times out instead of hanging the section', async () => {
   assert.ok(hits >= 1);
 });
 
-test('retryability is decided by the kind of failure', () => {
-  assert.equal(isRetryable({ status: 429 }), true);
-  assert.equal(isRetryable({ status: 503 }), true);
-  assert.equal(isRetryable({ status: 401 }), false);
-  assert.equal(isRetryable({ status: 400 }), false);
-  assert.equal(isRetryable({ name: 'AbortError' }), true);
+test('failures are classified into distinct, actionable kinds', () => {
+  // The taxonomy is what lets the UI say "upstream API error" rather than
+  // "fetch failed", and what decides retry vs give up.
+  assert.deepEqual(classifyFailure({ status: 429 }), { kind: 'rate_limited', retryable: true });
+  assert.deepEqual(classifyFailure({ status: 502 }), { kind: 'upstream_5xx', retryable: true });
+  assert.deepEqual(classifyFailure({ status: 529 }), { kind: 'overloaded', retryable: true });
+  assert.deepEqual(classifyFailure({ status: 401 }), { kind: 'auth', retryable: false });
+  assert.deepEqual(classifyFailure({ status: 400 }), { kind: 'bad_request', retryable: false });
+  assert.deepEqual(classifyFailure({ name: 'AbortError' }), { kind: 'timeout', retryable: true });
+  assert.equal(classifyFailure({ cause: { code: 'ENOTFOUND' } }).kind, 'dns');
+  assert.equal(classifyFailure({ cause: { code: 'ECONNRESET' } }).kind, 'connection_reset');
+  assert.equal(classifyFailure({ cause: { code: 'CERT_HAS_EXPIRED' } }).retryable, false);
+});
+
+test('a 502 is retried and reported as an upstream fault', async () => {
+  withMode('bad_gateway');
+  await assert.rejects(call, (err) => {
+    assert.equal(err.kind, 'upstream_5xx');
+    assert.match(err.message, /Bad gateway/);
+    return true;
+  });
+  assert.equal(hits, 3);
+});
+
+test('every attempt is traced with status and latency', async () => {
+  withMode('bad_gateway');
+  await call().catch((err) => {
+    assert.ok(Array.isArray(err.trace), 'no trace attached');
+    assert.equal(err.trace.length, 3, 'one entry per attempt');
+    err.trace.forEach((t) => {
+      assert.equal(t.status, 502);
+      assert.equal(t.kind, 'upstream_5xx');
+      assert.equal(typeof t.ms, 'number');
+      assert.ok(t.attempt >= 1);
+    });
+    assert.equal(err.httpRequests, 3);
+  });
+});
+
+test('the section deadline stops a doomed retry chain', async () => {
+  // Three 900ms timeouts plus backoff must not be allowed to run for minutes;
+  // this is what turned a failing section into a nine-minute stall.
+  process.env.CLAUDE_SECTION_DEADLINE_MS = '2000';
+  delete require.cache[require.resolve('../accountResearch')];
+  const fresh = require('../accountResearch').__test;
+  withMode('hang');
+  const t0 = Date.now();
+  await assert.rejects(() => fresh.callClaude({ model:'stub', prompt:'hi', useSearch:false, meta:{section:'zztest_retry'} }));
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 6000, `gave up in ${elapsed}ms — must not keep retrying past the deadline`);
+  process.env.CLAUDE_SECTION_DEADLINE_MS = '9000';
+  delete require.cache[require.resolve('../accountResearch')];
 });
 
 test('describeFetchError names the underlying code', () => {

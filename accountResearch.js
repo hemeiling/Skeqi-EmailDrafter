@@ -42,23 +42,36 @@ function countSearches(content) {
   ).length;
 }
 
-/* A single request may legitimately take minutes: this is an agentic loop
-   with server-side web search, and observed successful sections have run
-   230-300s end to end. The deadline is per HTTP request, not per section, and
-   is set well above that so a slow-but-working call is never cut off — its
-   job is to stop a dead socket from hanging the section forever. */
-const REQUEST_TIMEOUT_MS = Number(process.env.CLAUDE_REQUEST_TIMEOUT_MS) || 180000;   // 3 min per HTTP request
-const MAX_ATTEMPTS = Number(process.env.CLAUDE_MAX_ATTEMPTS) || 3;
-const RETRY_BASE_MS = Number(process.env.CLAUDE_RETRY_BASE_MS) || 1500;
+/* ── Retrieval configuration ──────────────────────────────────────────
+   Every value here is measured, not guessed. From ai_usage_events, real
+   successful account-research calls have run:
 
-/* Node's fetch reports every network-level failure as the same three words:
+       211s, 230s, 245s, 252s, 271s, 297s   (median 245s)
+
+   A previous version of this file set a 180s per-request timeout and
+   described it as "well above" those numbers. It is below all of them. The
+   result was that a normal call was aborted three times over nine minutes
+   and then reported as a fallback -- the timeout was manufacturing the
+   failures it appeared to be reporting.
+
+   Two separate bounds, because they do different jobs:
+     REQUEST_TIMEOUT_MS  — one HTTP request. Catches a dead socket. Must sit
+                           above genuine request latency or it invents faults.
+     SECTION_DEADLINE_MS — the whole section including retries. Stops three
+                           doomed attempts from silently costing nine minutes. */
+const REQUEST_TIMEOUT_MS  = Number(process.env.CLAUDE_REQUEST_TIMEOUT_MS)  || 420000;  // 7 min
+const SECTION_DEADLINE_MS = Number(process.env.CLAUDE_SECTION_DEADLINE_MS) || 780000;  // 13 min
+const MAX_ATTEMPTS        = Number(process.env.CLAUDE_MAX_ATTEMPTS)        || 3;
+const RETRY_BASE_MS       = Number(process.env.CLAUDE_RETRY_BASE_MS)       || 1500;
+const RETRY_CAP_MS        = Number(process.env.CLAUDE_RETRY_CAP_MS)        || 20000;
+
+/* Node's fetch reports every network-level failure as the same two words,
    "fetch failed". The reason it actually failed -- DNS, reset connection,
-   TLS, timeout -- is on err.cause, which was being discarded. That is why a
-   failed section could only ever say "fetch failed", and why this function
-   exists rather than a bare err.message. */
-function describeFetchError(err) {
+   TLS, timeout -- is on err.cause, which is easy to discard by accident.
+   Losing it makes every distinct fault look identical in the logs. */
+function describeFetchError(err, timeoutMs) {
   if (err && err.name === 'AbortError') {
-    return `Request timed out after ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s`;
+    return `Request timed out after ${Math.round((timeoutMs || REQUEST_TIMEOUT_MS) / 1000)}s`;
   }
   const cause = err && err.cause;
   if (cause) {
@@ -70,24 +83,55 @@ function describeFetchError(err) {
   return (err && err.message) || 'Unknown network error';
 }
 
-/* Which failures are worth trying again. A transient one -- socket reset,
-   rate limit, overloaded API -- is retried; a 401 or a malformed request is
-   not, because retrying it just burns time and produces the same answer. */
-function isRetryable(err) {
-  if (err && err.name === 'AbortError') return true;
-  if (err && err.status) return err.status === 429 || err.status >= 500;
-  return Boolean(err && err.cause);       // any network-level throw
+/* Classification drives both the retry decision and what the user is told.
+   These are genuinely different faults with different remedies, and calling
+   them all "fetch failed" hid that. */
+function classifyFailure(err) {
+  if (err && err.name === 'AbortError') return { kind: 'timeout', retryable: true };
+  if (err && err.status) {
+    const s = err.status;
+    if (s === 429) return { kind: 'rate_limited', retryable: true };
+    if (s === 529) return { kind: 'overloaded', retryable: true };
+    if (s >= 500)  return { kind: 'upstream_5xx', retryable: true };
+    if (s === 401 || s === 403) return { kind: 'auth', retryable: false };
+    return { kind: 'bad_request', retryable: false };
+  }
+  if (err && err.cause) {
+    const code = (err.cause.code || '').toString();
+    if (/ENOTFOUND|EAI_AGAIN/.test(code))        return { kind: 'dns', retryable: true };
+    if (/ECONNRESET|UND_ERR_SOCKET|EPIPE/.test(code)) return { kind: 'connection_reset', retryable: true };
+    if (/ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT/.test(code)) return { kind: 'connect_timeout', retryable: true };
+    if (/CERT|TLS|SSL/i.test(code))              return { kind: 'tls', retryable: false };
+    return { kind: 'network', retryable: true };
+  }
+  return { kind: 'unknown', retryable: false };
+}
+
+/* Anthropic sends Retry-After on 429/529. Waiting the advertised time is
+   both faster and politer than a fixed backoff curve guessed from nothing. */
+function retryDelayMs(err, attempt) {
+  const advertised = err && err.retryAfterSec;
+  if (advertised && Number.isFinite(advertised)) {
+    return Math.min(advertised * 1000, RETRY_CAP_MS);
+  }
+  // Exponential with jitter; jitter matters because six sections retrying in
+  // lockstep would otherwise arrive at the API together.
+  const base = Math.min(RETRY_BASE_MS * Math.pow(2, attempt - 1), RETRY_CAP_MS);
+  return Math.round(base * (0.7 + Math.random() * 0.6));
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* One HTTP request to the API, with a deadline. Separated so the retry loop
-   below has something to retry. */
-async function postToClaude(body) {
+/* One HTTP request, with its own deadline. `budgetMs` lets the caller shorten
+   the timeout when the section deadline is closer than the per-request one,
+   so a request is never started that cannot possibly finish in time. */
+async function postToClaude(body, budgetMs) {
+  const timeoutMs = Math.max(5000, Math.min(REQUEST_TIMEOUT_MS, budgetMs));
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  const startedAt = Date.now();
   try {
-    return await fetch(CLAUDE_MESSAGES_URL, {
+    const resp = await fetch(CLAUDE_MESSAGES_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -97,9 +141,26 @@ async function postToClaude(body) {
       body: JSON.stringify(body),
       signal: ac.signal,
     });
+    return { resp, ms: Date.now() - startedAt, timeoutMs };
+  } catch (err) {
+    err.__ms = Date.now() - startedAt;
+    err.__timeoutMs = timeoutMs;
+    throw err;
   } finally {
     clearTimeout(timer);
   }
+}
+
+const API_HOST = (() => { try { return new URL(CLAUDE_MESSAGES_URL).host; } catch (e) { return CLAUDE_MESSAGES_URL; } })();
+
+/* One structured line per HTTP attempt. Written as JSON so a Render log can
+   be filtered and counted rather than read: every field the failure analysis
+   needs -- host, section, attempt, iteration, status, latency, the timeout in
+   force, the upstream request id, and the exact exception -- is on the line
+   that records the attempt, not spread across several. */
+function logAttempt(rec) {
+  try { console.log('[research-fetch] ' + JSON.stringify(rec)); }
+  catch (e) { console.log('[research-fetch] (unserialisable trace)'); }
 }
 
 // Agentic call: Claude may search several times before answering. Server-side
@@ -108,57 +169,109 @@ async function postToClaude(body) {
 async function callClaude({ model, prompt, useSearch, meta }) {
   if (!isClaudeConfigured()) throw new Error('CLAUDE_API_KEY is not configured');
 
+  const section = (meta && meta.section) || 'unknown';
   const messages = [{ role: 'user', content: prompt }];
   const usage = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
   let searchCalls = 0;
   let finalText = '';
   const started = Date.now();
+  const deadline = started + SECTION_DEADLINE_MS;
+  const trace = [];
+  let httpRequests = 0;
 
   for (let iter = 1; iter <= MAX_TOOL_ITER; iter++) {
     const body = { model, max_tokens: MAX_TOKENS, messages };
     if (useSearch) body.tools = [WEB_SEARCH_TOOL];
 
-    /* Retry loop. A transient blip used to cost the whole section: one throw
-       anywhere in a multi-minute agentic call dropped it to fallback
-       boilerplate and the run continued as though nothing had happened. */
     let resp = null;
     let lastError = null;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      try {
-        resp = await postToClaude(body);
-        if (resp.ok) { lastError = null; break; }
 
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const budget = deadline - Date.now();
+      if (budget <= 5000) {
+        lastError = new Error(`Section deadline of ${Math.round(SECTION_DEADLINE_MS / 1000)}s reached`);
+        lastError.__kind = 'deadline';
+        break;
+      }
+
+      httpRequests++;
+      try {
+        const out = await postToClaude(body, budget);
+        resp = out.resp;
+        const reqId = resp.headers.get('request-id') || resp.headers.get('x-request-id') || null;
+
+        if (resp.ok) {
+          trace.push({ iter, attempt, status: 200, ms: out.ms });
+          logAttempt({ ev: 'ok', host: API_HOST, section, iter, attempt,
+                       status: 200, ms: out.ms, timeout_ms: out.timeoutMs, request_id: reqId });
+          lastError = null;
+          break;
+        }
+
+        // An error response: read the body for Anthropic's own message.
         const errBody = await resp.json().catch(() => ({}));
         const msg = (errBody && errBody.error && errBody.error.message) || `HTTP ${resp.status}`;
         const httpErr = new Error(msg);
         httpErr.status = resp.status;
+        const ra = resp.headers.get('retry-after');
+        if (ra) httpErr.retryAfterSec = Number(ra) || null;
+        const cls = classifyFailure(httpErr);
+        httpErr.__kind = cls.kind;
         lastError = httpErr;
-        if (!isRetryable(httpErr) || attempt === MAX_ATTEMPTS) break;
+
+        trace.push({ iter, attempt, status: resp.status, ms: out.ms, kind: cls.kind });
+        logAttempt({ ev: 'http_error', host: API_HOST, section, iter, attempt,
+                     status: resp.status, kind: cls.kind, ms: out.ms, timeout_ms: out.timeoutMs,
+                     request_id: reqId, retry_after: httpErr.retryAfterSec || null, error: msg });
+
+        if (!cls.retryable || attempt === MAX_ATTEMPTS) break;
       } catch (netErr) {
-        lastError = new Error(describeFetchError(netErr));
-        lastError.cause = netErr;
-        if (!isRetryable(netErr) || attempt === MAX_ATTEMPTS) break;
+        const described = describeFetchError(netErr, netErr.__timeoutMs);
+        const cls = classifyFailure(netErr);
+        const wrapped = new Error(described);
+        wrapped.cause = netErr;
+        wrapped.__kind = cls.kind;
+        lastError = wrapped;
+
+        trace.push({ iter, attempt, status: null, ms: netErr.__ms || 0, kind: cls.kind });
+        logAttempt({ ev: 'network_error', host: API_HOST, section, iter, attempt,
+                     status: null, kind: cls.kind, ms: netErr.__ms || 0,
+                     timeout_ms: netErr.__timeoutMs || null,
+                     error: described, cause_code: (netErr.cause && (netErr.cause.code || netErr.cause.errno)) || null });
+
+        if (!cls.retryable || attempt === MAX_ATTEMPTS) break;
       }
-      // Exponential backoff: 1.5s, 3s. Enough for a reset socket or a brief
-      // rate limit, short enough not to stall a six-section report.
-      const wait = RETRY_BASE_MS * Math.pow(2, attempt - 1);
-      console.warn(`[account_research] ${meta && meta.section || 'section'} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${lastError.message} — retrying in ${wait}ms`);
+
+      const wait = retryDelayMs(lastError, attempt);
+      // Never sleep past the deadline just to start an attempt that cannot finish.
+      if (Date.now() + wait + 5000 >= deadline) {
+        logAttempt({ ev: 'giving_up', host: API_HOST, section, iter, attempt,
+                     reason: 'retry would exceed the section deadline' });
+        break;
+      }
+      logAttempt({ ev: 'retrying', host: API_HOST, section, iter, attempt, in_ms: wait });
       await sleep(wait);
     }
 
     if (lastError) {
-      /* Recorded before throwing. Network-level failures previously bypassed
+      /* Recorded before throwing. Network-level failures used to bypass
          recordAiEvent entirely -- it only ran for !resp.ok -- so a section
-         that died on a dropped connection left no trace in the AI usage
-         dashboard at all. A failure you cannot see is a failure you cannot
-         diagnose later. */
+         killed by a dropped connection left no trace in the usage dashboard.
+         A failure nobody can see is a failure nobody can fix. */
+      const summary = `${lastError.message} [${lastError.__kind || 'error'}; ${httpRequests} request(s), ${Math.round((Date.now() - started) / 1000)}s]`;
       recordAiEvent({
-        feature: 'account_research', sub_feature: meta && meta.section,
-        model, status: 'error', error_message: lastError.message,
+        feature: 'account_research', sub_feature: section,
+        model, status: 'error', error_message: summary,
         response_ms: Date.now() - started, user_id: meta && meta.userId,
       });
-      console.error(`[account_research] ${meta && meta.section || 'section'} failed after ${MAX_ATTEMPTS} attempt(s): ${lastError.message}`);
-      throw lastError;
+      logAttempt({ ev: 'section_failed', host: API_HOST, section,
+                   kind: lastError.__kind || 'error', total_ms: Date.now() - started,
+                   http_requests: httpRequests, error: lastError.message });
+      const out = new Error(lastError.message);
+      out.kind = lastError.__kind || 'error';
+      out.trace = trace;
+      out.httpRequests = httpRequests;
+      throw out;
     }
 
     const data = await resp.json();
@@ -183,7 +296,7 @@ async function callClaude({ model, prompt, useSearch, meta }) {
     if (data.stop_reason === 'end_turn' || data.stop_reason === 'max_tokens' || finalText) {
       if (!finalText) throw new Error(`No text in response (stop_reason=${data.stop_reason})`);
       const { cost_usd } = recordAiEvent({
-        feature: 'account_research', sub_feature: meta && meta.section,
+        feature: 'account_research', sub_feature: section,
         outcome: 'new_ai_call', model,
         input_tokens: usage.inputTokens, output_tokens: usage.outputTokens,
         cache_read_tokens: usage.cacheReadInputTokens,
@@ -192,7 +305,10 @@ async function callClaude({ model, prompt, useSearch, meta }) {
         company_id: meta && meta.companyId, user_id: meta && meta.userId,
         response_ms: Date.now() - started,
       });
-      return { text: finalText, usage, apiCalls: iter, model, searchCalls, costUSD: cost_usd };
+      logAttempt({ ev: 'section_ok', host: API_HOST, section, total_ms: Date.now() - started,
+                   http_requests: httpRequests, searches: searchCalls,
+                   in_tokens: usage.inputTokens, out_tokens: usage.outputTokens });
+      return { text: finalText, usage, apiCalls: iter, model, searchCalls, costUSD: cost_usd, trace };
     }
 
     throw new Error(`Unexpected stop_reason: ${data.stop_reason}`);
@@ -235,7 +351,12 @@ function createRouter(db) {
         model: r.model, searchCalls: r.searchCalls, costUSD: r.costUSD,
       });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err.message });
+      res.status(500).json({
+        ok: false, error: err.message,
+        kind: err.kind || 'error',              // timeout / rate_limited / upstream_5xx / dns / …
+        httpRequests: err.httpRequests || null,
+        trace: err.trace || null,
+      });
     }
   });
 
@@ -335,4 +456,4 @@ function createRouter(db) {
   return router;
 }
 
-module.exports = { __test: { callClaude, describeFetchError, isRetryable }, createRouter, DEFAULT_MODEL, WEB_SEARCH_USD_PER_CALL };
+module.exports = { __test: { callClaude, describeFetchError, classifyFailure, retryDelayMs }, createRouter, DEFAULT_MODEL, WEB_SEARCH_USD_PER_CALL };
