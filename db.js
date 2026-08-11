@@ -157,6 +157,40 @@ async function initDb() {
     )`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_company_activity_company ON company_activity (company_id, created_at DESC)`);
 
+  /* ── Audit spine ──────────────────────────────────────────────────
+     One append-only record of actions taken *inside* the CRM. Analytics
+     derive from this rather than each feature keeping its own counters, so
+     there is one definition of "what happened" and no double bookkeeping.
+
+     Scope is deliberate: only actions performed in this system are written
+     here. Nothing observes a user's mailbox, and no message body is stored
+     — this table answers "is the platform being used and is it working",
+     which is a different question from "what is this person doing". */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS crm_activity (
+      id BIGSERIAL PRIMARY KEY,
+      actor TEXT,                      -- CRM user; null for system actions
+      action TEXT NOT NULL,            -- session.start, email.sent, draft.generated, …
+      object_type TEXT,                -- contact | company | report | email | …
+      object_id TEXT,
+      company_id INTEGER,
+      contact_id INTEGER,
+      metadata JSONB,                  -- counts and settings only, never content
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_activity_time ON crm_activity (created_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_activity_actor ON crm_activity (actor, created_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_activity_action ON crm_activity (action, created_at DESC)`);
+
+  /* Attribution for sends. communications recorded which mailbox sent a
+     message but not which CRM user asked for it, so "emails sent per user"
+     was not answerable. */
+  await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS user_id TEXT`);
+  await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS replied_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS thread_id TEXT`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_thread ON communications (thread_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_user_sent ON communications (user_id, sent_at DESC)`);
+
   await pool.query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS email_source text`);
   /* Backfill once, from the contact source, for rows written before this
      column existed. Apollo rows get 'apollo_legacy' rather than a guess:
@@ -1445,6 +1479,37 @@ async function findCompanyByName(name) {
 
 async function getCompany(id) {
   return q1(`SELECT * FROM companies WHERE id = $1`, [id]);
+}
+
+/* Append-only: activity is never updated or deleted, so it can support an
+   audit trail later. A logging failure must never break the action it
+   records. */
+async function logCrmActivity(entry) {
+  try {
+    await q(`INSERT INTO crm_activity (actor, action, object_type, object_id, company_id, contact_id, metadata)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [entry.actor || null, entry.action, entry.objectType || null, entry.objectId != null ? String(entry.objectId) : null,
+       entry.companyId || null, entry.contactId || null, entry.metadata ? JSON.stringify(entry.metadata) : null]);
+  } catch (e) {
+    console.warn('logCrmActivity failed:', e.message);
+  }
+}
+
+/* Distinct actors seen per period. Derived from the spine, so "active" means
+   "did something in the CRM", not "had a session cookie". */
+async function activeUsers(days) {
+  const rows = await q(`SELECT COUNT(DISTINCT actor)::int AS n FROM crm_activity
+                        WHERE actor IS NOT NULL AND created_at > NOW() - ($1 || ' days')::interval`, [String(days)]);
+  return rows.length ? rows[0].n : 0;
+}
+
+async function listCrmActivity({ actor, action, days = 30, limit = 200 } = {}) {
+  const params = [String(days)];
+  let where = `WHERE created_at > NOW() - ($1 || ' days')::interval`;
+  if (actor)  { params.push(actor);  where += ` AND actor = $${params.length}`; }
+  if (action) { params.push(action); where += ` AND action = $${params.length}`; }
+  params.push(limit);
+  return q(`SELECT * FROM crm_activity ${where} ORDER BY created_at DESC LIMIT $${params.length}`, params);
 }
 
 async function logCompanyActivity(companyId, activityType, description) {
@@ -3414,6 +3479,7 @@ async function setSetting(key, value) {
 module.exports = {
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
   logCompanyActivity, listCompanyActivity,
+  logCrmActivity, listCrmActivity, activeUsers,
   pool,
   initDb,
   // account intelligence reports

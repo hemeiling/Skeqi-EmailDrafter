@@ -36,7 +36,7 @@ const {
   listContactNamesForBrowse,
   getSetting, setSetting, listEvents,
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
-  logCompanyActivity, listCompanyActivity, pool
+  logCompanyActivity, listCompanyActivity, logCrmActivity, listCrmActivity, activeUsers, pool
 } = require('./db');
 const { normalizeColumnFilters, describeFilters, EMAIL_MODES, ACTIVITY_STATES, DRAFT_STATES, CONTACT_STATUSES, CONTACT_SOURCES, EMAIL_SOURCES, COMPANY_SOURCES } = require('./contact-query');
 const { parseCardText } = require('./parse');
@@ -134,6 +134,7 @@ function timingSafeStringEqual(a, b) {
 // A stable id for this server process (the "session" the footer shows).
 const SERVER_SESSION_ID = crypto.randomUUID();
 // Who/what to attribute AI usage to on a given request.
+const _seenToday = new Map();
 function reqUser(req) { return (req && req.appUser) || config.APP_USERNAME || 'local'; }
 // Admin = the login-gate user, or any user listed in ADMIN_USERS. With no login
 // gate configured (local dev), the single user is treated as admin.
@@ -172,6 +173,16 @@ app.use((req, res, next) => {
     return res.status(401).send('Login required.');
   }
   req.appUser = user; // attribute AI usage to the logged-in user
+  /* One session marker per user per day. Enough to answer "who used the
+     platform" without recording every request, which would turn an adoption
+     metric into a keystroke log. */
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    if (_seenToday.get(user) !== today) {
+      _seenToday.set(user, today);
+      logCrmActivity({ actor: user, action: 'session.start', metadata: { date: today } });
+    }
+  } catch (e) { /* never block a request to record a metric */ }
   next();
 });
 
@@ -553,6 +564,88 @@ app.get('/api/companies/source-counts', async (req, res) => {
     res.json({ ok: true, options: rows.rows });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load company source counts' });
+  }
+});
+
+/* GET /api/analytics/overview — adoption and platform value.
+
+   Aggregates only. No message bodies, no subject lines, no per-message
+   detail: the question is whether the platform is being adopted and whether
+   outreach works, which never requires reading anyone's mail. Per-user rows
+   are returned separately so they can be restricted independently. */
+app.get('/api/analytics/overview', async (req, res) => {
+  try {
+    const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+    const iv = `${days} days`;
+    const one = async (sql, params = []) => (await pool.query(sql, params)).rows;
+
+    const [dau, wau, mau] = await Promise.all([activeUsers(1), activeUsers(7), activeUsers(30)]);
+
+    const email = (await one(`
+      SELECT
+        COUNT(*) FILTER (WHERE comm_type='draft' AND deleted_at IS NULL)::int AS drafts_generated,
+        COUNT(*) FILTER (WHERE sent_at IS NOT NULL)::int                      AS emails_sent,
+        COUNT(*) FILTER (WHERE replied_at IS NOT NULL)::int                   AS replies_received,
+        AVG(EXTRACT(EPOCH FROM (replied_at - sent_at))/3600)
+          FILTER (WHERE replied_at IS NOT NULL AND sent_at IS NOT NULL)       AS avg_reply_hours
+      FROM communications
+      WHERE created_at > NOW() - $1::interval`, [iv]))[0];
+    email.reply_rate = email.emails_sent ? +(email.replies_received / email.emails_sent).toFixed(4) : null;
+
+    const ai = (await one(`
+      SELECT COALESCE(SUM(total_tokens),0)::bigint AS tokens,
+             COALESCE(SUM(cost_usd),0)::numeric(12,4) AS cost_usd,
+             COALESCE(AVG(response_ms),0)::int AS avg_ms,
+             COUNT(*)::int AS calls
+      FROM ai_usage_events WHERE created_at > NOW() - $1::interval`, [iv]))[0];
+
+    const aiByFeature = await one(`
+      SELECT feature, COALESCE(SUM(total_tokens),0)::bigint tokens,
+             COALESCE(SUM(cost_usd),0)::numeric(12,4) cost_usd, COUNT(*)::int calls
+      FROM ai_usage_events WHERE created_at > NOW() - $1::interval
+      GROUP BY 1 ORDER BY cost_usd DESC`, [iv]);
+
+    const adoption = (await one(`
+      SELECT
+        (SELECT COUNT(*)::int FROM companies       WHERE created_at > NOW() - $1::interval) AS companies_created,
+        (SELECT COUNT(*)::int FROM contacts        WHERE created_at > NOW() - $1::interval) AS contacts_added,
+        (SELECT COUNT(*)::int FROM companies       WHERE ai_analyzed_at > NOW() - $1::interval) AS ai_analyses,
+        (SELECT COUNT(*)::int FROM account_reports WHERE created_at > NOW() - $1::interval) AS research_reports`, [iv]))[0];
+
+    res.json({ ok: true, days,
+      platform: { dau, wau, mau },
+      email, ai, aiByFeature, adoption });
+  } catch (err) {
+    console.error('analytics overview:', err);
+    res.status(500).json({ error: 'Failed to load analytics' });
+  }
+});
+
+/* GET /api/analytics/by-user — per-person figures, separated from the
+   aggregate endpoint so it can be locked down on its own. Counts and cost
+   only; nothing about what was said to whom. */
+app.get('/api/analytics/by-user', async (req, res) => {
+  try {
+    const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+    const iv = `${days} days`;
+    const rows = (await pool.query(`
+      SELECT u.actor,
+             COALESCE(a.tokens,0)::bigint tokens, COALESCE(a.cost_usd,0)::numeric(12,4) cost_usd,
+             COALESCE(c.drafts,0)::int drafts, COALESCE(c.sent,0)::int sent, COALESCE(c.replies,0)::int replies
+      FROM (SELECT DISTINCT actor FROM crm_activity
+            WHERE actor IS NOT NULL AND created_at > NOW() - $1::interval) u
+      LEFT JOIN (SELECT user_id, SUM(total_tokens) tokens, SUM(cost_usd) cost_usd
+                 FROM ai_usage_events WHERE created_at > NOW() - $1::interval GROUP BY 1) a ON a.user_id = u.actor
+      LEFT JOIN (SELECT user_id,
+                        COUNT(*) FILTER (WHERE comm_type='draft') drafts,
+                        COUNT(*) FILTER (WHERE sent_at IS NOT NULL) sent,
+                        COUNT(*) FILTER (WHERE replied_at IS NOT NULL) replies
+                 FROM communications WHERE created_at > NOW() - $1::interval GROUP BY 1) c ON c.user_id = u.actor
+      ORDER BY cost_usd DESC`, [iv])).rows;
+    res.json({ ok: true, days, users: rows });
+  } catch (err) {
+    console.error('analytics by-user:', err);
+    res.status(500).json({ error: 'Failed to load per-user analytics' });
   }
 });
 
