@@ -18,6 +18,11 @@ services:
         sync: false
       - key: APOLLO_API_KEY        # Apollo.io API key
         sync: false
+      # Credential the inbound-reply connector presents. Its only power is to
+      # OFFER a candidate reply: anything not answering a CRM-sent message is
+      # discarded, so this grants no mailbox or read access.
+      - key: REPLY_INGEST_TOKEN    # forwarding connector token
+        sync: false
       - key: APP_USERNAME          # HTTP Basic Auth username for the app login gate
         sync: false
       - key: APP_PASSWORD          # HTTP Basic Auth password
