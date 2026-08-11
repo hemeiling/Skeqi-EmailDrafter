@@ -503,8 +503,12 @@ textarea.editable{resize:vertical;overflow:auto;min-height:36px}
 
     /* ── Target Company autocomplete ─────────────────────────────────── */
     .ac-wrap { position: relative; }
+    /* Fixed, not absolute: the field sits inside .ar-card, whose overflow
+       clips an absolutely-positioned child — the list rendered correctly but
+       only its first few pixels were visible. Fixed positioning escapes every
+       clipping ancestor; coordinates are set from the input's rect on open. */
     .ac-list {
-      position: absolute; z-index: 60; left: 0; right: 0; top: calc(100% + 4px);
+      position: fixed; z-index: 3000;
       background: #fff; border: 1px solid #cbd5e1; border-radius: 8px;
       box-shadow: 0 10px 26px rgba(0,0,0,.14); max-height: 260px; overflow-y: auto;
     }
@@ -1248,7 +1252,12 @@ async function acCompanies(){
         const k=(rep.target||'').toLowerCase(); if(!k) return;
         const prev=merged.get(k);
         const ts=new Date(rep.createdAt||0).getTime()||0;
-        if(!prev || ts>prev.ts) merged.set(k,{name:rep.target,url:(prev&&prev.url)||rep.turl||'',ts});
+        // Keep the newest name, but never let a blank URL overwrite a known
+        // one: the most recent report may simply have been generated without
+        // the website field filled in.
+        const url=(rep.turl||'').trim() || (prev&&prev.url) || '';
+        if(!prev || ts>prev.ts) merged.set(k,{name:rep.target,url,ts});
+        else if(!prev.url && url) prev.url=url;
       });
     }
   }catch(e){ /* offline: local list alone is still useful */ }
@@ -1256,6 +1265,22 @@ async function acCompanies(){
   return _acCompanies;
 }
 function acInvalidate(){ _acCompanies=null; }
+
+/* Anchors the fixed-position list under the input, flipping above it when
+   there is not enough room below. */
+function positionAcList(){
+  const inp=document.getElementById('inp-target'), box=document.getElementById('target-ac');
+  if(!inp||!box||box.hidden) return;
+  const r=inp.getBoundingClientRect();
+  box.style.width=r.width+'px';
+  box.style.left=r.left+'px';
+  const below=window.innerHeight-r.bottom;
+  const h=box.offsetHeight||240;
+  if(below < h+12 && r.top > h+12){ box.style.top=(r.top-h-4)+'px'; }
+  else { box.style.top=(r.bottom+4)+'px'; box.style.maxHeight=Math.max(140,below-16)+'px'; }
+}
+window.addEventListener('scroll', positionAcList, true);
+window.addEventListener('resize', positionAcList);
 
 function acClose(){
   const box=document.getElementById('target-ac');
@@ -1284,6 +1309,7 @@ async function acOpen(filter){
   if(!_acItems.length){
     box.innerHTML=`<div class="ac-empty">${q?'No matching company · 无匹配公司':'No researched companies yet · 暂无已研究公司'}</div>`;
     box.hidden=false; inp.setAttribute('aria-expanded','true');
+    positionAcList();
     return;
   }
   box.innerHTML=`<div class="ac-head">Previously researched · 已研究公司</div>`+
@@ -1293,6 +1319,7 @@ async function acOpen(filter){
         <button class="ac-del" data-del="${esc(c.name)}" title="Remove from list · 从列表移除">×</button>
       </div>`).join('');
   box.hidden=false; inp.setAttribute('aria-expanded','true');
+  positionAcList();
 
   box.querySelectorAll('.ac-item').forEach(el=>{
     el.addEventListener('mousedown',ev=>{           // mousedown: fires before blur
