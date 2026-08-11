@@ -3026,6 +3026,33 @@
 </div>
 
 <!-- ── Email draft modal ── -->
+<!-- Reply connector setup. Documented in-product because this is the one
+     part of reply tracking a human must wire up, and getting it wrong looks
+     identical to "no one has replied yet". -->
+<div class="modal-overlay" id="ingest-help-modal">
+  <div class="modal-box" style="max-width:640px">
+    <button class="modal-close" data-ingest-close title="Close">×</button>
+    <h2>Reply detection setup 回复检测设置</h2>
+    <div class="contact-info" style="margin-bottom:10px">
+      The CRM never reads your mailbox. A forwarding rule sends <em>candidate</em> replies to the
+      endpoint below, and anything that is not a reply to a CRM-sent email is discarded on arrival.
+      <br><span class="i18n-zh">CRM 不读取您的邮箱。转发规则仅发送候选回复，非 CRM 邮件的回复会被直接丢弃。</span>
+    </div>
+    <div class="field-group"><label>Endpoint</label>
+      <input type="text" id="ingest-url" readonly></div>
+    <div class="field-group"><label>Header</label>
+      <input type="text" value="x-ingest-token: &lt;REPLY_INGEST_TOKEN from .env&gt;" readonly></div>
+    <div class="contact-info" style="font-size:.78rem">
+      <b>Outlook / Microsoft 365:</b> Rules → apply to messages that are replies →
+      forward to a connector (Power Automate “When a new email arrives” → HTTP POST).<br>
+      <b>Payload:</b> pass the message headers as <code>headers</code> (Message-ID, In-Reply-To,
+      References, From, Date) plus a short <code>snippet</code>. Bodies are not required and are not stored.<br>
+      <b>Privacy:</b> the token only allows <em>offering</em> a message. It grants no read access, and an
+      unmatched message is refused.
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="email-modal">
   <div class="modal">
     <button class="modal-close" id="email-modal-close" title="Close">×</button>

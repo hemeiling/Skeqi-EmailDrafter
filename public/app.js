@@ -8620,3 +8620,13 @@ document.addEventListener('click', (e) => {
 
 refreshReplyBadge();
 _notifTimer = setInterval(refreshReplyBadge, 60000);
+
+
+/* Setup helper for the reply connector. */
+function openIngestHelp() {
+  const el = document.getElementById('ingest-url');
+  if (el) el.value = window.location.origin + '/api/replies/ingest';
+  openModal('ingest-help-modal');
+}
+document.querySelectorAll('[data-ingest-close]').forEach((b) =>
+  b.addEventListener('click', () => closeModal('ingest-help-modal')));

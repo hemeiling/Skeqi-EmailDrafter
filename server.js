@@ -683,6 +683,25 @@ app.post('/api/replies/read', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Failed to mark read' }); }
 });
 
+/* Connector credential. The forwarding rule is not a logged-in user, so it
+   authenticates with a token of its own rather than sharing an operator's
+   password. Its only power is to OFFER a candidate: everything it sends is
+   still discarded unless it answers a message the CRM sent, so a leaked
+   token cannot be used to inject arbitrary mail into the CRM or to read
+   anything. */
+function ingestAuth(req, res, next) {
+  const expected = process.env.REPLY_INGEST_TOKEN || '';
+  if (!expected) {
+    return res.status(503).json({ error: 'Reply ingest is not configured. Set REPLY_INGEST_TOKEN.' });
+  }
+  const given = req.get('x-ingest-token') || (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  // Length-independent comparison keeps the check from leaking the token.
+  const ok = given.length === expected.length &&
+    require('crypto').timingSafeEqual(Buffer.from(given), Buffer.from(expected));
+  if (!ok) return res.status(401).json({ error: 'Invalid ingest token' });
+  next();
+}
+
 /* POST /api/replies/ingest — the single entry point for inbound mail.
 
    Deliberately a push endpoint rather than a mailbox poller: whatever feeds
@@ -690,18 +709,24 @@ app.post('/api/replies/read', async (req, res) => {
    one candidate at a time, and recordEmailReply drops anything whose
    inReplyTo does not match a message the CRM sent. Unrelated mail cannot be
    stored even if it is offered. */
-app.post('/api/replies/ingest', async (req, res) => {
+app.post('/api/replies/ingest', ingestAuth, async (req, res) => {
   try {
     const b = req.body || {};
-    if (!b.inReplyTo || !b.replyMessageId) {
-      return res.status(400).json({ error: 'inReplyTo and replyMessageId are required' });
+    const h = b.headers || {};
+    // Accept either explicit fields or raw headers, since connectors differ.
+    const inReplyTo = b.inReplyTo || h['In-Reply-To'] || h['in-reply-to'] || '';
+    const references = b.references || h['References'] || h['references'] || '';
+    const replyMessageId = b.replyMessageId || h['Message-ID'] || h['message-id'] || '';
+    if ((!inReplyTo && !references) || !replyMessageId) {
+      return res.status(400).json({ error: 'a Message-ID plus In-Reply-To or References is required' });
     }
     const saved = await recordEmailReply({
-      inReplyTo: String(b.inReplyTo), replyMessageId: String(b.replyMessageId),
-      fromEmail: b.fromEmail, fromName: b.fromName,
-      snippet: b.snippet, receivedAt: b.receivedAt,
+      inReplyTo, references, replyMessageId: String(replyMessageId),
+      fromEmail: b.fromEmail || h['From'] || '', fromName: b.fromName,
+      snippet: b.snippet || b.bodyPreview, receivedAt: b.receivedAt || h['Date'],
     });
     if (!saved) return res.json({ ok: true, matched: false, reason: 'not a reply to a CRM-sent message' });
+    if (saved.duplicate) return res.json({ ok: true, matched: true, duplicate: true, reason: 'already recorded' });
     res.json({ ok: true, matched: true, id: saved.id, threadId: saved.thread_id });
   } catch (err) {
     console.error('reply ingest:', err);

@@ -1543,9 +1543,23 @@ async function listCrmActivity({ actor, action, days = 30, limit = 200 } = {}) {
    message_id, which is the technical guarantee that unrelated mailbox
    traffic can never enter the system. Returns null when unmatched. */
 async function recordEmailReply(r) {
+  /* A forwarded reply may reference the original in In-Reply-To or anywhere
+     in References, and clients rewrite these inconsistently. Every candidate
+     id is checked, and the first that matches a message WE sent wins. If
+     none matches, the mail is not ours and nothing is stored. */
+  const candidates = []
+    .concat(r.inReplyTo || [], r.references || [])
+    .flatMap((v) => String(v || '').split(/\s+/))
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .map((v) => (v.startsWith('<') ? v : `<${v}>`));
+  if (!candidates.length) return null;
+
   const parent = await q1(
     `SELECT id, user_id, contact_id, company_id, thread_id, message_id
-     FROM communications WHERE message_id = $1 LIMIT 1`, [r.inReplyTo]);
+     FROM communications
+     WHERE message_id = ANY($1::text[]) AND sent_at IS NOT NULL
+     ORDER BY sent_at DESC LIMIT 1`, [candidates]);
   if (!parent) return null;                    // not ours — ignore entirely
 
   const snippet = String(r.snippet || '').replace(/\s+/g, ' ').trim().slice(0, 180);
@@ -1559,7 +1573,7 @@ async function recordEmailReply(r) {
     [parent.user_id, parent.contact_id, parent.company_id,
      parent.thread_id || parent.message_id, r.inReplyTo, r.replyMessageId,
      r.fromEmail || '', r.fromName || '', snippet, r.receivedAt || null]);
-  if (!rows.length) return null;               // already recorded
+  if (!rows.length) return { duplicate: true };   // already recorded; a re-delivery, not a stranger
 
   await q(`UPDATE communications SET replied_at = COALESCE(replied_at, NOW()),
              delivery_status = 'replied' WHERE id = $1`, [parent.id]);
