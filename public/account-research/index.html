@@ -1369,6 +1369,18 @@ function initTargetAutocomplete(){
    only path back to a prompt was to rerun the whole report. This table
    makes each section addressable on its own, which is what "Regenerate
    Section" needs. */
+/* One company, one key. A domain is the strongest identity we have; the
+   normalized name is the fallback so a company with no website still
+   benefits. */
+function companyIdentity(name, url){
+  const host = String(url||'').trim().toLowerCase()
+    .replace(/^https?:\/\//,'').replace(/^www\./,'').split(/[\/?#]/)[0];
+  if(host && host.includes('.')) return host;
+  return slugify(String(name||'').toLowerCase()
+    .replace(/\b(inc|corp|corporation|co|ltd|limited|llc|gmbh|plc|sa|ag|nv|bv)\b\.?/g,'')
+    .replace(/[^a-z0-9]+/g,' ').trim());
+}
+
 const SECTION_META = {
   s1: { key:'od',  label:'Company overview & profile · 公司概述',
         prompt:(t,tu,se,su)=>P_overview(t,tu,se,su) },
@@ -1446,7 +1458,11 @@ async function regenerateSection(sid){
     _pptData = _currentData;
     render(_currentData);
     const { missing } = syncStepUIFromReport(_currentData);
-    try { saveResearchCache(sid, `${slugify(target)}__${slugify(seller)}`, parsed, resp.costUSD); } catch(e){}
+    try {
+      const key = ['s5','s6'].includes(sid) ? `${slugify(target)}__${slugify(seller)}`
+                                            : `co:${companyIdentity(target, turl)}`;
+      saveResearchCache(sid, key, parsed, resp.costUSD);
+    } catch(e){}
     const saved = await persistReport(true);
     setProg(Math.max(5, Math.round(((6-missing.length)/6)*100)),
       missing.length ? `Partially Complete · 部分完成 — ${6-missing.length}/6 sections with content`
@@ -3052,7 +3068,22 @@ async function generate(forceRefresh = false) {
 
   const results = { s1:'fallback',s2:'fallback',s3:'fallback',s4:'fallback',s5:'fallback',s6:'fallback' };
   const _genStartTime = Date.now();
-  const cacheKey = `${slugify(target)}__${slugify(seller)}`;
+  /* Two cache scopes, because the sections have two different subjects.
+
+     s1-s4 are facts about the target company: its profile, financials,
+     strategy and news do not change according to who is selling to it. They
+     are keyed by company identity alone — domain when we have one, since
+     "Tesla", "Tesla Inc" and "Tesla, Inc." are the same company — so a
+     second report on the same target reuses the research instead of buying
+     it again.
+
+     s5-s6 are about the relationship (competitive position against this
+     seller, stakeholders for this seller's pitch), so they stay keyed by
+     the pair. Keying everything by the pair, as before, meant researching
+     Tesla from scratch for every new seller. */
+  const companyKey = `co:${companyIdentity(target, turl)}`;
+  const pairKey    = `${slugify(target)}__${slugify(seller)}`;
+  const cacheKeyFor = (id) => (['s5','s6'].includes(id) ? pairKey : companyKey);
   const _usageTotals = { model:'', apiCalls:0, inputTokens:0, outputTokens:0, costUSD:0, bySection:{}, generationTimeMs:0, reusedSections:0, estimatedSavingsUSD:0, estimatedSavingsPct:0 };
 
   function recordUsage(id, label, resp) {
@@ -3080,7 +3111,7 @@ async function generate(forceRefresh = false) {
 
     // Reuse cached research for this section instead of calling Claude again
     if (!forceRefresh) {
-      const cached = await fetchResearchCache(id, cacheKey);
+      const cached = await fetchResearchCache(id, cacheKeyFor(id));
       if (cached && cached.found) {
         onSuccess(cached.data);
         setStepUI(id, 'done');
@@ -3101,7 +3132,7 @@ async function generate(forceRefresh = false) {
       setStepUI(id, 'done');
       results[id] = 'success';
       console.log(`[generate] ${id} ✅`);
-      saveResearchCache(id, cacheKey, parsed, resp.costUSD);
+      saveResearchCache(id, cacheKeyFor(id), parsed, resp.costUSD);
     } catch(e) {
       console.error(`[generate] ${id} ❌`, e.kind||'error', e.message);
       // The kind says what to do about it; the message alone rarely did.
@@ -3117,7 +3148,7 @@ async function generate(forceRefresh = false) {
           setStepUI(id, 'done');
           results[id] = 'success';
           document.getElementById('retry-'+id)?.remove();
-          saveResearchCache(id, cacheKey, parsed2, resp2.costUSD);
+          saveResearchCache(id, cacheKeyFor(id), parsed2, resp2.costUSD);
           if (_currentData) { _currentData = Object.assign(_currentData, { od, fd, sd, nd, cd, sal,
               _sectionStatus: Object.fromEntries(Object.entries(results).map(([sid,st])=>[SECTION_DATA_KEY[sid]||sid, st])),
               _usage: _usageTotals }); _pptData = _currentData; render(_currentData); }
