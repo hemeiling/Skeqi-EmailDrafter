@@ -37,7 +37,8 @@ const {
   getSetting, setSetting, listEvents,
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
   logCompanyActivity, listCompanyActivity, logCrmActivity, listCrmActivity, activeUsers,
-  recordEmailReply, listEmailReplies, unreadReplyCount, markRepliesRead, pool
+  recordEmailReply, listEmailReplies, unreadReplyCount, markRepliesRead,
+  listEmailThreads, getEmailThread, pool
 } = require('./db');
 const { normalizeColumnFilters, describeFilters, EMAIL_MODES, ACTIVITY_STATES, DRAFT_STATES, CONTACT_STATUSES, CONTACT_SOURCES, EMAIL_SOURCES, COMPANY_SOURCES } = require('./contact-query');
 const { parseCardText } = require('./parse');
@@ -731,6 +732,38 @@ app.post('/api/replies/ingest', ingestAuth, async (req, res) => {
   } catch (err) {
     console.error('reply ingest:', err);
     res.status(500).json({ error: 'Failed to ingest reply' });
+  }
+});
+
+/* ── Email page ──────────────────────────────────────────────────────
+   Serves only CRM-managed conversations: what this system drafted or sent,
+   plus replies matched to those messages. There is no endpoint here that
+   lists a mailbox. */
+app.get('/api/threads', async (req, res) => {
+  try {
+    const rows = await listEmailThreads({
+      userId: reqUser(req),
+      limit: Math.min(100, Number(req.query.limit) || 50),
+      unreadOnly: req.query.unread === '1',
+    });
+    res.json({ ok: true, threads: rows });
+  } catch (err) {
+    console.error('threads:', err);
+    res.status(500).json({ error: 'Failed to load conversations' });
+  }
+});
+
+app.get('/api/threads/:id', async (req, res) => {
+  try {
+    const t = await getEmailThread(String(req.params.id));
+    if (!t.messages.length && !t.replies.length) return res.status(404).json({ error: 'Thread not found' });
+    // Opening a conversation clears its unread replies — the same act.
+    const unread = t.replies.filter((r) => !r.read_at).map((r) => r.id);
+    if (unread.length) await markRepliesRead(unread, reqUser(req));
+    res.json({ ok: true, ...t });
+  } catch (err) {
+    console.error('thread:', err);
+    res.status(500).json({ error: 'Failed to load conversation' });
   }
 });
 

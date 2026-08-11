@@ -18,7 +18,7 @@ let _sender = { name: "", title: "", company: "" };
 
 // Breadcrumb labels follow the sidebar's Chinese naming so the two never
 // disagree; the English name is kept alongside for the nav item's tooltip.
-const APP_VIEW_LABELS = { home: "首页概览", search: "AI 邮件起草", "booth-map": "展会地图", crm: "CRM 管理", intelligence: "客户情报", "account-research": "账户研究报告", "ai-usage": "数据分析", settings: "设置中心" };
+const APP_VIEW_LABELS = { home: "首页概览", search: "AI 邮件起草", "booth-map": "展会地图", crm: "CRM 管理", intelligence: "客户情报", "account-research": "账户研究报告", "ai-usage": "数据分析", email: "邮件", settings: "设置中心" };
 
 // The Booth Map and Account Report tabs are ported standalone apps rendered in
 // iframes. Load each on first open rather than on page load — the map is a
@@ -8630,3 +8630,165 @@ function openIngestHelp() {
 }
 document.querySelectorAll('[data-ingest-close]').forEach((b) =>
   b.addEventListener('click', () => closeModal('ingest-help-modal')));
+
+
+/* ── Email page ──────────────────────────────────────────────────────────
+   Two panes, as every mail client has settled on: a list of what is waiting
+   and a pane showing what it says. Only CRM-managed conversations appear —
+   what this system drafted or sent, plus replies matched to those messages.
+   Nothing here reads a mailbox. */
+let _mailThreads = [];
+let _mailFilter = 'all';
+let _mailActive = null;
+
+function mailWhen(ts) {
+  if (!ts) return '';
+  const d = new Date(ts); if (isNaN(d)) return '';
+  const today = new Date().toDateString() === d.toDateString();
+  return today ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+               : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+async function loadMailThreads(openThreadId) {
+  const list = document.getElementById('mail-list');
+  if (!list) return;
+  list.innerHTML = '<div class="mail-empty" style="padding:30px 0;">Loading… 加载中…</div>';
+  try {
+    const d = await getJSON('/api/threads?limit=60' + (_mailFilter === 'unread' ? '&unread=1' : ''));
+    _mailThreads = d.threads || [];
+    renderMailList();
+    if (openThreadId) openMailThread(openThreadId);
+    else if (_mailThreads.length && !_mailActive) openMailThread(_mailThreads[0].thread_id);
+  } catch (e) {
+    list.innerHTML = '<div class="mail-empty">Could not load conversations 无法加载会话</div>';
+  }
+}
+
+function renderMailList() {
+  const list = document.getElementById('mail-list');
+  if (!list) return;
+  if (!_mailThreads.length) {
+    list.innerHTML = `<div class="mail-empty" style="padding:40px 12px;">
+      ${_mailFilter === 'unread' ? 'No unread replies 无未读回复' : 'No conversations yet 暂无会话'}
+      <br><span style="font-size:.7rem">Only emails sent from the CRM appear here 仅显示 CRM 发出的邮件</span></div>`;
+    return;
+  }
+  list.innerHTML = _mailThreads.map((t) => {
+    const who = t.contact_name || t.to_email || t.from_email || '(no recipient 无收件人)';
+    return `<button class="mail-row ${t.unread_replies ? 'is-unread' : ''} ${t.thread_id === _mailActive ? 'is-active' : ''}"
+        data-thread="${escapeAttr(t.thread_id)}">
+      <div><span class="mail-row-from">${escapeHtml(who)}</span>${t.company_name ? `<span class="mail-row-co">${escapeHtml(t.company_name)}</span>` : ''}</div>
+      <div class="mail-row-subj">${escapeHtml(t.subject || '(no subject 无主题)')}</div>
+      <div class="mail-row-meta">
+        <span>${escapeHtml(mailWhen(t.last_at))}</span>
+        <span>${t.message_count} msg${t.message_count !== 1 ? 's' : ''}</span>
+        ${t.reply_count ? `<span>${t.reply_count} repl${t.reply_count !== 1 ? 'ies' : 'y'}</span>` : ''}
+      </div>
+    </button>`;
+  }).join('');
+  list.querySelectorAll('.mail-row').forEach((el) =>
+    el.addEventListener('click', () => openMailThread(el.dataset.thread)));
+}
+
+async function openMailThread(threadId) {
+  if (!threadId) return;
+  _mailActive = threadId;
+  renderMailList();
+  const pane = document.getElementById('mail-reader');
+  if (!pane) return;
+  pane.innerHTML = '<div class="mail-empty">Loading… 加载中…</div>';
+  try {
+    const d = await getJSON('/api/threads/' + encodeURIComponent(threadId));
+    const msgs = d.messages || [], reps = d.replies || [];
+    const subject = (msgs.find((m) => m.subject) || {}).subject || '(no subject 无主题)';
+    const last = msgs[msgs.length - 1] || {};
+
+    // Sent messages and received replies interleaved by time, so the pane
+    // reads as one conversation rather than two lists.
+    const items = msgs.map((m) => ({ t: m.sent_at || m.created_at, kind: 'sent', m }))
+      .concat(reps.map((r) => ({ t: r.received_at, kind: 'reply', r })))
+      .sort((a, b) => new Date(a.t) - new Date(b.t));
+
+    pane.innerHTML = `
+      <div class="mail-subject">${escapeHtml(subject)}</div>
+      <div class="contact-info" style="margin:0">${msgs.length} message${msgs.length !== 1 ? 's' : ''}${reps.length ? ` · ${reps.length} repl${reps.length !== 1 ? 'ies' : 'y'}` : ''}</div>
+      <div class="mail-actions">
+        <button class="btn-sm btn-primary" data-mail="reply">↩ Reply 回复</button>
+        <button class="btn-sm btn-ghost" data-mail="replyAll">↩↩ Reply All 全部回复</button>
+        <button class="btn-sm btn-ghost" data-mail="forward">➡ Forward 转发</button>
+      </div>
+      ${items.map((it) => it.kind === 'sent' ? `
+        <div class="mail-msg">
+          <div class="mail-msg-head">
+            <div>
+              <div class="mail-msg-from">${escapeHtml(it.m.from_name || it.m.from_email || 'You')}
+                ${it.m.sent_at ? '<span class="mail-badge">sent 已发送</span>' : '<span class="mail-badge">draft 草稿</span>'}</div>
+              <div class="mail-msg-to">To: ${escapeHtml(it.m.to_email || '')}${it.m.cc ? ` · Cc: ${escapeHtml(it.m.cc)}` : ''}</div>
+            </div>
+            <div class="mail-msg-time">${escapeHtml(new Date(it.t).toLocaleString())}</div>
+          </div>
+          <div class="mail-msg-body">${escapeHtml(it.m.body || '')}</div>
+          ${it.m.attachment_count ? `<div class="mail-att">📎 ${it.m.attachment_count} attachment${it.m.attachment_count !== 1 ? 's' : ''} 附件</div>` : ''}
+        </div>` : `
+        <div class="mail-msg is-reply">
+          <div class="mail-msg-head">
+            <div><div class="mail-msg-from">${escapeHtml(it.r.from_name || it.r.from_email)} <span class="mail-badge" style="background:#dcfce7;color:#166534;">reply 回复</span></div>
+              <div class="mail-msg-to">${escapeHtml(it.r.from_email || '')}</div></div>
+            <div class="mail-msg-time">${escapeHtml(new Date(it.t).toLocaleString())}</div>
+          </div>
+          <div class="mail-msg-body">${escapeHtml(it.r.snippet || '')}</div>
+          <div class="mail-att">Preview only — the full message is in your mailbox 仅预览，完整内容见邮箱</div>
+        </div>`).join('')}`;
+
+    pane.querySelectorAll('[data-mail]').forEach((b) =>
+      b.addEventListener('click', () => mailComposeFrom(b.dataset.mail, last, reps, subject)));
+    // The list's unread marker is cleared server-side on open; reflect it.
+    const t = _mailThreads.find((x) => x.thread_id === threadId);
+    if (t && t.unread_replies) { t.unread_replies = 0; renderMailList(); refreshReplyBadge(); }
+  } catch (e) {
+    pane.innerHTML = '<div class="mail-empty">Could not open this conversation 无法打开会话</div>';
+  }
+}
+
+/* Reply / Reply All / Forward reuse the existing compose modal rather than
+   introducing a second editor with its own quirks. */
+function mailComposeFrom(mode, lastMsg, replies, subject) {
+  const lastReply = replies && replies.length ? replies[replies.length - 1] : null;
+  const to = mode === 'forward' ? ''
+    : (lastReply && lastReply.from_email) || lastMsg.to_email || '';
+  const cc = mode === 'replyAll' ? (lastMsg.cc || '') : '';
+  const prefix = mode === 'forward' ? 'FW: ' : 'RE: ';
+  const subj = subject.replace(/^((RE|FW):\s*)+/i, '');
+  const quoted = `\n\n----- ${mode === 'forward' ? 'Forwarded message' : 'Original message'} -----\n`
+    + (lastReply ? `From: ${lastReply.from_email}\n${lastReply.snippet || ''}`
+                 : `To: ${lastMsg.to_email || ''}\n${lastMsg.body || ''}`);
+  if (typeof openComposeModal === 'function') {
+    openComposeModal({ to, cc, subject: prefix + subj, body: quoted });
+    return;
+  }
+  // Fall back to the email modal already in the page.
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set('email-to', to); set('email-cc', cc);
+  set('email-subject', prefix + subj); set('email-body', quoted);
+  openModal('email-modal');
+}
+
+/* Deep link target used by the notification bell. */
+function loadEmailThread(threadId) {
+  showView('email');
+  loadMailThreads(threadId);
+}
+
+document.getElementById('mail-refresh')?.addEventListener('click', () => loadMailThreads(_mailActive));
+document.getElementById('mail-compose')?.addEventListener('click', () => mailComposeFrom('new', {}, [], ''));
+document.querySelectorAll('[data-mail-filter]').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('[data-mail-filter]').forEach((x) => x.classList.toggle('is-on', x === b));
+  _mailFilter = b.dataset.mailFilter;
+  _mailActive = null;
+  loadMailThreads();
+}));
+document.querySelector('.app-nav-item[data-nav-view="email"]')?.addEventListener('click', () => {
+  let pending = null;
+  try { pending = sessionStorage.getItem('open_thread'); sessionStorage.removeItem('open_thread'); } catch (e) {}
+  loadMailThreads(pending || _mailActive);
+});

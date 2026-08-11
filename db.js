@@ -1616,6 +1616,55 @@ async function markRepliesRead(ids, userId) {
   return r.length;
 }
 
+/* ── Email page: threads ──────────────────────────────────────────────
+   A thread is every message sharing a thread_id, falling back to the
+   message's own id for one-message conversations. Only CRM-managed
+   conversations appear: rows come from communications, which holds what
+   this system drafted or sent, plus replies matched to them. */
+async function listEmailThreads({ userId, limit = 50, unreadOnly = false } = {}) {
+  const params = [limit];
+  const userFilter = userId ? ` AND (c.user_id = '${String(userId).replace(/'/g, "''")}' OR c.user_id IS NULL)` : '';
+  const unread = unreadOnly ? ' HAVING BOOL_OR(r.read_at IS NULL) ' : '';
+  return q(`
+    SELECT COALESCE(c.thread_id, c.message_id, c.id::text) AS thread_id,
+           MAX(c.subject) FILTER (WHERE c.subject <> '')            AS subject,
+           MAX(c.to_email)                                          AS to_email,
+           MAX(c.from_email)                                        AS from_email,
+           MAX(c.contact_id)                                        AS contact_id,
+           MAX(c.company_id)                                        AS company_id,
+           MAX(ct.full_name)                                        AS contact_name,
+           MAX(co.name)                                             AS company_name,
+           COUNT(*)::int                                            AS message_count,
+           MAX(GREATEST(COALESCE(c.sent_at, c.created_at), COALESCE(r.received_at, 'epoch'))) AS last_at,
+           COUNT(r.id)::int                                         AS reply_count,
+           COUNT(r.id) FILTER (WHERE r.read_at IS NULL)::int        AS unread_replies
+    FROM communications c
+    LEFT JOIN contacts  ct ON ct.id = c.contact_id
+    LEFT JOIN companies co ON co.id = c.company_id
+    LEFT JOIN email_replies r ON r.thread_id = COALESCE(c.thread_id, c.message_id)
+    WHERE c.deleted_at IS NULL ${userFilter}
+    GROUP BY 1 ${unread}
+    ORDER BY last_at DESC NULLS LAST
+    LIMIT $1`, params);
+}
+
+/* Every message in one conversation, oldest first, so the reading pane can
+   render it as a conversation rather than a list of fragments. */
+async function getEmailThread(threadId) {
+  const msgs = await q(`
+    SELECT c.id, c.subject, c.body, c.from_email, c.from_name, c.to_email, c.cc, c.bcc,
+           c.sent_at, c.created_at, c.delivery_status, c.message_id, c.comm_type, c.status,
+           c.contact_id, c.company_id, c.user_id,
+           (SELECT COUNT(*)::int FROM communication_attachments a WHERE a.communication_id = c.id) AS attachment_count
+    FROM communications c
+    WHERE COALESCE(c.thread_id, c.message_id, c.id::text) = $1 AND c.deleted_at IS NULL
+    ORDER BY COALESCE(c.sent_at, c.created_at) ASC`, [threadId]);
+  const replies = await q(`
+    SELECT id, from_email, from_name, snippet, received_at, read_at, reply_message_id
+    FROM email_replies WHERE thread_id = $1 ORDER BY received_at ASC`, [threadId]);
+  return { messages: msgs, replies };
+}
+
 async function logCompanyActivity(companyId, activityType, description) {
   if (!companyId) return;
   try {
@@ -3585,6 +3634,7 @@ module.exports = {
   logCompanyActivity, listCompanyActivity,
   logCrmActivity, listCrmActivity, activeUsers,
   recordEmailReply, listEmailReplies, unreadReplyCount, markRepliesRead,
+  listEmailThreads, getEmailThread,
   pool,
   initDb,
   // account intelligence reports

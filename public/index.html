@@ -1222,6 +1222,39 @@
     .crm-acct-table col.ca-source   { width: 12%; }
     .crm-acct-src { display: inline-flex; align-items: center; gap: 5px; font-size: 0.75rem; color: #6b7280; margin-left: auto; }
     .ca-prov { font-size: 0.72rem; color: #6b7280; }
+    /* ── Email page ─────────────────────────────────────────────────── */
+    .mail-layout { display: grid; grid-template-columns: 340px 1fr; gap: 14px; align-items: start; }
+    @media (max-width: 1100px) { .mail-layout { grid-template-columns: 1fr; } }
+    .mail-list-col { background:#fff; border:1px solid #e5e7eb; border-radius:10px; overflow:hidden; }
+    .mail-filter { display:flex; gap:4px; padding:8px; border-bottom:1px solid #f1f5f9; }
+    .mail-filter-btn { border:1px solid #e2e8f0; background:#fff; border-radius:999px; padding:3px 12px;
+      font-size:.75rem; cursor:pointer; color:#475569; }
+    .mail-filter-btn.is-on { background:#EDE9F7; border-color:#c7bdea; color:#4c1d95; font-weight:600; }
+    #mail-list { max-height: 70vh; overflow-y: auto; }
+    .mail-row { display:block; width:100%; text-align:left; border:0; background:none; cursor:pointer;
+      padding:10px 12px; border-bottom:1px solid #f6f7f9; }
+    .mail-row:hover { background:#f8fafc; }
+    .mail-row.is-active { background:#EDE9F7; }
+    .mail-row.is-unread .mail-row-from { font-weight:700; }
+    .mail-row.is-unread::before { content:''; display:inline-block; width:7px; height:7px; border-radius:50%;
+      background:#2563eb; margin-right:6px; vertical-align:middle; }
+    .mail-row-from { font-size:.83rem; color:#0f172a; }
+    .mail-row-co { font-size:.7rem; color:#94a3b8; margin-left:5px; }
+    .mail-row-subj { font-size:.79rem; color:#334155; margin-top:2px; }
+    .mail-row-meta { font-size:.68rem; color:#94a3b8; margin-top:3px; display:flex; gap:8px; }
+    .mail-read-col { background:#fff; border:1px solid #e5e7eb; border-radius:10px; min-height:420px; padding:16px 18px; }
+    .mail-empty { color:#94a3b8; font-size:.85rem; text-align:center; padding:80px 0; }
+    .mail-subject { font-size:1.05rem; font-weight:700; color:#0f172a; margin-bottom:2px; }
+    .mail-actions { display:flex; gap:6px; margin:12px 0 14px; flex-wrap:wrap; }
+    .mail-msg { border-top:1px solid #f1f5f9; padding:12px 0; }
+    .mail-msg-head { display:flex; justify-content:space-between; gap:10px; font-size:.78rem; }
+    .mail-msg-from { font-weight:600; color:#0f172a; }
+    .mail-msg-to { color:#64748b; font-size:.73rem; }
+    .mail-msg-time { color:#94a3b8; font-size:.72rem; white-space:nowrap; }
+    .mail-msg-body { font-size:.84rem; color:#1f2937; white-space:pre-wrap; margin-top:8px; line-height:1.55; }
+    .mail-msg.is-reply { background:#f8fafc; border-radius:8px; padding:12px; }
+    .mail-badge { font-size:.66rem; padding:1px 7px; border-radius:999px; background:#eef2ff; color:#3730a3; }
+    .mail-att { font-size:.72rem; color:#475569; margin-top:6px; }
     .notif-wrap { position: relative; display: inline-flex; }
     .notif-dropdown {
       position: absolute; right: 0; top: calc(100% + 8px); width: 380px; max-height: 420px;
@@ -1706,6 +1739,10 @@
       <div class="app-nav-item" data-nav-view="search" title="AI 邮件起草 · Search &amp; Scan">
         <span class="app-nav-icon">✉️</span><span class="app-nav-label">AI 邮件起草</span>
       </div>
+      <div class="app-nav-item" data-nav-view="email" title="邮件 · Email">
+        <span class="app-nav-icon">✉️</span>
+        <span class="app-nav-label">Email<span class="i18n-zh">邮件</span></span>
+      </div>
       <div class="app-nav-item" data-nav-view="crm" title="CRM 管理 · Contacts &amp; Companies">
         <span class="app-nav-icon">👥</span><span class="app-nav-label">CRM 管理</span>
       </div>
@@ -2169,6 +2206,40 @@
          · narrowing the list               → the filter rail (one system)
          · working the list                 → the table + contextual bulk bar
        ══════════════════════════════════════════════════════════════════ -->
+  <!-- ══════════════════════════════════════════════════════════════════
+       Email: CRM-managed conversations only. Two panes, because that is how
+       mail is read everywhere — the list answers "what is waiting", the pane
+       answers "what does it say", and neither has to give up space for the
+       other.
+       ══════════════════════════════════════════════════════════════════ -->
+  <div class="view-hidden" data-view="email">
+    <div class="page-head">
+      <div>
+        <h1 data-no-i18n>Email 邮件</h1>
+        <div class="contact-info">Conversations started from the CRM, and the replies to them.
+          <span class="i18n-zh">仅显示由 CRM 发起的会话及其回复。</span></div>
+      </div>
+      <div class="page-head-actions">
+        <button class="btn-sm btn-ghost" id="mail-refresh">Refresh 刷新</button>
+        <button class="btn-sm btn-ghost" onclick="openIngestHelp()">Reply setup 回复设置</button>
+        <button class="btn-primary btn-sm" id="mail-compose">✉ New email 新建邮件</button>
+      </div>
+    </div>
+
+    <div class="mail-layout">
+      <aside class="mail-list-col">
+        <div class="mail-filter">
+          <button class="mail-filter-btn is-on" data-mail-filter="all">All 全部</button>
+          <button class="mail-filter-btn" data-mail-filter="unread">Unread 未读</button>
+        </div>
+        <div id="mail-list" data-no-i18n></div>
+      </aside>
+      <section class="mail-read-col" id="mail-reader" data-no-i18n>
+        <div class="mail-empty">Select a conversation 选择一个会话</div>
+      </section>
+    </div>
+  </div>
+
   <div class="view-hidden" data-view="crm">
 
     <!-- Page header: identity on the left, the actions that create records
