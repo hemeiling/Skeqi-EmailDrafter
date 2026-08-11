@@ -1224,14 +1224,41 @@ function loadSavedCompanies(){try{return JSON.parse(localStorage.getItem(LS_KEY)
    moment it is typed would fill it with abandoned attempts and typos. */
 function rememberCompany(name,url){
   const n=(name||'').trim(); if(!n) return;
+  unhideCompany(n);
   const list=loadSavedCompanies().filter(c=>c.name.toLowerCase()!==n.toLowerCase());
   list.unshift({name:n,url:(url||'').trim(),saved:Date.now()});
   try{ localStorage.setItem(LS_KEY,JSON.stringify(list.slice(0,40))); }catch(_){}
 }
 
+/* Removing an entry has to be recorded, not just deleted.
+
+   The dropdown is the union of localStorage and the report repository, so
+   deleting the local row alone was undone on the next render: the company
+   still has reports, so it was rebuilt straight back. A dismissal list makes
+   the removal durable.
+
+   This hides the company from the picker only. Its reports stay in Report
+   History untouched — the two are different questions, and deleting reports
+   because someone tidied a dropdown would be indefensible. */
+const LS_HIDDEN='acctPlan_hiddenCompanies';
+function loadHiddenCompanies(){
+  try{ return new Set(JSON.parse(localStorage.getItem(LS_HIDDEN)||'[]')); }catch(_){ return new Set(); }
+}
 function forgetCompany(name){
-  const list=loadSavedCompanies().filter(c=>c.name.toLowerCase()!==(name||'').toLowerCase());
+  const key=String(name||'').trim().toLowerCase();
+  if(!key) return;
+  const list=loadSavedCompanies().filter(c=>c.name.toLowerCase()!==key);
   try{ localStorage.setItem(LS_KEY,JSON.stringify(list)); }catch(_){}
+  const hidden=loadHiddenCompanies(); hidden.add(key);
+  try{ localStorage.setItem(LS_HIDDEN,JSON.stringify([...hidden])); }catch(_){}
+}
+
+/* Researching a company again is an explicit signal that it belongs in the
+   list, so it overrides an earlier dismissal. */
+function unhideCompany(name){
+  const key=String(name||'').trim().toLowerCase();
+  const hidden=loadHiddenCompanies();
+  if(hidden.delete(key)){ try{ localStorage.setItem(LS_HIDDEN,JSON.stringify([...hidden])); }catch(_){} }
 }
 
 /* Companies offered in the dropdown: those saved locally, plus the targets of
@@ -1261,7 +1288,10 @@ async function acCompanies(){
       });
     }
   }catch(e){ /* offline: local list alone is still useful */ }
-  _acCompanies=[...merged.values()].sort((a,b)=>b.ts-a.ts);
+  const hidden=loadHiddenCompanies();
+  _acCompanies=[...merged.values()]
+    .filter(c=>!hidden.has(String(c.name||'').trim().toLowerCase()))
+    .sort((a,b)=>b.ts-a.ts);
   return _acCompanies;
 }
 function acInvalidate(){ _acCompanies=null; }
@@ -1328,11 +1358,16 @@ async function acOpen(filter){
     });
   });
   box.querySelectorAll('.ac-del').forEach(btn=>{
-    btn.addEventListener('mousedown',ev=>{
-      ev.preventDefault(); ev.stopPropagation();
-      forgetCompany(btn.dataset.del); acInvalidate();
+    // mousedown fires before the row's own handler and before blur; click is
+    // suppressed too so the row cannot select on the way back up.
+    const remove=ev=>{
+      ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation();
+      forgetCompany(btn.dataset.del);
+      acInvalidate();
       acOpen(document.getElementById('inp-target').value);
-    });
+    };
+    btn.addEventListener('mousedown',remove);
+    btn.addEventListener('click',ev=>{ ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation(); });
   });
 }
 
