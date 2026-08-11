@@ -8523,3 +8523,100 @@ function openEmailSetup() {
     if (email) email.focus();
   }, 120);
 }
+
+
+/* ── CRM reply notifications ─────────────────────────────────────────────
+   The bell counts replies to emails the CRM sent — nothing else. The
+   dropdown is a preview: it shows who replied and a snippet, and hands off
+   to the Email page for anything more. Reading a message is a different
+   activity from being told one arrived, and mixing them is how a
+   notification tray turns into a second, worse mail client. */
+let _notifTimer = null;
+
+async function refreshReplyBadge() {
+  try {
+    const d = await getJSON('/api/replies/unread-count');
+    const el = document.getElementById('app-notif-count');
+    if (!el) return;
+    const n = Number(d.count) || 0;
+    el.textContent = n > 99 ? '99+' : String(n);
+    el.style.display = n ? '' : 'none';
+  } catch (e) { /* a badge is not worth an error banner */ }
+}
+
+function notifTimeAgo(ts) {
+  const t = new Date(ts).getTime();
+  if (!t) return '';
+  const m = Math.round((Date.now() - t) / 60000);
+  if (m < 1) return 'just now 刚刚';
+  if (m < 60) return `${m} min ago ${m} 分钟前`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago ${h} 小时前`;
+  return new Date(ts).toLocaleDateString();
+}
+
+async function openReplyDropdown() {
+  const box = document.getElementById('notif-dropdown');
+  if (!box) return;
+  if (!box.hidden) { box.hidden = true; return; }
+  box.hidden = false;
+  box.innerHTML = '<div class="notif-empty">Loading… 加载中…</div>';
+  try {
+    const d = await getJSON('/api/replies?limit=15');
+    const list = d.replies || [];
+    if (!list.length) {
+      box.innerHTML = '<div class="notif-empty">No replies yet 暂无回复<br><span style="font-size:.7rem">Only replies to emails sent from the CRM appear here 仅显示 CRM 发出邮件的回复</span></div>';
+      return;
+    }
+    box.innerHTML = '<div class="notif-head"><span>Email replies 邮件回复</span>'
+      + '<button id="notif-read-all" style="border:0;background:none;color:#2563eb;cursor:pointer;font-size:.72rem;">Mark all read 全部已读</button></div>'
+      + list.map((r) => `<button class="notif-item ${r.unread ? 'is-unread' : ''}" data-id="${r.id}" data-thread="${escapeAttr(r.threadId || '')}" data-contact="${r.contactId || ''}">
+          <div><span class="notif-from">${escapeHtml(r.contact || r.from || 'Unknown')}</span>${r.company ? `<span class="notif-co">${escapeHtml(r.company)}</span>` : ''}</div>
+          <div class="notif-snip">${escapeHtml(r.snippet || '')}</div>
+          <div class="notif-time">${escapeHtml(notifTimeAgo(r.receivedAt))}</div>
+        </button>`).join('');
+
+    box.querySelectorAll('.notif-item').forEach((el) => el.addEventListener('click', async () => {
+      const id = Number(el.dataset.id);
+      try { await fetch('/api/replies/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [id] }) }); } catch (e) {}
+      box.hidden = true;
+      refreshReplyBadge();
+      openEmailThread(el.dataset.thread, Number(el.dataset.contact) || null);
+    }));
+    document.getElementById('notif-read-all')?.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        await fetch('/api/replies/read', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: list.map((r) => r.id) }) });
+      } catch (err) {}
+      box.hidden = true;
+      refreshReplyBadge();
+    });
+  } catch (e) {
+    box.innerHTML = '<div class="notif-empty">Could not load replies 无法加载回复</div>';
+  }
+}
+
+/* Deep link from a notification to the conversation it refers to. The
+   dropdown never becomes the place you read mail. */
+function openEmailThread(threadId, contactId) {
+  try { sessionStorage.setItem('open_thread', threadId || ''); } catch (e) {}
+  if (contactId) {
+    showCrmTab('contacts');
+    loadCrmContacts('', { contact_ids: [contactId] });
+  }
+  showView('email');
+  if (typeof loadEmailThread === 'function') loadEmailThread(threadId, contactId);
+}
+
+document.getElementById('app-notifications-btn')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  openReplyDropdown();
+});
+document.addEventListener('click', (e) => {
+  const box = document.getElementById('notif-dropdown');
+  if (box && !box.hidden && !e.target.closest('.notif-wrap')) box.hidden = true;
+});
+
+refreshReplyBadge();
+_notifTimer = setInterval(refreshReplyBadge, 60000);

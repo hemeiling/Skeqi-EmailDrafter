@@ -1222,6 +1222,25 @@
     .crm-acct-table col.ca-source   { width: 12%; }
     .crm-acct-src { display: inline-flex; align-items: center; gap: 5px; font-size: 0.75rem; color: #6b7280; margin-left: auto; }
     .ca-prov { font-size: 0.72rem; color: #6b7280; }
+    .notif-wrap { position: relative; display: inline-flex; }
+    .notif-dropdown {
+      position: absolute; right: 0; top: calc(100% + 8px); width: 380px; max-height: 420px;
+      overflow-y: auto; background: #fff; border: 1px solid #d1d5db; border-radius: 10px;
+      box-shadow: 0 14px 34px rgba(0,0,0,.18); z-index: 2000; padding: 6px 0;
+    }
+    .notif-dropdown[hidden] { display: none; }
+    .notif-head { padding: 8px 14px 6px; font-size: .72rem; text-transform: uppercase;
+      letter-spacing: .04em; color: #6b7280; display: flex; justify-content: space-between; }
+    .notif-item { display: block; width: 100%; text-align: left; border: 0; background: none;
+      cursor: pointer; padding: 9px 14px; border-top: 1px solid #f1f5f9; }
+    .notif-item:hover { background: #f8fafc; }
+    .notif-item.is-unread { background: #eff6ff; }
+    .notif-item.is-unread:hover { background: #dbeafe; }
+    .notif-from { font-weight: 600; font-size: .82rem; color: #0f172a; }
+    .notif-co { font-size: .72rem; color: #64748b; margin-left: 6px; }
+    .notif-snip { font-size: .76rem; color: #475569; margin-top: 2px; line-height: 1.35; }
+    .notif-time { font-size: .68rem; color: #94a3b8; margin-top: 3px; }
+    .notif-empty { padding: 18px 14px; font-size: .78rem; color: #94a3b8; text-align: center; }
     .crm-page-size { font-size: 0.78rem; padding: 3px 5px; border: 1px solid #d1d5db; border-radius: 5px; }
     #crm-pagination { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding-top: 10px; }
     .crm-table .cell-primary, .crm-table .cell-sub { overflow-wrap: anywhere; }
@@ -1729,7 +1748,11 @@
       <div class="app-breadcrumb"><span>›</span> <b id="app-breadcrumb-current">首页概览</b></div>
       <div class="app-topbar-actions">
         <button class="btn-scan-card" id="open-scan-modal-btn">📇 扫描名片</button>
-        <button class="app-icon-btn" id="app-notifications-btn" title="通知">🔔<span class="app-notif-dot" id="app-notif-dot" style="display:none;"></span></button>
+        <div class="notif-wrap">
+          <button class="app-icon-btn" id="app-notifications-btn" title="CRM email replies 邮件回复">🔔<span class="app-notif-count" id="app-notif-count" style="display:none;">0</span></button>
+          <!-- Preview only: reading and replying happen on the Email page. -->
+          <div id="notif-dropdown" class="notif-dropdown" hidden data-no-i18n></div>
+        </div>
         <button class="app-icon-btn" id="app-help-btn" title="帮助">❔</button>
         <button class="app-usage-pill" id="app-usage-pill" title="AI 使用与成本">📊 <span class="pill-label">AI 使用</span></button>
         <div class="app-user-menu" id="app-user-menu" title="Account">

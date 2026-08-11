@@ -36,7 +36,8 @@ const {
   listContactNamesForBrowse,
   getSetting, setSetting, listEvents,
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
-  logCompanyActivity, listCompanyActivity, logCrmActivity, listCrmActivity, activeUsers, pool
+  logCompanyActivity, listCompanyActivity, logCrmActivity, listCrmActivity, activeUsers,
+  recordEmailReply, listEmailReplies, unreadReplyCount, markRepliesRead, pool
 } = require('./db');
 const { normalizeColumnFilters, describeFilters, EMAIL_MODES, ACTIVITY_STATES, DRAFT_STATES, CONTACT_STATUSES, CONTACT_SOURCES, EMAIL_SOURCES, COMPANY_SOURCES } = require('./contact-query');
 const { parseCardText } = require('./parse');
@@ -646,6 +647,65 @@ app.get('/api/analytics/by-user', async (req, res) => {
   } catch (err) {
     console.error('analytics by-user:', err);
     res.status(500).json({ error: 'Failed to load per-user analytics' });
+  }
+});
+
+/* ── CRM reply notifications ─────────────────────────────────────────
+   Everything here is scoped to replies to messages the CRM sent. There is
+   no endpoint that reads a mailbox, and none that returns a message body. */
+
+app.get('/api/replies/unread-count', async (req, res) => {
+  try { res.json({ ok: true, count: await unreadReplyCount(reqUser(req)) }); }
+  catch (err) { res.status(500).json({ error: 'Failed to load reply count' }); }
+});
+
+app.get('/api/replies', async (req, res) => {
+  try {
+    const rows = await listEmailReplies({
+      userId: reqUser(req),
+      unreadOnly: req.query.unread === '1',
+      limit: Math.min(50, Number(req.query.limit) || 20),
+    });
+    // Snippet only — the bell is a preview, not a reader.
+    res.json({ ok: true, replies: rows.map((r) => ({
+      id: r.id, threadId: r.thread_id, contactId: r.contact_id, companyId: r.company_id,
+      contact: r.contact_name || r.from_name || r.from_email,
+      company: r.company_name || '', from: r.from_email,
+      snippet: r.snippet, receivedAt: r.received_at, unread: !r.read_at,
+    })) });
+  } catch (err) { res.status(500).json({ error: 'Failed to load replies' }); }
+});
+
+app.post('/api/replies/read', async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body && req.body.ids) ? req.body.ids : [];
+    res.json({ ok: true, updated: await markRepliesRead(ids, reqUser(req)) });
+  } catch (err) { res.status(500).json({ error: 'Failed to mark read' }); }
+});
+
+/* POST /api/replies/ingest — the single entry point for inbound mail.
+
+   Deliberately a push endpoint rather than a mailbox poller: whatever feeds
+   it (a Graph subscription, an IMAP worker, a forwarding rule) hands over
+   one candidate at a time, and recordEmailReply drops anything whose
+   inReplyTo does not match a message the CRM sent. Unrelated mail cannot be
+   stored even if it is offered. */
+app.post('/api/replies/ingest', async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.inReplyTo || !b.replyMessageId) {
+      return res.status(400).json({ error: 'inReplyTo and replyMessageId are required' });
+    }
+    const saved = await recordEmailReply({
+      inReplyTo: String(b.inReplyTo), replyMessageId: String(b.replyMessageId),
+      fromEmail: b.fromEmail, fromName: b.fromName,
+      snippet: b.snippet, receivedAt: b.receivedAt,
+    });
+    if (!saved) return res.json({ ok: true, matched: false, reason: 'not a reply to a CRM-sent message' });
+    res.json({ ok: true, matched: true, id: saved.id, threadId: saved.thread_id });
+  } catch (err) {
+    console.error('reply ingest:', err);
+    res.status(500).json({ error: 'Failed to ingest reply' });
   }
 });
 

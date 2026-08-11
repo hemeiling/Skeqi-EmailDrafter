@@ -182,6 +182,32 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_activity_actor ON crm_activity (actor, created_at DESC)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_activity_action ON crm_activity (action, created_at DESC)`);
 
+  /* Reply notifications for CRM-originated threads only.
+
+     A row exists here only because a message we sent was replied to: the
+     link is the message_id we generated, so a mailbox message that does not
+     answer a CRM email can never produce one. Snippet is a short preview for
+     the bell; the full body stays in communications, and neither body nor
+     subject is copied into crm_activity. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_replies (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT,
+      contact_id INTEGER,
+      company_id INTEGER,
+      thread_id TEXT,
+      in_reply_to TEXT,             -- the CRM message_id being answered
+      reply_message_id TEXT UNIQUE, -- provider id, so a re-poll cannot duplicate
+      from_email TEXT,
+      from_name TEXT,
+      snippet TEXT,                 -- short preview only
+      received_at TIMESTAMPTZ,
+      read_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_replies_unread ON email_replies (user_id, read_at, received_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_replies_thread ON email_replies (thread_id)`);
+
   /* Attribution for sends. communications recorded which mailbox sent a
      message but not which CRM user asked for it, so "emails sent per user"
      was not answerable. */
@@ -1510,6 +1536,70 @@ async function listCrmActivity({ actor, action, days = 30, limit = 200 } = {}) {
   if (action) { params.push(action); where += ` AND action = $${params.length}`; }
   params.push(limit);
   return q(`SELECT * FROM crm_activity ${where} ORDER BY created_at DESC LIMIT $${params.length}`, params);
+}
+
+/* Records a reply to a CRM-sent message. Refuses anything that does not
+   answer a message we sent: `inReplyTo` must match a communications
+   message_id, which is the technical guarantee that unrelated mailbox
+   traffic can never enter the system. Returns null when unmatched. */
+async function recordEmailReply(r) {
+  const parent = await q1(
+    `SELECT id, user_id, contact_id, company_id, thread_id, message_id
+     FROM communications WHERE message_id = $1 LIMIT 1`, [r.inReplyTo]);
+  if (!parent) return null;                    // not ours — ignore entirely
+
+  const snippet = String(r.snippet || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+  const rows = await q(
+    `INSERT INTO email_replies
+       (user_id, contact_id, company_id, thread_id, in_reply_to, reply_message_id,
+        from_email, from_name, snippet, received_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, NOW()))
+     ON CONFLICT (reply_message_id) DO NOTHING
+     RETURNING *`,
+    [parent.user_id, parent.contact_id, parent.company_id,
+     parent.thread_id || parent.message_id, r.inReplyTo, r.replyMessageId,
+     r.fromEmail || '', r.fromName || '', snippet, r.receivedAt || null]);
+  if (!rows.length) return null;               // already recorded
+
+  await q(`UPDATE communications SET replied_at = COALESCE(replied_at, NOW()),
+             delivery_status = 'replied' WHERE id = $1`, [parent.id]);
+  // Audit entry carries references and counts, never content.
+  await logCrmActivity({
+    actor: parent.user_id, action: 'email.reply_received',
+    objectType: 'email', objectId: parent.message_id,
+    companyId: parent.company_id, contactId: parent.contact_id,
+    metadata: { thread_id: parent.thread_id || parent.message_id, reply_id: r.replyMessageId },
+  });
+  return rows[0];
+}
+
+async function listEmailReplies({ userId, unreadOnly = false, limit = 20 } = {}) {
+  const params = [];
+  let where = 'WHERE 1=1';
+  if (userId)     { params.push(userId); where += ` AND (user_id = $${params.length} OR user_id IS NULL)`; }
+  if (unreadOnly) { where += ' AND read_at IS NULL'; }
+  params.push(limit);
+  return q(`SELECT r.*, c.full_name AS contact_name, co.name AS company_name
+            FROM email_replies r
+            LEFT JOIN contacts c  ON c.id = r.contact_id
+            LEFT JOIN companies co ON co.id = r.company_id
+            ${where} ORDER BY r.received_at DESC LIMIT $${params.length}`, params);
+}
+
+async function unreadReplyCount(userId) {
+  const row = await q1(
+    `SELECT COUNT(*)::int n FROM email_replies
+     WHERE read_at IS NULL AND ($1::text IS NULL OR user_id = $1 OR user_id IS NULL)`, [userId || null]);
+  return row ? row.n : 0;
+}
+
+async function markRepliesRead(ids, userId) {
+  const clean = (ids || []).map(Number).filter(Number.isInteger);
+  if (!clean.length) return 0;
+  const r = await q(`UPDATE email_replies SET read_at = NOW()
+                     WHERE id = ANY($1::bigint[]) AND read_at IS NULL
+                       AND ($2::text IS NULL OR user_id = $2 OR user_id IS NULL) RETURNING id`, [clean, userId || null]);
+  return r.length;
 }
 
 async function logCompanyActivity(companyId, activityType, description) {
@@ -3480,6 +3570,7 @@ module.exports = {
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
   logCompanyActivity, listCompanyActivity,
   logCrmActivity, listCrmActivity, activeUsers,
+  recordEmailReply, listEmailReplies, unreadReplyCount, markRepliesRead,
   pool,
   initDb,
   // account intelligence reports
