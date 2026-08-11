@@ -7826,8 +7826,11 @@ async function loadAiUsageEvents() {
     if (f) params.set("from", f); if (t) params.set("to", t);
   }
   if (_aiuFeatureFilter) params.set("feature", _aiuFeatureFilter);
+  box.innerHTML = '<div style="padding:14px 0;color:#9ca3af;font-size:.8rem;"><span class="spinner"></span> Loading events…</div>';
   try {
-    const r = await fetch("/api/ai-usage/events?" + params.toString());
+    // Same deadline as the summary above: an untimed fetch has no failure
+    // state, so a stalled call would leave this panel spinning for good.
+    const r = await fetchWithTimeout("/api/ai-usage/events?" + params.toString());
     const d = await r.json();
     if (!d.ok) { box.innerHTML = `<div class="msg-error">${escapeHtml(d.error || "Failed")}</div>`; return; }
     let html = `<div style="overflow-x:auto;"><table class="intel-matrix-table" style="min-width:820px;"><thead><tr>
