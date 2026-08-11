@@ -26,7 +26,15 @@ const MAX_TOOL_ITER = 8;          // safety bound on the agentic search loop
 // Newer server-side search tool than the original app used
 // (web_search_20250305 + its beta header); this variant needs no beta header
 // and matches what research.js already uses elsewhere in the project.
-const WEB_SEARCH_TOOL = { type: 'web_search_20260209', name: 'web_search', max_uses: 5 };
+/* Searches are the multiplier on cost: our own prompt is ~334 tokens against
+   150k-220k injected by search results, so this number, not prompt length,
+   is what a report costs. Measured sections at max_uses 5 ran 150k-220k
+   input tokens for roughly $0.62-0.90 each. Dropped to 3 to cut that
+   proportionally; raise it back if reports start reading thin. */
+const WEB_SEARCH_TOOL = {
+  type: 'web_search_20260209', name: 'web_search',
+  max_uses: Number(process.env.CLAUDE_MAX_SEARCHES) || 3,
+};
 
 // Per-section cache lifetimes: fast-moving content expires sooner than
 // slow-moving content. Mirrors the standalone app's TTL table.
