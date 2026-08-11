@@ -85,12 +85,28 @@ const REQUEST_TIMEOUT_MS  = Number(process.env.CLAUDE_REQUEST_TIMEOUT_MS)  || 42
    any proxy or load balancer with its own idle timeout. The durable answer
    is streaming (stream: true), where tokens arrive continuously and no
    idle timer ever fires; that wants live validation before it lands. */
-const CLAUDE_DISPATCHER = new Agent({
-  headersTimeout: Number(process.env.CLAUDE_HEADERS_TIMEOUT_MS) || 900000,   // 15 min
-  bodyTimeout:    Number(process.env.CLAUDE_BODY_TIMEOUT_MS)    || 900000,
-  keepAliveTimeout: 60000,
-  connections: 8,
-});
+function newDispatcher() {
+  return new Agent({
+    headersTimeout: Number(process.env.CLAUDE_HEADERS_TIMEOUT_MS) || 900000,   // 15 min
+    bodyTimeout:    Number(process.env.CLAUDE_BODY_TIMEOUT_MS)    || 900000,
+    keepAliveTimeout: 10000,
+    connections: 4,
+  });
+}
+let CLAUDE_DISPATCHER = newDispatcher();
+
+/* An aborted request can leave its keep-alive socket in the pool in a state
+   the next request hangs on. Observed live: after one section timed out,
+   every later section timed out too, while a separate process reached the
+   API in 1.5s — the API was fine, the pool was not. Recycling the whole
+   dispatcher after an abort keeps one bad request from poisoning the rest
+   of the report. */
+function recycleDispatcher(reason) {
+  const old = CLAUDE_DISPATCHER;
+  CLAUDE_DISPATCHER = newDispatcher();
+  logAttempt({ ev: 'dispatcher_recycled', host: API_HOST, reason });
+  Promise.resolve(old.destroy()).catch(() => {});
+}
 const SECTION_DEADLINE_MS = Number(process.env.CLAUDE_SECTION_DEADLINE_MS) || 780000;  // 13 min
 const MAX_ATTEMPTS        = Number(process.env.CLAUDE_MAX_ATTEMPTS)        || 3;
 const RETRY_BASE_MS       = Number(process.env.CLAUDE_RETRY_BASE_MS)       || 1500;
@@ -198,7 +214,7 @@ function logAttempt(rec) {
 // Agentic call: Claude may search several times before answering. Server-side
 // tools resolve on Anthropic's side, so a `pause_turn` is resumed by replaying
 // the assistant turn rather than by us executing anything.
-async function callClaude({ model, prompt, useSearch, meta }) {
+async function callClaude({ model, prompt, useSearch, maxSearches, meta }) {
   if (!isClaudeConfigured()) throw new Error('CLAUDE_API_KEY is not configured');
 
   const section = (meta && meta.section) || 'unknown';
@@ -230,7 +246,12 @@ async function callClaude({ model, prompt, useSearch, meta }) {
 
   for (let iter = 1; iter <= MAX_TOOL_ITER; iter++) {
     const body = { model, max_tokens: MAX_TOKENS, messages };
-    if (useSearch) body.tools = [WEB_SEARCH_TOOL];
+    if (useSearch) {
+      const budget = Number(maxSearches);
+      body.tools = [Number.isFinite(budget) && budget > 0
+        ? { ...WEB_SEARCH_TOOL, max_uses: budget }
+        : WEB_SEARCH_TOOL];
+    }
     // Resume the same sandbox rather than being handed a fresh one.
     if (containerId) body.container = containerId;
 
@@ -297,6 +318,7 @@ async function callClaude({ model, prompt, useSearch, meta }) {
         wrapped.__kind = cls.kind;
         lastError = wrapped;
 
+        if (cls.kind === 'timeout' || cls.kind === 'connection_reset') recycleDispatcher(cls.kind);
         trace.push({ iter, attempt, status: null, ms: netErr.__ms || 0, kind: cls.kind });
         logAttempt({ ev: 'network_error', host: API_HOST, section, iter, attempt,
                      status: null, kind: cls.kind, ms: netErr.__ms || 0,
@@ -443,13 +465,17 @@ function createRouter(db) {
 
   // One research step. The UI drives the six sections itself and caches each.
   router.post('/api/research', async (req, res) => {
-    const { prompt, useSearch = true, model = DEFAULT_MODEL, section, companyId } = req.body || {};
+    const { prompt, useSearch = true, model = DEFAULT_MODEL, section, companyId, maxSearches } = req.body || {};
     if (!prompt || typeof prompt !== 'string') {
       return res.status(400).json({ ok: false, error: 'prompt is required' });
     }
     try {
       const r = await callClaude({
         model, prompt, useSearch,
+        // A per-call ceiling on server-side searches. Search results are the
+        // overwhelming majority of a section's input tokens, so this is the
+        // one dial that actually moves cost.
+        maxSearches,
         meta: { section, companyId, userId: userOf(req) },
       });
       res.json({

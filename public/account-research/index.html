@@ -1336,6 +1336,213 @@ function initTargetAutocomplete(){
   });
 }
 
+/* ── Section registry ─────────────────────────────────────────────────
+   generate() held the prompt builders in its own closure, so a report
+   loaded from the repository had no way to rebuild any single section: the
+   only path back to a prompt was to rerun the whole report. This table
+   makes each section addressable on its own, which is what "Regenerate
+   Section" needs. */
+const SECTION_META = {
+  s1: { key:'od',  label:'Company overview & profile · 公司概述',
+        prompt:(t,tu,se,su)=>P_overview(t,tu,se,su) },
+  s2: { key:'fd',  label:'Financial data · 财务数据',
+        prompt:(t,tu)=>P_financials(t,tu) },
+  s3: { key:'sd',  label:'Strategy & technology · 战略与技术',
+        prompt:(t,tu)=>P_strategy(t,tu) },
+  s4: { key:'nd',  label:'Recent news & press releases · 近期新闻',
+        prompt:(t,tu)=>P_news(t,tu) },
+  s5: { key:'cd',  label:'Competitive landscape & pain points · 竞争与痛点',
+        prompt:(t,tu,se)=>P_competitive(t,se,tu) },
+  s6: { key:'sal', label:'Stakeholders & next steps · 利益相关者',
+        prompt:(t,tu,se,su)=>P_sales(t,se,tu,su) },
+};
+const DATA_KEY_TO_SID = Object.fromEntries(Object.entries(SECTION_META).map(([sid,m])=>[m.key,sid]));
+
+/* The single place that decides what a section's state is.
+
+   The step icons used to be written only by runStep(), while the overall
+   counter read the report data. A report loaded from the repository
+   therefore showed six green ticks over a "5/6" counter: the icons were
+   stale and the counter was right. Both now derive from the same call. */
+function sectionState(D, dataKey){
+  const st = (D && D._sectionStatus) || {};
+  const recorded = st[dataKey];
+  const value = D ? D[dataKey] : undefined;
+  if (value === undefined || value === null) return 'err';        // nothing at all
+  if (!sectionLooksLikeFallback(value, recorded)) return 'done';   // valid content
+  return 'fallback';                                              // present but not real
+}
+
+/* Repaints every step row from the report itself. Safe to call after a
+   generation, after loading a saved report, or after repairing one
+   section. */
+function syncStepUIFromReport(D){
+  if(!D) return { missing: ['od','fd','sd','nd','cd','sal'] };
+  const missing = [];
+  Object.entries(SECTION_META).forEach(([sid, meta]) => {
+    const state = sectionState(D, meta.key);
+    if (state === 'done') {
+      setStepUI(sid, 'done');
+      document.getElementById('retry-'+sid)?.remove();
+    } else {
+      missing.push(meta.key);
+      setStepUI(sid, state === 'err' ? 'err' : 'fallback',
+        state === 'err' ? 'No content for this section 本节无内容'
+                        : 'Fallback content — not verified research 备用内容，非实际研究');
+      addRetryBtn(sid, () => regenerateSection(sid));
+      const b = document.getElementById('retry-'+sid);
+      if (b) b.textContent = '↺ Regenerate Section 重新生成本节';
+    }
+  });
+  return { missing };
+}
+
+/* Rebuild exactly one section, from anywhere — including a report that was
+   loaded rather than generated. Persists, so the repair survives a reload. */
+async function regenerateSection(sid){
+  const meta = SECTION_META[sid];
+  if(!meta || !_currentData){ return; }
+  const target = document.getElementById('inp-target').value.trim();
+  const turl   = document.getElementById('inp-target-url').value.trim();
+  const seller = document.getElementById('inp-seller').value.trim();
+  const surl   = document.getElementById('inp-seller-url').value.trim();
+  if(!target || !seller){ alert('Target and seller are required · 需要目标公司与销售方'); return; }
+
+  setStepUI(sid, 'run');
+  const btn = document.getElementById('retry-'+sid);
+  if(btn) btn.disabled = true;
+  try{
+    const resp = await callStep(meta.prompt(target, turl, seller, surl), true, sid);
+    const parsed = pJSON(resp.text);
+    _currentData[meta.key] = parsed;
+    _currentData._sectionStatus = Object.assign({}, _currentData._sectionStatus, { [meta.key]: 'success' });
+    _pptData = _currentData;
+    render(_currentData);
+    const { missing } = syncStepUIFromReport(_currentData);
+    try { saveResearchCache(sid, `${slugify(target)}__${slugify(seller)}`, parsed, resp.costUSD); } catch(e){}
+    const saved = await persistReport(true);
+    setProg(Math.max(5, Math.round(((6-missing.length)/6)*100)),
+      missing.length ? `Partially Complete · 部分完成 — ${6-missing.length}/6 sections with content`
+                     : 'Complete · 完成 ✅',
+      missing.length ? '#D97706' : '');
+    if(saved) showSaveNote(`✅ ${meta.label.split('·')[0].trim()} regenerated and saved as v${saved.version}`
+      + (missing.length ? ` (${6-missing.length}/6 with content)` : ' — report now complete 6/6')
+      + ` · 已重新生成并保存为第 ${saved.version} 版`);
+  }catch(e){
+    console.error('[regenerateSection]', sid, e.kind||'error', e.message);
+    setStepUI(sid, 'fallback', (e.kind ? (FAULT_LABEL[e.kind]||e.kind)+' — ' : '') + e.message);
+    addRetryBtn(sid, () => regenerateSection(sid));
+    const b2 = document.getElementById('retry-'+sid);
+    if (b2) b2.textContent = '↺ Regenerate Section 重新生成本节';
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
+/* ── Shared evidence ──────────────────────────────────────────────────
+   s1-s4 gather evidence; s5 analyses it and s6 turns it into actions.
+   Re-searching the same company for each of those is paying twice for
+   facts already on hand, and the two of them account for a third of the
+   run's search volume.
+
+   The digest carries the findings AND every source entry, because an
+   analysis that cannot cite is not traceable back to the research that
+   produced it. Sources are small — name, url, type — so passing all of
+   them costs little and is what keeps provenance intact. */
+const OPTIMIZED_PIPELINE = (() => {
+  try {
+    const q = new URLSearchParams(location.search);
+    if (q.has('opt')) return q.get('opt') !== '0';
+    return localStorage.getItem('ar_optimized') === '1';
+  } catch (e) { return false; }
+})();
+
+function collectSources(...sections){
+  const out = [], seen = new Set();
+  sections.forEach(sec => ((sec && sec.sources) || []).forEach(src => {
+    const key = (src.url || src.name || '').toLowerCase();
+    if (!key || seen.has(key)) return;
+    if (String(src.status).toLowerCase() === 'unavailable') return;   // don't cite a failed lookup
+    seen.add(key);
+    out.push({ name: src.name, url: src.url, type: src.type });
+  }));
+  return out;
+}
+
+function buildEvidenceDigest(od, fd, sd, nd){
+  const t = (x) => (typeof x === 'string' ? x : JSON.stringify(x || ''));
+  const lines = [];
+  if (od) {
+    lines.push('COMPANY: ' + t(od.companyName) + (od.ticker ? ' (' + t(od.ticker) + ')' : ''));
+    if (od.profile) lines.push('PROFILE: ' + t(od.profile).slice(0, 700));
+    if (od.segments) lines.push('SEGMENTS: ' + t(od.segments).slice(0, 500));
+    if (od.stats) lines.push('KEY STATS: ' + (od.stats||[]).map(x=>t(x.label)+'='+t(x.value||x.sub)).join('; ').slice(0,500));
+  }
+  if (fd) {
+    if (fd.kpis) lines.push('FINANCIAL KPIs: ' + (fd.kpis||[]).map(k=>t(k.label)+': '+t(k.value||k.sub)).join('; ').slice(0,700));
+    if (fd.trends) lines.push('TRENDS: ' + t(fd.trends).slice(0, 500));
+    if (fd.market) lines.push('MARKET: ' + t(fd.market).slice(0, 400));
+  }
+  if (sd) {
+    if (sd.priorities) lines.push('STRATEGIC PRIORITIES: ' + t(sd.priorities).slice(0, 700));
+    if (sd.techInvestments) lines.push('TECH INVESTMENTS: ' + t(sd.techInvestments).slice(0, 500));
+    if (sd.signals) lines.push('BUYING SIGNALS: ' + t(sd.signals).slice(0, 500));
+    if (sd.techNumbers) lines.push('TECH FIGURES: ' + t(sd.techNumbers).slice(0, 300));
+  }
+  if (nd && nd.news) {
+    lines.push('RECENT NEWS: ' + (nd.news||[]).slice(0,8)
+      .map(n=>t(n.date)+' — '+t(n.summary).slice(0,180)).join(' | ').slice(0,1400));
+  }
+  const srcs = collectSources(od, fd, sd, nd);
+  lines.push('SOURCES ALREADY CITED (reuse these; do not invent URLs):');
+  srcs.slice(0, 24).forEach((x,i)=>lines.push(`  [S${i+1}] ${t(x.name)} — ${t(x.url)} (${t(x.type)})`));
+  return { text: lines.join('\n'), sources: srcs };
+}
+
+function P_competitive_evidence(target, seller, turl, ev){
+  return `Analyze "${target}" (${turl||''}) from the "${seller}" account team perspective.
+
+Use ONLY the verified evidence below, already gathered for this account. Do NOT search the web.
+If something material cannot be determined from this evidence, say so in reliabilityNote and mark
+the item [AI-inferred] rather than guessing. Cite using the SOURCES list; never invent a URL.
+
+=== VERIFIED EVIDENCE ===
+${ev.text}
+=== END EVIDENCE ===
+
+Return ONLY valid JSON:
+{"competitors":[{"name":"competitor","strengths":"EN","strengthsZh":"中文","advantage":"where ${seller} wins EN","advantageZh":"中文","threat":"HIGH|MEDIUM|LOW","sourceNote":"which [S#] or [AI-inferred]"}],
+"differentiation":"2-3 sentences EN","differentiationZh":"中文",
+"pains":[{"title":"EN","titleZh":"中文","body":"2-3 sentences EN","bodyZh":"中文","urgency":"HIGH|MED-HIGH|MEDIUM","sourceNote":"which [S#] or [AI-inferred]","confidence":"high|medium|low"}],
+"sources":[{"name":"source","url":"URL from the list above or N/A","type":"primary|secondary|ai-inferred","status":"found|partial|unavailable","excerpt":"what it supports","excerptZh":"说明"}],
+"dataReliability":"high|medium|low","reliabilityNote":"note incl. any gap","reliabilityNoteZh":"说明"}
+4 competitors, 6 pain points. PURE JSON ONLY.`;}
+
+function P_sales_evidence(target, seller, turl, surl, ev){
+  return `Sales playbook for "${seller}" (${surl||''}) selling into "${target}" (${turl||''}).
+
+The company research below is already complete — do NOT re-research the company, its financials,
+strategy or news. Your ONLY permitted searches are to identify or verify CURRENT named
+decision-makers: executives, operations/manufacturing leaders, engineering/automation leaders,
+and procurement. Names change, so verify them; everything else comes from the evidence.
+
+Unverifiable names: use role + "[Name not publicly listed]" rather than guessing.
+Cite using the SOURCES list where the claim comes from existing evidence.
+
+=== VERIFIED EVIDENCE ===
+${ev.text}
+=== END EVIDENCE ===
+
+Return ONLY valid JSON:
+{"stakeholders":[{"name":"Name or Role [Name not publicly listed]","title":"EN","titleZh":"中文","priority":"Primary|Champion|Influencer|Awareness|Expansion","msg":"engagement note EN","msgZh":"中文","color":"#hex","sourceName":"source","sourceUrl":"URL or N/A","verified":true}],
+"valueProps":[{"title":"${seller} solution","titleZh":"方案","match":"need EN","matchZh":"需求","body":"2-3 sentences EN","bodyZh":"中文","segment":"biz segment"}],
+"phases":[{"phase":"PHASE 1","phaseZh":"第一阶段","period":"Month 1-2","periodZh":"第1-2个月","name":"phase name EN","nameZh":"阶段名","actions":["action EN"],"actionsZh":["行动中文"]}],
+"goal":"goal + revenue target EN","goalZh":"目标",
+"questions":"5-6 questions plain text EN","questionsZh":"5-6问题",
+"sources":[{"name":"source","url":"URL","type":"primary|secondary|ai-inferred","status":"found|partial|unavailable","excerpt":"what","excerptZh":"说明"}],
+"dataReliability":"high|medium|low","reliabilityNote":"note","reliabilityNoteZh":"说明"}
+PURE JSON ONLY.`;}
+
 /* ════ PROGRESS ════ */
 function initSteps(){
   const list=document.getElementById('stepList');if(!list)return;
@@ -1421,13 +1628,13 @@ function addRetryAllBtn(fn){
 }
 
 /* ════ BACKEND ════ */
-async function callStep(prompt,useSearch,section){
+async function callStep(prompt,useSearch,section,maxSearches){
   const base=getBase(),search=(document.getElementById('inp-search')||{}).value==='yes'&&useSearch,
         model=(document.getElementById('inp-model')||{}).value||'claude-sonnet-4-6';
   console.log(`[callStep] section=${section||'?'} model=${model} useSearch=${search} promptLen=${prompt.length}`);
   // `section` was never sent, so every usage event recorded a null
   // sub_feature and no failure could be attributed to the step that caused it.
-  const resp=await fetch(base+'/api/research',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,useSearch:search,model,section})});
+  const resp=await fetch(base+'/api/research',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,useSearch:search,model,section,maxSearches})});
   if(!resp.ok){
     const e=await resp.json().catch(()=>({}));
     const err=new Error(e.error||`Server error ${resp.status}`);
@@ -2498,13 +2705,26 @@ async function loadReportFromRepo(id){
     _currentData=D; _pptData=D;
     markReportSaved(D, data.version);
     render(D);
+    // Icons and counter from the same data, so a loaded report cannot show
+    // six ticks over a 5/6 count.
+    initSteps();
+    { const { missing } = syncStepUIFromReport(D);
+      setProg(Math.max(5, Math.round(((6-missing.length)/6)*100)),
+        missing.length ? `Loaded saved report · 已加载 — ${6-missing.length}/6 sections with content`
+                       : 'Loaded saved report · 已加载 — Complete 6/6',
+        missing.length ? '#D97706' : '#0369A1');
+      document.getElementById('progWrap').classList.add('show'); }
     document.getElementById('report').classList.add('show');
     closeRepoModal();
     document.getElementById('report').scrollIntoView({behavior:'smooth',block:'start'});
     updatePptButton();
 
     document.getElementById('progWrap').classList.add('show');
-    setProg(100, `Loaded from repository · 已从报告库加载 (v${D.version||1})`, '#0369A1');
+    { const { missing } = syncStepUIFromReport(D);
+      setProg(Math.max(5, Math.round(((6-missing.length)/6)*100)),
+        missing.length ? `Loaded v${D.version||1} · 已加载 — ${6-missing.length}/6 sections with content`
+                       : `Loaded v${D.version||1} · 已加载 — Complete 6/6`,
+        missing.length ? '#D97706' : '#0369A1'); }
     showBanner(
       `<div style="font-weight:700;margin-bottom:6px">✅ Report loaded from repository. · 报告已从报告库加载。</div>`
       + `<div style="font-size:12px">Showing the saved report for <strong>${esc(D.target)}</strong> / <strong>${esc(D.seller)}</strong> `
@@ -2741,6 +2961,8 @@ async function tryLoadExistingReport(target, seller) {
     _currentData = D; _pptData = D;
     markReportSaved(D, match.version);
     render(D);
+    initSteps();
+    syncStepUIFromReport(D);
     document.getElementById('report').classList.add('show');
     document.getElementById('report').scrollIntoView({ behavior:'smooth', block:'start' });
     updatePptButton();
@@ -2822,7 +3044,9 @@ async function generate(forceRefresh = false) {
     _usageTotals.bySection[id] = sec;
   }
 
-  async function runStep(id, label, promptFn, onSuccess, prog) {
+  async function runStep(id, label, promptFn, onSuccess, prog, opts) {
+    const _useSearch = !opts || opts.useSearch !== false;
+    const _maxSearches = opts && opts.maxSearches;
     setStepUI(id, 'run');
     setProg(prog, label);
     console.log(`[generate] ${id}: ${label}`);
@@ -2843,7 +3067,7 @@ async function generate(forceRefresh = false) {
     }
 
     try {
-      const resp   = await callStep(promptFn(), true, id);
+      const resp   = await callStep(promptFn(), _useSearch, id, _maxSearches);
       recordUsage(id, label, resp);
       const parsed = pJSON(resp.text);
       onSuccess(parsed);
@@ -2859,7 +3083,7 @@ async function generate(forceRefresh = false) {
       addRetryBtn(id, async () => {
         setStepUI(id, 'run');
         try {
-          const resp2   = await callStep(promptFn(), true, id);
+          const resp2   = await callStep(promptFn(), _useSearch, id, _maxSearches);
           recordUsage(id, label, resp2);
           const parsed2 = pJSON(resp2.text);
           onSuccess(parsed2);
@@ -2897,8 +3121,18 @@ async function generate(forceRefresh = false) {
     await runStep('s2','Financials · 财务数据',             ()=>P_financials(target,turl),           p=>{fd=p;},  20);  setProg(35);
     await runStep('s3','Strategy & technology · 战略与技术',()=>P_strategy(target,turl),             p=>{sd=p;},  37);  setProg(52);
     await runStep('s4','Recent news · 近期新闻',            ()=>P_news(target,turl),                 p=>{nd=p;},  54);  setProg(66);
-    await runStep('s5','Competitive & pain points · 竞争',  ()=>P_competitive(target,seller,turl),   p=>{cd=p;},  68);  setProg(82);
-    await runStep('s6','Stakeholders · 利益相关者',         ()=>P_sales(target,seller,turl,surl),    p=>{sal=p;}, 84);  setProg(95);
+    /* s1-s4 have finished; everything they found is now available to the
+       last two steps. In the optimized pipeline s5 stops searching entirely
+       and s6 keeps a small budget for stakeholder names only. */
+    const _ev = OPTIMIZED_PIPELINE ? buildEvidenceDigest(od, fd, sd, nd) : null;
+    if (_ev) console.log(`[generate] evidence digest: ${_ev.text.length} chars, ${_ev.sources.length} sources`);
+
+    await runStep('s5','Competitive & pain points · 竞争',
+      ()=> _ev ? P_competitive_evidence(target,seller,turl,_ev) : P_competitive(target,seller,turl),
+      p=>{cd=p;},  68, { useSearch: !_ev });                       setProg(82);
+    await runStep('s6','Stakeholders · 利益相关者',
+      ()=> _ev ? P_sales_evidence(target,seller,turl,surl,_ev) : P_sales(target,seller,turl,surl),
+      p=>{sal=p;}, 84, { maxSearches: _ev ? 2 : undefined });      setProg(95);
   } catch(fatal) {
     console.error('[generate] fatal:', fatal);
   }
@@ -2949,6 +3183,9 @@ async function generate(forceRefresh = false) {
   }
   // The bar tracks real content, so an empty report cannot show a full bar.
   setProg(Math.max(5, Math.round((rendered / total) * 100)), statusText, statusColor);
+  // Repaint icons from the finished report: a section whose call succeeded
+  // but whose content is fallback must not keep a green tick.
+  syncStepUIFromReport(D);
 
   // Persist before anything else can navigate away from it.
   autoSaveAfterGenerate(successCount, total);
