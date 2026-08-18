@@ -11,7 +11,22 @@ const DB_NEEDS_SSL = process.env.NODE_ENV === 'production'
   || /\.neon\.tech/i.test(DB_URL);
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: DB_NEEDS_SSL ? { rejectUnauthorized: false } : false
+  ssl: DB_NEEDS_SSL ? { rejectUnauthorized: false } : false,
+  /* node-postgres defaults to 0 — wait for a connection forever. Against a
+     managed database that can be unreachable or asleep, that turns every
+     query into a promise that neither resolves nor rejects: the route never
+     responds and the browser request stays pending. 10s is generous for a
+     Neon endpoint waking from idle and still fails inside the dashboard's
+     own 15s deadline. */
+  connectionTimeoutMillis: 10000,
+});
+
+/* An idle client that dies (network drop, Neon scaling the endpoint down)
+   emits 'error' on the pool. With no listener that is an unhandled 'error'
+   event, which takes the whole process down — and a server that exits
+   mid-request leaves the browser waiting on a socket nobody will answer. */
+pool.on('error', (err) => {
+  console.error('[db] idle client error:', err.message);
 });
 
 async function q(text, params = []) {

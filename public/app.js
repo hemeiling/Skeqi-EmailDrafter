@@ -43,6 +43,18 @@ function showView(name) {
   if (name === "booth-map") ensureFrameLoaded("bm-frame", "/booth-map/");
   if (name === "account-research") ensureFrameLoaded("ar-frame", "/account-research/");
   if (name === "home") loadDashboard();
+  /* Fetching belongs to the view, not to one button that opens it. The
+     dashboard was loaded only by the sidebar nav item's own click handler,
+     so the three other ways in — the top-bar usage pill, the sidebar token
+     meter's "查看详情", the home panel's "查看全部" — showed the view's
+     initial markup and never sent a request: a spinner with nothing behind
+     it, no network entry and no console error to explain it.
+
+     Deferred one microtask for the reason documented at the init block:
+     showView() runs during that block, while `_aiuFeatureFilter` and the
+     other module-level `let`s loadAiUsage() reads are still in the temporal
+     dead zone several thousand lines below. */
+  if (name === "ai-usage") queueMicrotask(loadAiUsage);
   if (name === "crm") initCrmCategoryFilter();
   try { localStorage.setItem("app_active_view", name); } catch (e) { /* ignore (private browsing, etc.) */ }
 }
@@ -97,6 +109,8 @@ function initAppShell() {
   document.getElementById("app-menu-btn").addEventListener("click", toggleCollapsed);
 
   // Both the top-bar pill and the sidebar meter open the usage dashboard.
+  // The meter is visible on every screen, so it loads on every screen.
+  loadTokenMeter();
   document.getElementById("app-usage-pill").addEventListener("click", () => showView("ai-usage"));
   document.getElementById("app-token-link").addEventListener("click", () => showView("ai-usage"));
   document.getElementById("app-help-btn").addEventListener("click", () => showView("settings"));
@@ -165,6 +179,32 @@ function renderRows(containerId, rows, emptyMsg) {
     el.addEventListener("click", () => showView(el.dataset.goto)));
 }
 
+/* The sidebar token meter renders on every screen, but its only loader used
+   to be loadDashboard() — which showView() runs for the "home" view alone.
+   Open the app on any other view and the meter sat on its markup default of "读取中…"
+   forever, having never been asked to load anything. Global chrome needs a
+   load of its own, independent of which view happens to be open. */
+/* The meter and the home dashboard both want this month's usage, and both
+   start at page load, so fetching it twice was two identical round trips for
+   one number. One shared in-flight promise instead: whoever asks first
+   issues the request, the second gets the same answer. */
+let _monthUsagePromise = null;
+function monthUsage(force) {
+  if (force) _monthUsagePromise = null;
+  if (!_monthUsagePromise) {
+    _monthUsagePromise = fetchWithTimeout("/api/ai-usage?period=month")
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+  }
+  return _monthUsagePromise;
+}
+
+async function loadTokenMeter(force) {
+  // renderTokenMeter(null) prints "读取失败", which is honest. Anything is
+  // better than a spinner that never resolves.
+  renderTokenMeter(await monthUsage(force));
+}
+
 let _dashLoaded = false;
 async function loadDashboard(force) {
   if (_dashLoaded && !force) return;
@@ -176,7 +216,7 @@ async function loadDashboard(force) {
     getJSON("/api/companies").catch(() => null),
     getJSON("/api/contacts").catch(() => null),
     getJSON("/account-research/api/reports").catch(() => null),
-    getJSON("/api/ai-usage?period=month").catch(() => null),
+    monthUsage(),
   ]);
 
   const cList = (companies && companies.companies) || [];
@@ -2571,7 +2611,7 @@ document.getElementById("usage-reset-btn").addEventListener("click", async () =>
   await fetch("/api/usage/reset", { method: "POST" });
   refreshUsage();
 });
-document.getElementById("usage-details-btn").addEventListener("click", () => { showView("ai-usage"); loadAiUsage(); });
+document.getElementById("usage-details-btn").addEventListener("click", () => showView("ai-usage"));
 document.getElementById("ai-usage-close").addEventListener("click", () => closeModal("ai-usage-modal"));
 document.getElementById("draft-preview-close").addEventListener("click", () => closeModal("draft-preview-modal"));
 document.getElementById("ai-usage-modal").addEventListener("click", (e) => {
@@ -7609,8 +7649,10 @@ const AIU_FEATURE_LABELS = {
 };
 
 function initAiUsageDashboard() {
-  const nav = document.querySelector('.app-nav-item[data-nav-view="ai-usage"]');
-  if (nav) nav.addEventListener("click", () => loadAiUsage());
+  // No nav-item listener and no "was this the saved view?" check here: both
+  // are showView()'s job now, so every route into the view loads exactly once.
+  const idle = document.getElementById("aiu-load");
+  if (idle) idle.addEventListener("click", () => loadAiUsage());
   const period = document.getElementById("aiu-period");
   if (period) period.addEventListener("change", () => {
     const custom = period.value === "custom";
@@ -7625,11 +7667,9 @@ function initAiUsageDashboard() {
   document.querySelectorAll("#usage-bar .u-label").forEach((el) => {
     if (el.textContent === "AI" || el.textContent === "Claude") {
       el.style.cursor = "pointer"; el.title = "Open AI Usage dashboard";
-      el.addEventListener("click", () => { showView("ai-usage"); loadAiUsage(); });
+      el.addEventListener("click", () => showView("ai-usage"));
     }
   });
-  let active = "search"; try { active = localStorage.getItem("app_active_view") || "home"; } catch (e) { /* ignore */ }
-  if (active === "ai-usage") loadAiUsage();
 }
 
 function aiuQuery() {
@@ -7881,7 +7921,13 @@ async function loadAiUsageEvents() {
     const prev = document.getElementById("aiu-prev"), next = document.getElementById("aiu-next");
     if (prev) prev.addEventListener("click", () => { if (_aiuEventsPage > 0) { _aiuEventsPage--; loadAiUsageEvents(); } });
     if (next) next.addEventListener("click", () => { _aiuEventsPage++; loadAiUsageEvents(); });
-  } catch (e) { box.innerHTML = `<div class="msg-error">${escapeHtml(e.message)}</div>`; }
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return fail("Timed out waiting for the request log — the server did not respond.",
+                  "等待请求日志超时，服务器未响应。");
+    }
+    fail(e.message || "Network error.", "网络错误。");
+  }
 }
 
 async function saveAiBudgetDashboard() {

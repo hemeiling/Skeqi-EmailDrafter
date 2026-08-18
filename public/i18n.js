@@ -444,6 +444,8 @@ const I18N_PAIRS = [
   ["Yes", "是"],
   ["No", "否"],
   ["Loading…", "加载中…"],
+  ["Usage data not loaded yet.", "用量数据尚未加载。"],
+  ["Load usage data", "加载用量数据"],
   ["Nothing yet", "暂无数据"],
   ["none yet", "暂无"],
   ["Add", "添加"],

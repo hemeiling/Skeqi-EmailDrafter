@@ -3489,6 +3489,22 @@ app.post('/api/usage/reset', (req, res) => {
   res.json({ ok: true });
 });
 
+/* The dashboard's two read endpoints each fan out to a handful of aggregate
+   queries. A query that is merely slow is a slow page; one that is blocked —
+   waiting on a lock, or on a connection that never opens — is a response that
+   never gets sent, and the browser cannot tell that apart from a server still
+   thinking. Bounding the wait turns the second case into a 503 the UI can
+   render. Kept under the browser's own 20s deadline so this more specific
+   error is the one that wins. */
+const AIU_QUERY_DEADLINE_MS = 15000;
+function withDeadline(promise, ms = AIU_QUERY_DEADLINE_MS) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error('Database did not respond in time'), { timedOut: true })), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
 // Full AI Usage dashboard payload: KPIs + time series + breakdowns (feature /
 // model / company / user) + budget status, for a date range.
 //   ?period=today|yesterday|7d|30d|month|prev_month|year|all|custom [&from=&to=][&bucket=day|week|month]
@@ -3497,7 +3513,7 @@ app.get('/api/ai-usage', async (req, res) => {
     const period = req.query.period || 'all';
     const filter = buildPeriodFilter(period, req.query.from, req.query.to);
     const bucket = req.query.bucket || ((period === 'year' || period === 'all') ? 'month' : 'day');
-    const [kpis, timeseries, byFeature, byModel, byCompany, byUser, budget, todayK, monthK] = await Promise.all([
+    const [kpis, timeseries, byFeature, byModel, byCompany, byUser, budget, todayK, monthK] = await withDeadline(Promise.all([
       aiUsageKpis(filter),
       aiUsageTimeseries(filter, bucket),
       aiUsageFeatureBreakdown(filter),
@@ -3507,7 +3523,7 @@ app.get('/api/ai-usage', async (req, res) => {
       getAiBudget(),
       aiUsageKpis(buildPeriodFilter('today')),
       aiUsageKpis(buildPeriodFilter('month')),
-    ]);
+    ]));
     const warn = budget.warn_threshold_pct || 80;
     const pct = (used, cap) => (cap ? Math.round((used / cap) * 100) : 0);
     res.json({
@@ -3527,7 +3543,12 @@ app.get('/api/ai-usage', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to load AI usage', details: err.message });
+    // Logged, not just returned: when this page was stuck there was nothing in
+    // the server log to correlate it against, which is half of why it was hard
+    // to place. Every failure to answer should leave a trace here.
+    console.error('[ai-usage] summary failed:', err.message);
+    res.status(err.timedOut ? 503 : 500)
+      .json({ ok: false, error: err.timedOut ? 'Usage database did not respond in time.' : 'Failed to load AI usage', details: err.message });
   }
 });
 
@@ -3536,15 +3557,17 @@ app.get('/api/ai-usage/events', async (req, res) => {
   try {
     // alias 'e' — aiUsageEvents joins companies, which also has created_at.
     const filter = buildPeriodFilter(req.query.period || 'all', req.query.from, req.query.to, 'e');
-    const out = await aiUsageEvents(filter, {
+    const out = await withDeadline(aiUsageEvents(filter, {
       feature: req.query.feature || null,
       status: req.query.status || null,
       limit: parseInt(req.query.limit, 10) || 50,
       offset: parseInt(req.query.offset, 10) || 0,
-    });
+    }));
     res.json({ ok: true, ...out });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to load usage events', details: err.message });
+    console.error('[ai-usage] events failed:', err.message);
+    res.status(err.timedOut ? 503 : 500)
+      .json({ ok: false, error: err.timedOut ? 'Usage database did not respond in time.' : 'Failed to load usage events', details: err.message });
   }
 });
 

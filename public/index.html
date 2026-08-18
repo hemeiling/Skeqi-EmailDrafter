@@ -2720,7 +2720,14 @@
         <a class="btn-sm btn-ghost" id="aiu-export" href="#">Export CSV</a>
       </span>
     </div>
-    <div id="aiu-body"><div style="text-align:center;padding:32px 0;"><span class="spinner"></span> Loading…</div></div>
+    <!-- Idle, not a spinner. This is the markup shown before anything has been
+         fetched, so it must not claim a request is in flight: if the loader
+         ever fails to run, the panel says so and offers a way to start it,
+         rather than spinning forever on a request that was never sent. -->
+    <div id="aiu-body"><div style="text-align:center;padding:28px 0;color:#9ca3af;font-size:0.85rem;">
+      Usage data not loaded yet.<br>
+      <button class="btn-sm btn-primary" id="aiu-load" style="margin-top:10px;">Load usage data</button>
+    </div></div>
   </div>
 
   <!-- ── Bulk delete confirmation modal ── -->
