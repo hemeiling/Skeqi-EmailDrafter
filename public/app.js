@@ -1276,7 +1276,10 @@ const DRAFT_OPTS_KEY = "draft_options_v1";
 let _draftOptionsCatalog = null;
 
 function defaultDraftOptions() {
-  return { length: "medium", customWords: 150, tone: "professional", language: "english", cta: "auto" };
+  // modelId null = "whatever the server says is default" (Qwen 3.6 Flash).
+  // Storing null rather than the id keeps the default following the server
+  // if it ever changes, instead of pinning whatever it was on first visit.
+  return { length: "medium", customWords: 150, tone: "professional", language: "english", cta: "auto", modelId: null };
 }
 
 // Last-used options persist: a team with a house style sets them once.
@@ -1295,7 +1298,7 @@ async function loadDraftOptionsCatalog() {
   try {
     _draftOptionsCatalog = await getJSON("/api/draft-options");
   } catch (e) {
-    _draftOptionsCatalog = { lengths: [], tones: [], languages: [], ctas: [] };
+    _draftOptionsCatalog = { lengths: [], tones: [], languages: [], ctas: [], models: [], defaultModel: null };
   }
   return _draftOptionsCatalog;
 }
@@ -1314,6 +1317,11 @@ async function renderDraftOptions(container, scope, onChange) {
   if (!container) return;
   const cat = await loadDraftOptionsCatalog();
   const o = getSavedDraftOptions();
+  /* A saved choice can outlive its provider — a key gets removed and the
+     stored id no longer appears in the catalogue. Fall back to the server's
+     default rather than rendering a selector with nothing selected. */
+  const modelId = (cat.models || []).some((m) => m.value === o.modelId)
+    ? o.modelId : (cat.defaultModel || (cat.models && cat.models[0] && cat.models[0].value) || null);
 
   const seg = (name, list, current) => list.map((x) =>
     `<button type="button" class="do-seg${x.value === current ? " active" : ""}"
@@ -1330,6 +1338,12 @@ async function renderDraftOptions(container, scope, onChange) {
              ${o.length === "custom" ? "" : "hidden"}>
       <span class="do-hint" id="${scope}-do-hint"></span>
     </div>
+    ${(cat.models || []).length > 1 ? `<div class="do-row">
+      <label class="do-label">AI model</label>
+      <select class="do-select" id="${scope}-do-model" aria-label="AI model">
+        ${cat.models.map((m) => `<option value="${escapeAttr(m.value)}" ${m.value === modelId ? "selected" : ""}>${escapeHtml(m.label)}</option>`).join("")}
+      </select>
+    </div>` : ""}
     <details class="do-more" id="${scope}-do-more">
       <summary><span class="do-more-label">Tone, language &amp; call to action</span>
         <span class="do-summary" id="${scope}-do-summary"></span></summary>
@@ -1345,7 +1359,7 @@ async function renderDraftOptions(container, scope, onChange) {
       </div>
     </details>`;
 
-  const state = { ...o };
+  const state = { ...o, modelId };
   const paint = () => {
     container.querySelectorAll("[data-do-field]").forEach((b) => {
       b.classList.toggle("active", state[b.dataset.doField] === b.dataset.doValue);
@@ -1380,6 +1394,9 @@ async function renderDraftOptions(container, scope, onChange) {
   container.querySelector(`#${scope}-do-cta`)?.addEventListener("change", (e) => {
     state.cta = e.target.value; paint();
   });
+  container.querySelector(`#${scope}-do-model`)?.addEventListener("change", (e) => {
+    state.modelId = e.target.value; paint();
+  });
 
   paint();
   return state;
@@ -1389,7 +1406,10 @@ async function renderDraftOptions(container, scope, onChange) {
 // correct even if the control was never rendered in this session.
 function currentDraftOptions() {
   const o = getSavedDraftOptions();
-  return { length: o.length, customWords: o.customWords, tone: o.tone, language: o.language, cta: o.cta };
+  return { length: o.length, customWords: o.customWords, tone: o.tone, language: o.language, cta: o.cta,
+    // Omitted when unset, so the server applies its own default rather than
+    // the browser asserting one.
+    modelId: o.modelId || undefined };
 }
 
 const DRAFT_STATUS_LABELS = { draft: "Draft", ready_for_review: "Ready for Review", approved: "Approved", archived: "Archived", trash: "Trash" };

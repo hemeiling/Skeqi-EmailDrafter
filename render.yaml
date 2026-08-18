@@ -16,6 +16,18 @@ services:
         sync: false
       - key: CLAUDE_API_KEY        # Anthropic API key (sk-ant-…)
         sync: false
+      # Email drafting. Bailian/Qwen is the default writer; GPT and Claude are
+      # selectable alternatives. All values are set in the dashboard, never here.
+      # Without these three, Qwen is simply not offered and drafting falls back
+      # to whichever provider IS configured.
+      - key: BAILIAN_API_KEY       # Bailian (Qwen) API key
+        sync: false
+      - key: BAILIAN_BASE_URL      # OpenAI-compatible base, e.g. …/compatible-mode/v1
+        sync: false
+      - key: BAILIAN_EMAIL_MODEL   # qwen3.6-flash
+        sync: false
+      - key: OPENAI_API_KEY        # OpenAI key — offers GPT as a premium option
+        sync: false
       - key: APOLLO_API_KEY        # Apollo.io API key
         sync: false
       # Credential the inbound-reply connector presents. Its only power is to

@@ -1,12 +1,21 @@
-// Drafts a personalized outreach email with Claude, given a contact and
-// (optionally) the sender's own identity. Ported from EmailDrafter's
-// call_claude(), simplified (no CSV-upload company context).
+/* Drafts a personalized outreach email, given a contact and (optionally) the
+   sender's own identity. Ported from EmailDrafter's call_claude(), simplified
+   (no CSV-upload company context).
 
-const CLAUDE_MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
-const CLAUDE_MODEL = 'claude-sonnet-4-6';
+   This file owns the PROMPTS and the PARSING. It no longer owns the vendor:
+   which model writes the email is emailModel.js's decision — Qwen 3.6 Flash
+   by default, or whichever the user picked, falling back through the other
+   configured providers — so the prompt work below is identical whoever
+   serves it. Research keeps its own Claude calls elsewhere and does not come
+   through here. */
+
 const { recordClaudeUsage } = require('./usage');
+const { runEmailModel } = require('./emailModel');
 
-const { isClaudeConfigured, CLAUDE_API_KEY } = require('./config');
+const { isClaudeConfigured, isEmailModelConfigured, CLAUDE_EMAIL_FALLBACK_MODEL } = require('./config');
+// Kept as a named export: server.js reports it, and the Prompt Inspector
+// shows which model a draft would use.
+const CLAUDE_MODEL = CLAUDE_EMAIL_FALLBACK_MODEL;
 
 function isConfigured() {
   return isClaudeConfigured();
@@ -358,16 +367,27 @@ function normalizeDraftOptions(raw = {}) {
     tone: DRAFT_TONES[o.tone] ? o.tone : 'professional',
     language: DRAFT_LANGUAGES[o.language] ? o.language : 'english',
     cta: DRAFT_CTAS[o.cta] ? o.cta : 'auto',
+    // Which model writes it. Validated in emailModel.resolveEmailModelId, so
+    // an unknown or no-longer-configured id degrades to the default.
+    modelId: typeof o.modelId === 'string' ? o.modelId : null,
   };
 }
 
 // A stable string identifying one set of options, so a saved draft is only
 // reused when it was generated under the same ones. Defaults produce the
 // empty string, which keeps every pre-existing draft reusable as before.
+/* The model is part of the signature. Two models given the same brief write
+   genuinely different emails, so a draft produced by one must not be served
+   as a cache hit when the user has since switched to another — switching the
+   selector should produce a new draft, not silently replay the old one. The
+   default model contributes nothing, so every draft written before the
+   selector existed stays reusable exactly as before. */
 function draftOptionsSignature(raw) {
   const o = normalizeDraftOptions(raw);
-  if (o.length === 'medium' && o.tone === 'professional' && o.language === 'english' && o.cta === 'auto') return '';
-  return [o.length, o.length === 'custom' ? o.customWords : '', o.tone, o.language, o.cta].join('|');
+  const { DEFAULT_EMAIL_MODEL_ID } = require('./config');
+  const modelPart = o.modelId && o.modelId !== DEFAULT_EMAIL_MODEL_ID ? o.modelId : '';
+  if (o.length === 'medium' && o.tone === 'professional' && o.language === 'english' && o.cta === 'auto' && !modelPart) return '';
+  return [o.length, o.length === 'custom' ? o.customWords : '', o.tone, o.language, o.cta, modelPart].join('|');
 }
 
 function draftOptionsBlock(raw) {
@@ -539,8 +559,10 @@ function offlineStub(contact, sender, mode, context = {}) {
 // mode:    optional -- one of DRAFT_MODES; omitted or 'cold_outreach' = original behavior, unchanged
 // context: optional -- { eventName, companyNotes, extraInstructions }
 async function draftEmail(contact, sender, mode, context) {
-  const apiKey = CLAUDE_API_KEY;
-  if (!apiKey) {
+  // "Is drafting available at all", not "is Claude available" — an OpenAI-only
+  // deployment must not fall through to the offline template stub. The
+  // response field keeps its name because the browser reads it.
+  if (!isEmailModelConfigured()) {
     return { ...offlineStub(contact, sender, mode, context), claude_configured: false };
   }
 
@@ -554,41 +576,24 @@ async function draftEmail(contact, sender, mode, context) {
     ? context.promptOverride
     : buildPromptForMode(mode, contact, sender, context);
 
-  try {
-    const res = await fetch(CLAUDE_MESSAGES_URL, {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: CLAUDE_MODEL,
-        max_tokens: 1024,
-        messages: [{ role: 'user', content: prompt }]
-      })
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      return {
-        subject: '', body: `Claude API error ${res.status}: ${text.slice(0, 300)}`,
-        followup: '', rationale: '', claude_configured: true
-      };
-    }
-
-    const data = await res.json();
-    const rawText = (data.content && data.content[0] && data.content[0].text) || '';
-    const apiUsage = data.usage || {};
-    const draft = parseDraftResponse(rawText);
-    // Usage is recorded by the server route (which has feature/company/contact context).
-    return { ...draft, claude_configured: true, _usage: { ...apiUsage, model: CLAUDE_MODEL } };
-  } catch (err) {
+  /* Provider choice lives in emailModel.js, so the prompt assembled above and
+     the parsing below are identical whoever serves it. The prompt already
+     specifies JSON output, so `json: true` only enforces what it asks for. */
+  // The user's choice reaches the shared abstraction as a preference; the
+  // chain, fallback and accounting all stay in emailModel.js.
+  const r = await runEmailModel(prompt, { json: true, modelId: (context && context.options && context.options.modelId) || null });
+  if (!r.ok) {
     return {
-      subject: '', body: `Network error calling Claude: ${err.message}`,
-      followup: '', rationale: '', claude_configured: true
+      subject: '', body: r.error, followup: '', rationale: '', claude_configured: true,
     };
   }
+
+  const draft = parseDraftResponse(r.text);
+  // Usage is recorded by the server route (which has feature/company/contact
+  // context). It carries the provider that actually ran, so cost is priced
+  // against the right table even when the request fell back.
+  return { ...draft, claude_configured: true,
+    _usage: { ...r.usage, requested_provider: r.requested_provider, fell_back: r.fell_back } };
 }
 
 const EMAIL_CATEGORIES = [
@@ -611,12 +616,11 @@ function classifyByKeywords(subject, body) {
 }
 
 async function categorizeEmail(subject, body, fromName, fromEmail) {
-  const apiKey = CLAUDE_API_KEY;
   const bodyExcerpt = (body || '').slice(0, 600);
 
-  if (!apiKey) {
+  if (!isEmailModelConfigured()) {
     const category = classifyByKeywords(subject, body);
-    return { category, rationale: 'Classified by keyword matching (Claude not configured).', claude_configured: false };
+    return { category, rationale: 'Classified by keyword matching (no email model configured).', claude_configured: false };
   }
 
   const prompt =
@@ -629,30 +633,24 @@ async function categorizeEmail(subject, body, fromName, fromEmail) {
     `Return ONLY a raw JSON object: { "category": "...", "rationale": "one sentence" }\n` +
     `No markdown. No code fences. Just the JSON.`;
 
-  try {
-    const res = await fetch(CLAUDE_MESSAGES_URL, {
-      method: 'POST',
-      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 200, messages: [{ role: 'user', content: prompt }] })
-    });
-    if (!res.ok) {
-      const category = classifyByKeywords(subject, body);
-      return { category, rationale: 'Keyword fallback (Claude API error).', claude_configured: true };
-    }
-    const data = await res.json();
-    recordClaudeUsage(data.usage || {}, { feature: 'email_classify', model: CLAUDE_MODEL });
-    const raw = (data.content && data.content[0] && data.content[0].text) || '';
-    try {
-      const parsed = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || raw);
-      const category = EMAIL_CATEGORIES.includes(parsed.category) ? parsed.category : 'other';
-      return { category, rationale: parsed.rationale || '', claude_configured: true };
-    } catch {
-      const category = classifyByKeywords(subject, body);
-      return { category, rationale: 'Keyword fallback (parse error).', claude_configured: true };
-    }
-  } catch (err) {
+  /* 1000 rather than the old 200: on a reasoning model the cap covers thinking
+     tokens too, and a cap that small can be spent entirely on reasoning and
+     return nothing. A cap is not a reservation — unused budget costs nothing,
+     and the keyword fallback below still catches an empty reply. */
+  const r = await runEmailModel(prompt, { maxTokens: 1000, json: true });
+  if (!r.ok) {
     const category = classifyByKeywords(subject, body);
-    return { category, rationale: `Keyword fallback (network error: ${err.message}).`, claude_configured: true };
+    return { category, rationale: 'Keyword fallback (email model error).', claude_configured: true };
+  }
+
+  recordClaudeUsage(r.usage, { feature: 'email_classify', model: r.usage.model, provider: r.usage.provider });
+  try {
+    const parsed = JSON.parse((r.text || '').match(/\{[\s\S]*\}/)?.[0] || r.text);
+    const category = EMAIL_CATEGORIES.includes(parsed.category) ? parsed.category : 'other';
+    return { category, rationale: parsed.rationale || '', claude_configured: true };
+  } catch {
+    const category = classifyByKeywords(subject, body);
+    return { category, rationale: 'Keyword fallback (parse error).', claude_configured: true };
   }
 }
 

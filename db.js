@@ -663,6 +663,12 @@ async function initDb() {
     `cache_write_tokens INTEGER DEFAULT 0`, `reasoning_tokens INTEGER DEFAULT 0`,
     `total_tokens INTEGER DEFAULT 0`, `response_ms INTEGER`, `status TEXT DEFAULT 'success'`,
     `error_message TEXT`, `request_type TEXT`, `request_id TEXT`, `currency TEXT DEFAULT 'USD'`,
+    /* The provider the user asked for, as opposed to `provider`, which is
+       the one that answered. Fallback frequency is not derivable from the
+       served provider alone — without this, a draft that quietly fell from
+       Qwen to Claude is indistinguishable from one that chose Claude.
+       Nullable: research and older events simply leave it empty. */
+    `requested_provider TEXT`,
   ]) {
     await pool.query(`ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS ${col}`);
   }
@@ -3130,22 +3136,60 @@ async function updateEmailHistory(id, fields) {
 // AI usage log — persistence, aggregation, savings estimate, budgets
 // ===========================================================================
 
-// Current Claude pricing (USD per 1M tokens). Seeded once; edit in the DB to
-// change prices going forward — historical event costs are preserved.
+/* Current model pricing (USD per 1M tokens). Seeded once; edit in the DB to
+   change prices going forward — historical event costs are preserved.
+
+   Rows are keyed (provider, model) and looked up that way, so the two vendors
+   can never be priced with each other's card — they differ by up to 15×.
+   OpenAI bills no separate cache-WRITE fee, so cw is 0 there rather than a
+   guess. Luna's numbers are from developers.openai.com (Aug 2026); note that
+   several third-party aggregators list it at half these rates, so if the bill
+   disagrees, this table is the one line to correct. */
 const AI_PRICING_SEED = [
   { provider: 'anthropic', model: 'claude-sonnet-4-6', in: 3.00, out: 15.00, cr: 0.30, cw: 3.75 },
   { provider: 'anthropic', model: 'claude-opus-4-8', in: 5.00, out: 25.00, cr: 0.50, cw: 6.25 },
   { provider: 'anthropic', model: 'claude-sonnet-5', in: 3.00, out: 15.00, cr: 0.30, cw: 3.75 },
   { provider: 'anthropic', model: 'claude-haiku-4-5', in: 1.00, out: 5.00, cr: 0.10, cw: 1.25 },
+  { provider: 'openai', model: 'gpt-5.6-luna', in: 0.20, out: 1.20, cr: 0.02, cw: 0 },
+  { provider: 'openai', model: 'gpt-5.6-terra', in: 1.25, out: 10.00, cr: 0.125, cw: 0 },
+  { provider: 'openai', model: 'gpt-5.6-sol', in: 1.75, out: 14.00, cr: 0.175, cw: 0 },
+  // Provisional — see the note in usage.js. Correct here, not in code.
+  { provider: 'bailian', model: 'qwen3.6-flash', in: 0.19, out: 1.13, cr: 0.019, cw: 0 },
 ];
+/* Seeding was check-then-insert, which is not atomic: two processes running
+   initDb() at once (a server booting while the test suite runs, say) could
+   both miss the row and both insert it. That produced genuine duplicate
+   active prices, and a duplicate price is a costing bug waiting to happen —
+   whichever row is read last silently wins.
+
+   Fixed by making the database enforce it instead: one active price per
+   (provider, model), so the second writer conflicts and does nothing. The
+   duplicates already created are collapsed to the earliest row first, since
+   the index cannot be built while they exist. */
 async function seedAiModelPricing() {
+  /* Duplicates are RETIRED, not deleted. Closing them with an effective_end
+     satisfies the partial unique index below (which only constrains rows
+     where effective_end IS NULL) while leaving every row in place, so no
+     historical price and no audit trail is destroyed. A DELETE here would
+     have been simpler and irreversible; this is neither. */
+  await q(`
+    UPDATE ai_model_pricing a
+       SET effective_end = CURRENT_DATE
+      FROM ai_model_pricing b
+     WHERE a.effective_end IS NULL AND b.effective_end IS NULL
+       AND a.provider = b.provider AND a.model = b.model
+       AND a.id > b.id
+  `);
+  await q(`
+    CREATE UNIQUE INDEX IF NOT EXISTS ai_model_pricing_active_uniq
+      ON ai_model_pricing (provider, model) WHERE effective_end IS NULL
+  `);
   for (const p of AI_PRICING_SEED) {
-    const existing = await q1(`SELECT id FROM ai_model_pricing WHERE provider = $1 AND model = $2 AND effective_end IS NULL`, [p.provider, p.model]);
-    if (existing) continue;
     await q(`
       INSERT INTO ai_model_pricing
         (provider, model, input_price_per_m, output_price_per_m, cache_read_price_per_m, cache_write_price_per_m, effective_start)
       VALUES ($1,$2,$3,$4,$5,$6, DATE '2025-01-01')
+      ON CONFLICT DO NOTHING
     `, [p.provider, p.model, p.in, p.out, p.cr, p.cw]);
   }
 }
@@ -3165,8 +3209,8 @@ async function recordAiUsage(evt) {
        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens,
        cost_usd, currency, tokens_saved_input, tokens_saved_output, cost_saved_usd,
        company_id, contact_id, thread_id, session_id, user_id, response_ms, status, error_message, request_id,
-       web_search_calls)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
+       web_search_calls, requested_provider)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
     ON CONFLICT (request_id) DO NOTHING
   `, [
     evt.feature, evt.sub_feature || null, evt.outcome, evt.request_type || null, evt.model || null, evt.provider || 'anthropic',
@@ -3174,7 +3218,7 @@ async function recordAiUsage(evt) {
     evt.cost_usd || 0, evt.currency || 'USD', evt.tokens_saved_input || 0, evt.tokens_saved_output || 0, evt.cost_saved_usd || 0,
     evt.company_id || null, evt.contact_id || null, evt.thread_id || null, evt.session_id || null, evt.user_id || null,
     evt.response_ms || null, evt.status || 'success', evt.error_message || null, evt.request_id || null,
-    evt.web_search_calls || 0,
+    evt.web_search_calls || 0, evt.requested_provider || null,
   ]);
 }
 

@@ -60,6 +60,8 @@ const { contactsToCsv, contactsToXml, contactsToXlsx, safeFilename } = require('
 const { parseCompanyFile } = require('./companyImport');
 const { normalizeFileToImages } = require('./cardBatch');
 const { getUsage, resetUsage, recordAiEvent, setPersist, setPricingTable } = require('./usage');
+const { activeEmailModel } = require('./emailModel');
+const { listEmailModelChoices, DEFAULT_EMAIL_MODEL_ID } = require('./config');
 const emailSvc = require('./email');
 const accountResearch = require('./accountResearch');
 const providers = require('./providers');
@@ -2316,6 +2318,11 @@ app.get('/api/draft-options', (req, res) => {
     tones: list(DRAFT_TONES),
     languages: list(DRAFT_LANGUAGES),
     ctas: list(DRAFT_CTAS),
+    /* Only providers that are actually configured, and only their display
+       names. No model string, endpoint or credential state crosses to the
+       browser — the selector offers products, not deployment detail. */
+    models: listEmailModelChoices(),
+    defaultModel: DEFAULT_EMAIL_MODEL_ID,
   });
 });
 
@@ -2597,8 +2604,12 @@ app.post('/api/draft-email', async (req, res) => {
       if (existing) {
         // Reused a saved draft — no AI call. Record the tokens saved.
         const saved = await estimateAiSaved('email_draft', {});
+        // Value the saving at the model that would actually have run, and
+        // record it so cache hits still appear in per-model analytics.
+        const would = activeEmailModel(resolvedOptions && resolvedOptions.modelId);
         recordAiEvent({
           feature: 'email_draft', sub_feature: resolvedMode, outcome: 'db_reuse',
+          model: would.model, provider: would.provider, requested_provider: would.provider,
           contact_id: Number(resolvedContactId),
           tokens_saved_input: saved.input, tokens_saved_output: saved.output,
           user_id: reqUser(req), session_id: SERVER_SESSION_ID,
@@ -2650,9 +2661,14 @@ app.post('/api/draft-email', async (req, res) => {
     recordAiEvent({
       feature: 'email_draft', sub_feature: resolvedMode,
       outcome: regenerate ? 'user_regeneration' : 'new_ai_call',
-      model: du.model, company_id: built.companyId,
+      // Provider comes from the draft, not from config: on a fallback the call
+      // was served by someone else and must be priced as that someone else.
+      model: du.model, provider: du.provider,
+      requested_provider: du.requested_provider || null,
+      company_id: built.companyId,
       contact_id: resolvedContactId ? Number(resolvedContactId) : null,
       input_tokens: du.input_tokens || 0, output_tokens: du.output_tokens || 0,
+      cache_read_tokens: du.cache_read_tokens || 0, reasoning_tokens: du.reasoning_tokens || 0,
       response_ms: _ms, status: 'success', user_id: reqUser(req),
       session_id: SERVER_SESSION_ID, request_id: crypto.randomUUID(),
     });
