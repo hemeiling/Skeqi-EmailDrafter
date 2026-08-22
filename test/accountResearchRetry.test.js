@@ -102,7 +102,13 @@ test.before(async () => {
 
 test.after(async () => {
   if (server) await new Promise((r) => server.close(r));
-  // Remove the usage rows these failures deliberately recorded.
+  /* Remove the usage rows these failures deliberately recorded — but only from
+     the test database. Without TEST_DATABASE_URL there is nothing to clean up,
+     because accountResearch had nowhere to record them either; issuing this
+     DELETE against .env's database is exactly the accident the guard exists to
+     prevent. */
+  const dbGuard = require('./dbGuard');
+  if (!dbGuard.available) return;
   const db = require('../db');
   await db.pool.query(`DELETE FROM ai_usage_events WHERE sub_feature = 'zztest_retry'`);
 });

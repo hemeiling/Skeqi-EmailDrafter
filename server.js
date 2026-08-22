@@ -571,6 +571,59 @@ app.get('/api/companies/source-counts', async (req, res) => {
   }
 });
 
+/* GET /api/booth-map/unmatched — the booths that did NOT resolve to a company.
+
+   The importer refuses to guess: where a booth's company name matches two CRM
+   rows, or none, it stores the source spelling with company_id NULL rather
+   than picking something plausible. A wrong join there would file one
+   company's research under another company's booth, and nothing downstream
+   would ever look wrong enough to notice.
+
+   That decision is only defensible if the gap is visible, which is what this
+   is for. Read-only, and authenticated by the same middleware as every other
+   route — it is mounted below it, so there is nothing extra to remember.
+
+   Returns the source spelling and the booth, never a guess at what it should
+   have been. */
+app.get('/api/booth-map/unmatched', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT b.booth_number, b.source_company_name, b.source_company_name_zh,
+              b.category, b.status, b.match_confidence, b.match_method, b.match_note,
+              b.last_seen_at, e.name AS event_name
+         FROM booth_map_booths b
+         JOIN events e ON e.id = b.event_id
+        WHERE b.retired_at IS NULL
+          AND b.company_id IS NULL
+          AND b.source_company_name IS NOT NULL
+        ORDER BY b.match_confidence, b.booth_number
+        LIMIT 500`);
+
+    const { rows: totals } = await pool.query(
+      `SELECT COUNT(*)::int AS live,
+              COUNT(company_id)::int AS matched,
+              COUNT(*) FILTER (WHERE match_confidence = 'ambiguous')::int AS ambiguous,
+              COUNT(*) FILTER (WHERE match_confidence = 'unmatched'
+                               AND source_company_name IS NOT NULL)::int AS unmatched
+         FROM booth_map_booths WHERE retired_at IS NULL`);
+
+    const { rows: lastRun } = await pool.query(
+      `SELECT id, status, source_version, created, updated, unchanged, retired,
+              matched, unmatched, ambiguous, error_message, started_at, finished_at
+         FROM booth_import_runs ORDER BY started_at DESC LIMIT 1`);
+
+    res.json({ ok: true, totals: totals[0] || null, lastRun: lastRun[0] || null, rows });
+  } catch (err) {
+    /* An absent table means the import has never run, which is a different
+       answer from "nothing is unmatched" and must not be reported as one. */
+    if (err && err.code === '42P01') {
+      return res.status(503).json({ error: 'Booth data has not been imported yet.' });
+    }
+    console.error('[booth-map/unmatched]', err);
+    res.status(500).json({ error: 'Failed to load unmatched booths' });
+  }
+});
+
 /* GET /api/analytics/overview — adoption and platform value.
 
    Aggregates only. No message bodies, no subject lines, no per-message

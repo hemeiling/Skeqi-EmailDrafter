@@ -3,6 +3,33 @@ const { normalizeNameKey, isInvalidCompanyName } = require('./companyKey');
 const { classifyDepartment, classifySeniority } = require('./contactClassify');
 const { buildWhere, buildOrderBy, LAST_ACTIVITY_SQL, OPTION_SQL, escapeLike, companySourceForContact } = require('./contact-query');
 
+/* ── Tests may not open the production database ────────────────────────────
+   A backstop, not the main mechanism: test/dbGuard.js redirects DATABASE_URL
+   to TEST_DATABASE_URL before this module loads, and every database-backed
+   suite requires it. This catches the case that guard cannot — a suite added
+   later that forgets to, and would otherwise inherit .env and start writing
+   to production.
+
+   It is scoped to NODE_ENV=test, which only `npm test` sets, so production and
+   development behaviour are untouched: outside tests this block does nothing.
+
+   Failing here is deliberate. The alternative is a suite that connects, runs
+   190 inserts and reports green. */
+if (process.env.NODE_ENV === 'test') {
+  const testUrl = process.env.TEST_DATABASE_URL || '';
+  const current = process.env.DATABASE_URL || '';
+  const identity = (u) => {
+    try { const x = new URL(u); return `${x.hostname}${x.pathname}`.toLowerCase(); } catch { return null; }
+  };
+  const id = identity(current);
+  if (current && (!testUrl || id !== identity(testUrl))) {
+    throw new Error(
+      `Refusing to connect: tests may only use TEST_DATABASE_URL, and DATABASE_URL points at ${id || 'an unparseable URL'}. `
+      + 'Require test/dbGuard before ../db, or set TEST_DATABASE_URL.',
+    );
+  }
+}
+
 // Enable SSL for production, for managed Postgres (Neon), or whenever the URL
 // asks for it — otherwise Neon rejects the connection when running locally.
 const DB_URL = process.env.DATABASE_URL || '';
@@ -223,15 +250,6 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_replies_unread ON email_replies (user_id, read_at, received_at DESC)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_replies_thread ON email_replies (thread_id)`);
 
-  /* Attribution for sends. communications recorded which mailbox sent a
-     message but not which CRM user asked for it, so "emails sent per user"
-     was not answerable. */
-  await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS user_id TEXT`);
-  await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS replied_at TIMESTAMPTZ`);
-  await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS thread_id TEXT`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_thread ON communications (thread_id)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_user_sent ON communications (user_id, sent_at DESC)`);
-
   await pool.query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS email_source text`);
   /* Backfill once, from the contact source, for rows written before this
      column existed. Apollo rows get 'apollo_legacy' rather than a guess:
@@ -255,10 +273,6 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_company_lower ON contacts (LOWER(company))`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_company_id ON contacts (company_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_last_contacted ON contacts (last_contacted_at)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_contact ON communications (contact_id)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_contact_type ON communications (contact_id, comm_type) WHERE deleted_at IS NULL`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_contact_activity_contact_type ON contact_activity (contact_id, activity_type)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_email_drafts_contact ON email_drafts (contact_id)`);
   /* Prefix/contains matching on names and email needs trigram support;
      pg_trgm is available on Neon. Skipped silently where it is not — the
      filters still work, just without the index. */
@@ -367,6 +381,25 @@ async function initDb() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+
+  /* These index and column statements used to sit ~100 lines earlier, before
+     communications, contact_activity and email_drafts were created. Against an
+     existing database that was invisible — the tables were already there — but
+     it meant initDb() could not build a database from nothing, which is exactly
+     what a test database is. Moved here, next to the table they describe. */
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_contact ON communications (contact_id)`);
+
+  /* Attribution for sends. communications recorded which mailbox sent a
+     message but not which CRM user asked for it, so "emails sent per user"
+     was not answerable. */
+  await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS user_id TEXT`);
+  await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS replied_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS thread_id TEXT`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_thread ON communications (thread_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_user_sent ON communications (user_id, sent_at DESC)`);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_contact_activity_contact_type ON contact_activity (contact_id, activity_type)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_email_drafts_contact ON email_drafts (contact_id)`);
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS extra_instructions TEXT`);
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS cc TEXT`);
   await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS bcc TEXT`);
@@ -387,6 +420,9 @@ async function initDb() {
     `message_id TEXT`, `delivery_status TEXT`, `scheduled_at TIMESTAMPTZ`, `send_error TEXT`,
     `in_reply_to TEXT`, `references_header TEXT`,
   ]) { await pool.query(`ALTER TABLE communications ADD COLUMN IF NOT EXISTS ${col}`); }
+
+  /* Partial on deleted_at, so it has to follow the column that adds it. */
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comm_contact_type ON communications (contact_id, comm_type) WHERE deleted_at IS NULL`);
   // Rows migrated long ago from the old email_drafts table never set
   // draft_mode -- backfill so every draft has a real category (drafts are
   // now scoped/versioned per (contact, draft_mode), not just per contact).
@@ -826,6 +862,146 @@ async function initDb() {
       PRIMARY KEY (cache_type, cache_key)
     )
   `);
+
+  /* ── Booth map, normalized ───────────────────────────────────────────────
+     The Battery Show booth data is curated by hand and has lived as a literal
+     array inside public/booth-map/index.html: 1,128 booths with coordinates,
+     categories, competitor rationales and target-customer briefs. The map
+     renders from that file and continues to — nothing here changes it.
+
+     These tables exist so the data can be *joined*. The interesting questions
+     span both halves of SKQ ("which target customers at the show have research
+     but no outreach?") and cannot be answered while booths live in a script tag
+     and companies live in Postgres. Import is one-way and rerunnable: the
+     static file stays the source of truth, this is a synchronized projection
+     of it. See scripts/import-booth-map.js.
+
+     company_id is nullable on purpose. 98% of named booths match a company
+     confidently; the rest are recorded with the source spelling and no match
+     rather than being forced onto a plausible-looking row. A wrong join here
+     would put one company's research against another company's booth. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS booth_map_booths (
+      id SERIAL PRIMARY KEY,
+      -- Explicit, so editions of the show coexist instead of overwriting.
+      event_id INTEGER NOT NULL REFERENCES events(id),
+      booth_number TEXT NOT NULL,
+      -- The company as the SOURCE spells it, kept verbatim for provenance:
+      -- this is what a later sync diffs against, and what a human reads when
+      -- deciding whether an unmatched booth is really a new company.
+      source_company_name TEXT,
+      source_company_name_zh TEXT,
+      -- companyKey.normalizeNameKey(source_company_name); the tier-2 join.
+      name_key TEXT,
+      -- NULL means "not confidently matched", never "no company".
+      company_id INTEGER REFERENCES companies(id),
+      match_method TEXT,          -- name_exact | name_key | booth_number | none
+      match_confidence TEXT,      -- confident | ambiguous | unmatched
+      match_note TEXT,            -- candidate ids when ambiguous
+      category TEXT,              -- the map's own taxonomy: customer, batmat, …
+      status TEXT,                -- Reserved / Available as the source states
+      x INTEGER,
+      y INTEGER,
+      dims TEXT,
+      edition TEXT,
+      intro TEXT,
+      -- Anything the source carries that is not modelled above, so a new field
+      -- upstream is preserved rather than dropped until someone adds a column.
+      data JSONB,
+      source_version TEXT,        -- sha256 of the parsed source arrays
+      first_imported_at TIMESTAMPTZ DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+      -- Gone from the source. Retired, never deleted: a booth that disappears
+      -- upstream must not take its history with it.
+      retired_at TIMESTAMPTZ,
+      UNIQUE (event_id, booth_number)
+    )
+  `);
+  // The columns the assistant filters on, and the ones a sync scans.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bmb_event ON booth_map_booths (event_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bmb_company ON booth_map_booths (company_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bmb_booth ON booth_map_booths (booth_number)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bmb_category ON booth_map_booths (category)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bmb_status ON booth_map_booths (status)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bmb_retired ON booth_map_booths (retired_at)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bmb_name_key ON booth_map_booths (name_key)`);
+  /* "Live booths in this category" is the shape of nearly every question the
+     assistant will ask, and it is the one worth a composite. */
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_bmb_live ON booth_map_booths (event_id, category) WHERE retired_at IS NULL`);
+
+  /* The curated overlays. Five separate structures in the source file
+     (DIRECT_COMP, INDIRECT_COMP, ESS_EV, COMPANY_DB, CN_COMPANIES,
+     AVAILABLE_RANKED) describing the same booths from different angles, so
+     they are one table keyed by kind rather than five sparse column groups on
+     the booth row. A booth can be both a target customer and an ESS/EV project;
+     the unique key is (booth_id, kind), not booth_id. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS booth_intel (
+      id SERIAL PRIMARY KEY,
+      booth_id INTEGER NOT NULL REFERENCES booth_map_booths(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      -- Why this classification was made. The sales-facing value of the whole
+      -- dataset is in these sentences, not in the labels.
+      reason TEXT,
+      priority INTEGER,
+      priority_label TEXT,
+      background TEXT,
+      segments JSONB,
+      projects JSONB,
+      role TEXT,                  -- CN_COMPANIES: direct_customer | competitor
+      -- AVAILABLE_RANKED scoring, modelled because "best free booth" is a
+      -- question worth answering with an ORDER BY rather than in the model.
+      score NUMERIC(4,2),
+      grade TEXT,
+      badge TEXT,
+      traffic_score NUMERIC(4,2),
+      anchor_score NUMERIC(4,2),
+      visibility_score NUMERIC(4,2),
+      skeqi_relevance NUMERIC(4,2),
+      analysis TEXT,
+      data JSONB,
+      source_version TEXT,
+      last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+      retired_at TIMESTAMPTZ,
+      UNIQUE (booth_id, kind)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bintel_booth ON booth_intel (booth_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bintel_kind ON booth_intel (kind)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bintel_live ON booth_intel (kind) WHERE retired_at IS NULL`);
+
+  /* One row per import. Without this, "is the booth data current?" is only
+     answerable by reading rows and guessing, and a partial or failed sync
+     leaves no trace at all. Counts are what make a rerun's effect legible. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS booth_import_runs (
+      id SERIAL PRIMARY KEY,
+      event_id INTEGER REFERENCES events(id),
+      source_version TEXT,
+      source_path TEXT,
+      dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+      -- pending → success | failed. A row left 'pending' means the process
+      -- died mid-import, which is itself worth being able to see.
+      status TEXT NOT NULL DEFAULT 'pending',
+      booths_seen INTEGER DEFAULT 0,
+      created INTEGER DEFAULT 0,
+      updated INTEGER DEFAULT 0,
+      unchanged INTEGER DEFAULT 0,
+      retired INTEGER DEFAULT 0,
+      intel_upserted INTEGER DEFAULT 0,
+      matched INTEGER DEFAULT 0,
+      unmatched INTEGER DEFAULT 0,
+      ambiguous INTEGER DEFAULT 0,
+      -- Non-fatal things a human should look at: a booth whose name matches two
+      -- companies, an overlay pointing at a booth number that no longer exists.
+      warnings JSONB,
+      error_message TEXT,
+      started_at TIMESTAMPTZ DEFAULT NOW(),
+      finished_at TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bir_started ON booth_import_runs (started_at DESC)`);
 
   await seedTagTaxonomy();
   await seedSkqSystems();

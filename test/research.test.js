@@ -7,6 +7,18 @@ const {
   buildResearchPrompt, parseResearchResponse, validateSuggestions,
   extractSources, textFromContent, companyCategories
 } = require('../research');
+const dbGuard = require('./dbGuard');
+
+/* Every test below needs a database. Without TEST_DATABASE_URL there is
+   nowhere safe to run them, and the one place they must never run is the
+   database .env points at — so the whole suite skips rather than falling back.
+   `return` at module scope is legal in CommonJS and is the least invasive way
+   to skip a file wholesale. */
+if (!dbGuard.available) {
+  require('node:test')('database suite skipped — TEST_DATABASE_URL not set', { skip: true }, () => {});
+  return;
+}
+
 const db = require('../db');
 
 // Minimal taxonomy fixture mirroring the real seed shape.
