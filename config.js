@@ -156,6 +156,55 @@ function emailProviderChain(selectedId) {
   return chain.filter(isEmailModelAvailable);
 }
 
+/* ── The assistant's model ─────────────────────────────────────────────────
+   Configured separately from drafting, on purpose. They are different
+   workloads with different economics — drafting writes one paragraph from a
+   fixed prompt, the assistant runs a tool loop and re-reads every result — and
+   sharing a variable would mean retuning one silently moved the other.
+
+   Qwen 3.6 Flash by default, through the same Bailian endpoint and the same
+   OpenAI-compatible client. Thinking stays off: choosing among ten tools and
+   summarising their output is not a reasoning problem, and Qwen bills every
+   reasoning token at the output rate. Benchmark before turning it on. */
+const BAILIAN_CHAT_MODEL = process.env.BAILIAN_CHAT_MODEL || 'qwen3.6-flash';
+const CHAT_ENABLE_THINKING = String(process.env.CHAT_ENABLE_THINKING || 'false') === 'true';
+/* A stalled provider must not hold the panel open. Shorter than drafting's:
+   a chat reply that takes a minute has already lost the conversation. */
+const CHAT_REQUEST_TIMEOUT_MS = Number(process.env.CHAT_REQUEST_TIMEOUT_MS || 30000);
+/* The loop is bounded so a vague question cannot spend the afternoon calling
+   tools. Six covers "research but no outreach, then tell me about the top
+   one"; past that the model is usually going in circles. */
+const CHAT_MAX_TOOL_CALLS = Number(process.env.CHAT_MAX_TOOL_CALLS || 6);
+
+const CHAT_MODELS = {
+  qwen: {
+    id: 'qwen', label: 'Qwen 3.6 Flash', provider: 'bailian',
+    model: BAILIAN_CHAT_MODEL, baseUrl: chatCompletionsUrl(BAILIAN_BASE_URL), apiKey: BAILIAN_API_KEY,
+    dialect: { style: 'openai-compatible', maxTokensField: 'max_tokens', reasoningEffort: null,
+               extra: { enable_thinking: CHAT_ENABLE_THINKING } },
+  },
+  gpt: {
+    id: 'gpt', label: 'GPT', provider: 'openai',
+    model: OPENAI_EMAIL_MODEL, baseUrl: chatCompletionsUrl(OPENAI_CHAT_URL), apiKey: OPENAI_API_KEY,
+    dialect: { style: 'openai-compatible', maxTokensField: 'max_completion_tokens', reasoningEffort: OPENAI_EMAIL_REASONING_EFFORT },
+  },
+};
+
+const DEFAULT_CHAT_MODEL_ID = process.env.DEFAULT_CHAT_MODEL_ID || 'qwen';
+
+function isChatModelAvailable(id) {
+  const m = CHAT_MODELS[id];
+  return Boolean(m && m.apiKey && m.baseUrl);
+}
+function isChatConfigured() { return Object.keys(CHAT_MODELS).some(isChatModelAvailable); }
+/* Chosen first, then whatever else is configured. Claude is absent from the
+   catalogue: it is not OpenAI tool-call shaped, and a fallback that cannot
+   call tools would answer confidently with no data rather than failing. */
+function chatProviderChain(selectedId) {
+  const first = isChatModelAvailable(selectedId) ? selectedId : DEFAULT_CHAT_MODEL_ID;
+  return [first, ...Object.keys(CHAT_MODELS).filter((id) => id !== first)].filter(isChatModelAvailable);
+}
+
 function isApolloConfigured() {
   return Boolean(APOLLO_API_KEY);
 }
@@ -175,6 +224,10 @@ function isLoginGateConfigured() {
 }
 
 module.exports = {
+  CHAT_MODELS, DEFAULT_CHAT_MODEL_ID, BAILIAN_CHAT_MODEL, CHAT_ENABLE_THINKING,
+  CHAT_REQUEST_TIMEOUT_MS, CHAT_MAX_TOOL_CALLS,
+  isChatModelAvailable, isChatConfigured, chatProviderChain,
+
   APOLLO_API_KEY,
   CLAUDE_API_KEY,
   OPENAI_API_KEY,

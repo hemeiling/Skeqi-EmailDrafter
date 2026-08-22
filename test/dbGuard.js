@@ -56,11 +56,14 @@ let reason = '';
 if (!TEST_URL) {
   reason = 'TEST_DATABASE_URL is not set — database-backed tests are skipped. '
     + 'Set it to a scratch database; it will never fall back to DATABASE_URL.';
-  /* Removed from the environment, not merely unused. Requiring ../db is
-     harmless afterwards, and — more to the point — nothing later in the
-     process can reach production by reading the variable, however it was
-     loaded. .env has already been read by the time this runs. */
-  delete process.env.DATABASE_URL;
+  /* Emptied, not deleted — and the difference is the whole point.
+     `delete` looked equivalent and was not: config.js calls dotenv.config()
+     when it loads, dotenv skips keys already present in process.env, and a
+     deleted key is not present. So the production URL was quietly re-injected
+     a few requires later and the backstop in db.js caught it. Setting the key
+     to an empty string leaves it defined, so dotenv leaves it alone, and the
+     pool has nowhere to connect. */
+  process.env.DATABASE_URL = '';
 } else if (PROD_URL && sameDatabase(TEST_URL, PROD_URL)) {
   /* Loudly, and as a thrown error rather than a skip: this is not a missing
      configuration, it is a configuration that would destroy production data.

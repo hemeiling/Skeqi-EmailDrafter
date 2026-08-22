@@ -46,6 +46,11 @@ const pool = new Pool({
      Neon endpoint waking from idle and still fails inside the dashboard's
      own 15s deadline. */
   connectionTimeoutMillis: 10000,
+  /* Left at node-postgres' default (10) in production. Settable because a
+     single-connection test database — PGlite, which is how this app is run
+     against an isolated database locally — refuses the second connection and
+     the boot fails with ECONNRESET. */
+  ...(process.env.PG_POOL_MAX ? { max: Number(process.env.PG_POOL_MAX) } : {}),
 });
 
 /* An idle client that dies (network drop, Neon scaling the endpoint down)

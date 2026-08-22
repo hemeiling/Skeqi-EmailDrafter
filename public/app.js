@@ -40,6 +40,11 @@ function showView(name) {
   // The CRM list view gets the full window; form-shaped views keep the
   // narrower reading column.
   document.body.classList.toggle("view-wide", name === "crm");
+  /* The assistant is told which screen is open. Booth Map and Account Research
+     refine this further from inside their iframes, via skq-bridge. */
+  if (window.skqSetChatContext) {
+    try { window.skqSetChatContext(name ? { view: name } : null); } catch (e) { /* widget absent */ }
+  }
   if (name === "booth-map") ensureFrameLoaded("bm-frame", "/booth-map/");
   if (name === "account-research") ensureFrameLoaded("ar-frame", "/account-research/");
   if (name === "home") loadDashboard();

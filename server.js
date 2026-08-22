@@ -80,6 +80,8 @@ const {
   listSkqModules, listSkqSystems, listSkqEquipment
 } = require('./db');
 const { researchCompanyTags } = require('./research');
+const { runChat, SUGGESTIONS } = require('./chat');
+const { parsePageContext } = require('./chatContext');
 
 const app = express();
 app.set('trust proxy', true); // so req.protocol is https behind Render's proxy (OAuth redirect URIs)
@@ -569,6 +571,86 @@ app.get('/api/companies/source-counts', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to load company source counts' });
   }
+});
+
+/* ── The SKQ AI Assistant ──────────────────────────────────────────────────
+
+   POST /api/chat  — one turn of conversation.
+
+   Mounted below the auth middleware like every other route, so it inherits the
+   same login gate; there is nothing extra to remember and no second way in.
+
+   The model never reaches the database except through chatTools, and there is
+   no write tool in that catalogue — not a guarded one, none — so no prompt can
+   reach an action. Everything here is read-only by construction rather than by
+   permission check. */
+app.post('/api/chat', async (req, res) => {
+  if (!config.isChatConfigured()) {
+    return res.status(503).json({ error: 'The assistant is not configured.' });
+  }
+
+  // The same budget gate every other AI feature goes through.
+  const blocked = await checkAiBudget();
+  if (blocked) return res.status(429).json(blocked);
+
+  const started = Date.now();
+  const pageContext = parsePageContext(req.body && req.body.pageContext);
+
+  try {
+    const result = await runChat({
+      messages: req.body && req.body.messages,
+      pageContext,
+      modelId: req.body && req.body.modelId,
+    });
+
+    /* Recorded whether it succeeded or not. A failed turn still cost tokens if
+       it got as far as the provider, and a feature whose failures are invisible
+       looks cheaper and more reliable than it is. `chat` is its own feature so
+       it never mixes with email_draft or account_research in Analytics. */
+    const u = result.usage || {};
+    recordAiEvent({
+      feature: 'chat',
+      sub_feature: (result.toolCalls || []).map((t) => t.name).slice(0, 4).join('+') || 'no_tools',
+      outcome: result.ok ? 'success' : 'error',
+      status: result.ok ? 'success' : 'error',
+      error_message: result.ok ? null : String(result.error || '').slice(0, 300),
+      model: u.model || null,
+      provider: u.provider || null,
+      requested_provider: u.requested_provider || null,
+      input_tokens: u.input_tokens || 0,
+      output_tokens: u.output_tokens || 0,
+      cache_read_tokens: u.cache_read_tokens || 0,
+      reasoning_tokens: u.reasoning_tokens || 0,
+      response_ms: u.response_ms || (Date.now() - started),
+      company_id: pageContext && pageContext.companyId ? pageContext.companyId : null,
+      contact_id: pageContext && pageContext.contactId ? pageContext.contactId : null,
+      user_id: reqUser(req), session_id: SERVER_SESSION_ID,
+      request_id: crypto.randomUUID(),
+    });
+
+    if (!result.ok) {
+      return res.status(result.status || 502).json({ error: result.error });
+    }
+
+    /* Which tools ran is returned so the panel can show what was consulted —
+       an assistant that shows its working is easier to trust and much easier
+       to debug. Never the arguments or the rows: those are CRM content. */
+    res.json({
+      reply: result.reply,
+      consulted: (result.toolCalls || []).map((t) => t.name),
+      fell_back: Boolean(u.fell_back),
+    });
+  } catch (err) {
+    console.error('[chat]', err);
+    res.status(500).json({ error: 'The assistant could not answer that. Please try again.' });
+  }
+});
+
+/* GET /api/chat/config — what the panel needs before the first message.
+   Deliberately no model string, endpoint or key: the browser learns whether
+   the assistant is available and what to suggest, nothing about the plumbing. */
+app.get('/api/chat/config', (req, res) => {
+  res.json({ available: config.isChatConfigured(), suggestions: SUGGESTIONS });
 });
 
 /* GET /api/booth-map/unmatched — the booths that did NOT resolve to a company.
