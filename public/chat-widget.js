@@ -192,7 +192,12 @@
     el.form = h('form', 'skq-ai-form');
     el.input = h('textarea', 'skq-ai-input');
     el.input.rows = 1;
-    el.input.placeholder = 'Ask about companies, booths, contacts, research, or email activity…';
+    /* The full prompt is three lines in a 375px composer and gets clipped
+       mid-word, which reads as a bug rather than a hint. The long form is
+       still on the empty state above it, where there is room for it. */
+    el.input.placeholder = matchMedia('(max-width: 767px)').matches
+      ? 'Ask about companies, booths, contacts…'
+      : 'Ask about companies, booths, contacts, research, or email activity…';
     el.input.setAttribute('aria-label', 'Ask the assistant');
     el.send = h('button', 'skq-ai-send', 'Send');
     el.send.type = 'submit';

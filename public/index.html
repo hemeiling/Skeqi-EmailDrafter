@@ -1680,9 +1680,127 @@
     table.pi-ctx td { padding:4px 8px; border-bottom:1px solid #f3f4f6; vertical-align:top; }
     table.pi-ctx td:first-child { color:#6b7280; width:200px; white-space:nowrap; }
     table.pi-ctx td:last-child { color:#111827; }
+
+    /* ══ Phones ═══════════════════════════════════════════════════════════
+       Below 768px the desktop shell does not merely look cramped, it stops
+       being a phone layout at all. The top bar's actions are ~430px of
+       unshrinkable controls, which forces a 640px minimum width on the page;
+       mobile Safari and Chrome respond by zooming out to fit, so the real
+       device reports a 583px layout viewport and every control renders about
+       two-thirds size. That is the root cause of "the sidebar is squeezing
+       the content", "the text is clipped" and "I cannot see the assistant
+       button" all at once — nothing was hidden, everything was scaled.
+
+       So the rule below is: at phone widths NOTHING may be wider than the
+       viewport. The sidebar leaves the flow entirely and becomes a drawer,
+       the header keeps only what a thumb needs, and the diagnostics bar
+       stops being a wall of numbers. */
+    @media (max-width: 767px) {
+
+      /* ── The sidebar becomes a drawer ─────────────────────────────────
+         Off-canvas rather than a 64px rail: a rail costs 17% of a 375px
+         screen permanently and shows only icons, which is the worst of both.
+         Sliding it out gives the content the whole width. */
+      .app-sidebar {
+        width: min(280px, 82vw);
+        transform: translateX(-100%);
+        transition: transform 0.22s ease;
+        z-index: 1300;                 /* over the content, under modals */
+      }
+      body.mobile-nav-open .app-sidebar { transform: translateX(0); }
+      /* The collapsed-rail rules are desktop-only; on a drawer they would
+         hide the labels that make the drawer worth opening. */
+      body.sidebar-collapsed .app-sidebar { width: min(280px, 82vw); }
+      body.sidebar-collapsed .app-nav-item span.app-nav-label,
+      body.sidebar-collapsed .app-sidebar-brand .app-brand-label,
+      body.sidebar-collapsed .app-sidebar-token { display: revert; }
+      .app-sidebar .app-nav-label, .app-sidebar .app-brand-label { display: revert; }
+      .app-nav-item { padding: 12px 14px; }        /* comfortable touch rows */
+      /* "Collapse sidebar" is a desktop preference. Inside a drawer it offers
+         to do something the drawer already is, so it goes. */
+      .app-sidebar-footer { display: none; }
+
+      .app-main, body.sidebar-collapsed .app-main { margin-left: 0; }
+
+      /* Tapping outside closes it, which is the gesture people already expect. */
+      .mobile-nav-scrim {
+        position: fixed; inset: 0; z-index: 1250;
+        background: rgba(16, 8, 32, 0.5); border: 0; padding: 0;
+        display: none;
+      }
+      body.mobile-nav-open .mobile-nav-scrim { display: block; }
+
+      /* ── The header keeps only what a thumb needs ─────────────────────
+         Everything removed here is reachable elsewhere: the account menu
+         lives in the drawer, usage has its own screen, help is a link. What
+         stays is navigation, the page you are on, and the primary action. */
+      .app-topbar { padding: 0 12px; gap: 8px; }
+      .app-topbar-actions { gap: 6px; min-width: 0; }
+      #app-user-menu, #app-help-btn, #app-usage-pill { display: none; }
+      .app-topbar-crumb, .app-topbar-title { display: none; }
+      .app-topbar-brand { font-size: 0.95rem; }
+
+      /* Scan Business Card stays — it is the one action people open the app
+         to use — but as an icon, because its label is 120px of a 375px bar. */
+      .btn-scan-card { padding: 9px 11px; font-size: 0; gap: 0; }
+      .btn-scan-card::before { content: '📇'; font-size: 15px; }
+      .btn-scan-card * { display: none; }
+
+      /* ── Nothing may exceed the viewport ──────────────────────────────
+         The belt-and-braces rule. Any one runaway child re-triggers the
+         browser's shrink-to-fit and undoes everything above. */
+      html, body { max-width: 100%; overflow-x: hidden; }
+      .app-main, .card, .dash-panel, table { max-width: 100%; }
+      /* Wide tables scroll inside their own box rather than the page. */
+      .card > table, .table-wrap { display: block; overflow-x: auto; }
+    }
+
+    /* ── The diagnostics bar, on anything narrower than a desktop ─────────
+       Split from the phone breakpoint because the two rules have different
+       reasons. The drawer is about thumb reach and is a phone pattern; the
+       bar is about a fixed row of numbers that wraps as soon as it runs out
+       of width — four rows and 150px on a phone, three and 120px on a
+       tablet. Folded up to 1024px, which is also where the assistant stops
+       being a rail. */
+    @media (max-width: 1023px) {
+      /* Collapsed to one line with a summary; nothing removed, only folded.
+         On a phone it wrapped to four rows and ate 150px — a sixth of the
+         screen — to show numbers that are mostly zero. One line, tap to
+         expand. Nothing is removed, only folded. */
+      #usage-bar {
+        padding: 6px 12px; gap: 8px; font-size: 0.7rem;
+        flex-wrap: nowrap; overflow: hidden;
+        max-height: 30px; align-items: center;
+      }
+      body.usage-bar-open #usage-bar {
+        flex-wrap: wrap; max-height: 45vh; overflow-y: auto;
+      }
+      /* Everything past the first group hides until expanded. */
+      #usage-bar > *:not(.u-mobile-toggle):not(.u-mobile-summary) { display: none; }
+      body.usage-bar-open #usage-bar > * { display: revert; }
+      .u-mobile-summary {
+        flex: 1; min-width: 0; white-space: nowrap;
+        overflow: hidden; text-overflow: ellipsis; color: #D6CCEA;
+      }
+      body.usage-bar-open .u-mobile-summary { display: none; }
+      .u-mobile-toggle {
+        flex: none; background: rgba(255,255,255,0.12); color: #fff;
+        border: 0; border-radius: 6px; min-width: 44px; min-height: 24px;
+        font-size: 0.68rem; cursor: pointer;
+      }
+
+    }
+
+    /* The drawer is a phone pattern only; from 768px the sidebar is back in
+       the flow and must not be translated off-screen. */
+    @media (min-width: 768px) {
+      .mobile-nav-scrim { display: none !important; }
+    }
+
   </style>
 </head>
 <body>
+  <button class="mobile-nav-scrim" id="mobile-nav-scrim" aria-label="Close menu 关闭菜单" tabindex="-1"></button>
 
 <div class="app-shell">
   <aside class="app-sidebar" id="app-sidebar">
@@ -1743,7 +1861,7 @@
 
   <div class="app-main">
     <header class="app-topbar">
-      <button class="app-menu-btn" id="app-menu-btn" title="收起/展开侧栏">☰</button>
+      <button class="app-menu-btn" id="app-menu-btn" title="收起/展开侧栏" aria-label="Menu 菜单">☰</button>
       <span class="app-topbar-title" id="app-title-home" role="button" tabindex="0" title="Home 首页概览">SKQ CRM System</span>
       <div class="app-breadcrumb"><span>›</span> <b id="app-breadcrumb-current">首页概览</b></div>
       <div class="app-topbar-actions">

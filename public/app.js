@@ -111,7 +111,85 @@ function initAppShell() {
   }
   collapseBtn.addEventListener("click", toggleCollapsed);
   // The top-bar hamburger drives the same state as the footer button.
-  document.getElementById("app-menu-btn").addEventListener("click", toggleCollapsed);
+  /* ── The hamburger means two different things ──────────────────────────
+     On a desktop it collapses the sidebar to an icon rail, which is a
+     preference worth remembering. On a phone the sidebar is off-canvas and
+     the same button opens it as a drawer — a rail there would cost 17% of a
+     375px screen permanently to show icons alone.
+
+     One breakpoint, matched in JS the same way the stylesheet matches it, so
+     the two cannot drift apart. */
+  const PHONE = window.matchMedia("(max-width: 767px)");
+
+  function closeMobileNav() {
+    document.body.classList.remove("mobile-nav-open");
+  }
+
+  function toggleMobileNav() {
+    document.body.classList.toggle("mobile-nav-open");
+  }
+
+  document.getElementById("app-menu-btn").addEventListener("click", () => {
+    if (PHONE.matches) toggleMobileNav();
+    else toggleCollapsed();
+  });
+
+  // Tapping the scrim, pressing Escape, or choosing a destination all close
+  // it — a drawer that stays open after you have chosen is just an obstacle.
+  const scrim = document.getElementById("mobile-nav-scrim");
+  if (scrim) scrim.addEventListener("click", closeMobileNav);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeMobileNav();
+  });
+  document.querySelectorAll("[data-nav-view]").forEach((el) => {
+    el.addEventListener("click", () => { if (PHONE.matches) closeMobileNav(); });
+  });
+  // Growing past the breakpoint with the drawer open would leave the class
+  // set and the scrim hidden but the body in a mobile state.
+  PHONE.addEventListener("change", closeMobileNav);
+
+  /* ── The diagnostics bar folds on a phone ──────────────────────────────
+     It wrapped to four rows and took 150px of an 800px screen to show
+     numbers that are usually zero. Collapsed to one line with a summary and
+     a toggle; nothing is removed, only folded. */
+  (function compactUsageBar() {
+    const bar = document.getElementById("usage-bar");
+    if (!bar || bar.querySelector(".u-mobile-toggle")) return;
+
+    const summary = document.createElement("span");
+    summary.className = "u-mobile-summary";
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "u-mobile-toggle";
+    toggle.textContent = "详情";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.addEventListener("click", () => {
+      const open = document.body.classList.toggle("usage-bar-open");
+      toggle.textContent = open ? "收起" : "详情";
+      toggle.setAttribute("aria-expanded", String(open));
+    });
+
+    bar.insertBefore(summary, bar.firstChild);
+    bar.appendChild(toggle);
+
+    /* The one number worth a glance is spend. Re-read from the bar's own cost
+       cell rather than tracked separately, so it cannot disagree with the
+       expanded view.
+
+       The write is guarded because the observer below watches the subtree the
+       summary lives in: assigning unconditionally retriggers the observer,
+       which reassigns, which retriggers — an infinite loop that pegs the main
+       thread and hangs the page. Only writing on an actual change breaks it. */
+    function refresh() {
+      const cost = bar.querySelector(".u-cost");
+      const next = cost ? `AI ${cost.textContent.trim()}` : "AI";
+      if (summary.textContent !== next) summary.textContent = next;
+    }
+    refresh();
+    new MutationObserver(refresh).observe(bar, { subtree: true, characterData: true, childList: true });
+  }());
+
 
   // Both the top-bar pill and the sidebar meter open the usage dashboard.
   // The meter is visible on every screen, so it loads on every screen.
