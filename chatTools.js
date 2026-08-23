@@ -25,6 +25,7 @@
    ═══════════════════════════════════════════════════════════════════════════ */
 
 const db = require('./db');
+const { normalizeNameKey } = require('./companyKey');
 
 /** Nothing may return more than this, whatever the model asks for. */
 const MAX_ROWS = 25;
@@ -186,6 +187,97 @@ function renderReport(r, full) {
    how it is implemented. */
 
 const TOOLS = {
+
+  check_event_attendance: {
+    description:
+      'Whether a company is an exhibitor at the show, and if so where. This is '
+      + 'the ONLY way to answer "is X attending" — attendance and booth assignment '
+      + 'are separate facts, and a company can be listed with no booth yet. Never '
+      + 'conclude a company is absent because another tool returned no booth.',
+    parameters: {
+      type: 'object',
+      properties: { name: { type: 'string' }, company_id: { type: 'integer' } },
+    },
+    async run(args) {
+      const name = asText(args.name, 120);
+      const companyId = asInt(args.company_id);
+      if (!name && !companyId) return { error: 'name or company_id is required' };
+
+      const eventId = await currentEventId();
+      const { rows: [ev] } = await pool.query('select name from events where id = $1', [eventId]);
+
+      /* Matched on the same normalized key the sync uses, plus a contains
+         search so a user typing "CATL" finds "CATL Debrecen" if that is what
+         is listed. Both statuses are returned — a retired row is the evidence
+         for "appeared in an earlier dataset but is not in the latest list",
+         which is a different answer from "never heard of them". */
+      const { rows } = await pool.query(
+        `select e.id, e.exhibitor_source_id, e.source_name, e.company_id,
+                e.attendance_status, e.last_verified_at, e.retired_at, e.source,
+                coalesce(array_agg(b.booth_number order by b.booth_number)
+                         filter (where b.retired_at is null), '{}') booths
+           from event_exhibitors e
+           left join exhibitor_booths b on b.exhibitor_id = e.id
+          where e.event_id = $1
+            and (($2::int is not null and e.company_id = $2)
+              or ($3::text is not null and (
+                    e.name_key = $4 or lower(e.source_name) like $5)))
+          group by e.id
+          order by (e.attendance_status = 'listed') desc, e.source_name
+          limit 10`,
+        [eventId, companyId, name || null, name ? normalizeNameKey(name) : null,
+          name ? `%${name.toLowerCase()}%` : null]);
+
+      /* When was the list itself last confirmed? Without this the assistant
+         can say "not attending" with no sense of how old that claim is. */
+      const { rows: [run] } = await pool.query(
+        `select finished_at, fetched from exhibitor_import_runs
+          where status = 'success' order by finished_at desc limit 1`);
+
+      const verified = run ? run.finished_at : null;
+      const asOf = { source: 'official event exhibitor list', last_verified: verified,
+        exhibitors_in_list: run ? run.fetched : null };
+
+      if (!rows.length) {
+        /* The important distinction. Absent from the exhibitor list is a
+           verified negative; it is NOT "we could not find a booth". */
+        return compact({
+          query: name || `company_id ${companyId}`,
+          event: ev ? ev.name : undefined,
+          attending: false,
+          status: 'not_in_official_list',
+          statement: `not present in the latest official exhibitor list`,
+          as_of: asOf,
+        });
+      }
+
+      return {
+        event: ev ? ev.name : undefined,
+        as_of: asOf,
+        matches: rows.map((r) => {
+          const booths = (r.booths || []).filter(Boolean);
+          const listed = r.attendance_status === 'listed';
+          return compact({
+            name: r.source_name,
+            company_id: r.company_id,
+            crm_link: r.company_id ? undefined : 'not linked to a CRM company',
+            attending: listed,
+            status: listed
+              ? (booths.length ? 'listed_with_booth' : 'listed_no_booth_yet')
+              : 'retired_from_list',
+            booths: booths.length ? booths : undefined,
+            statement: listed
+              ? (booths.length
+                ? `listed as an exhibitor, booth ${booths.join(', ')}`
+                : 'listed as an exhibitor, but no booth assignment is published yet')
+              : 'appeared in an earlier version of the exhibitor list, but is not in the latest one',
+            last_verified: r.last_verified_at,
+            retired_at: r.retired_at,
+          });
+        }),
+      };
+    },
+  },
 
   search_companies: {
     description:

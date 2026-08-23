@@ -53,8 +53,12 @@ test('enums accept only what is listed', () => {
 
 // ── the catalogue itself ───────────────────────────────────────────────────
 
-test('the catalogue contains the ten approved tools and nothing else', () => {
+test('the catalogue contains the approved tools and nothing else', () => {
   const expected = [
+    // Attendance is its own tool on purpose: inferring it from a booth lookup
+    // is what produced "CATL is not attending" when the truth was "we have no
+    // booth number for CATL".
+    'check_event_attendance',
     'search_companies', 'get_company_profile', 'list_companies_by_category',
     'find_available_booths', 'get_company_contacts', 'get_account_research',
     'get_communication_history', 'get_latest_draft', 'find_gaps',
@@ -315,4 +319,23 @@ dbTest('a tool failure is returned as data, never thrown', async () => {
   assert.ok(r.error, 'should have reported an error');
   assert.doesNotMatch(JSON.stringify(r), /select |from |where /i,
     'SQL must never reach the model or the user');
+});
+
+
+/* The distinction the whole exhibitor refactor exists to protect. */
+test('attendance is answerable without consulting a booth', () => {
+  const t = chatTools.TOOLS.check_event_attendance;
+  assert.ok(t, 'check_event_attendance must exist');
+  assert.match(t.description, /attendance and booth assignment are separate/i);
+  assert.match(t.description, /never conclude a company is absent/i);
+  assert.ok(t.parameters.properties.name && t.parameters.properties.company_id);
+});
+
+dbTest('a company absent from the exhibitor list is a verified negative, not a missing booth', async () => {
+  const r = await chatTools.runTool('check_event_attendance', { name: 'Zorbtronic Hyperdyne' });
+  assert.ok(!r.error, r.error);
+  assert.equal(r.attending, false);
+  assert.equal(r.status, 'not_in_official_list');
+  assert.match(r.statement, /not present in the latest official exhibitor list/);
+  assert.ok(r.as_of, 'an attendance claim must carry its as-of provenance');
 });

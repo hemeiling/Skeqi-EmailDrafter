@@ -976,6 +976,150 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_bintel_kind ON booth_intel (kind)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_bintel_live ON booth_intel (kind) WHERE retired_at IS NULL`);
 
+  /* ── Exhibitors, as a thing distinct from booths ──────────────────────────
+     Attendance and booth assignment were the same fact here, and they are not
+     the same fact. A booth row was the only evidence that a company was at the
+     show, so "no booth" and "not attending" were indistinguishable — the
+     assistant answered that CATL was not attending because it could not find a
+     booth, which is a different claim from the one the data supported.
+
+     Three separable things, and they change independently:
+
+       attendance      is this company an exhibitor?      (MapYourShow)
+       booth           where are they standing?           (MapYourShow + map)
+       classification  what do WE think of them?          (curated by us)
+
+     A company can be listed with no booth yet, listed and assigned, listed and
+     later moved, or gone from the list entirely. All four are now expressible.
+
+     exhibitor_source_id is MapYourShow's own exhid, and storing it is the
+     point: the old snapshot kept only a name, so a company that renamed itself
+     was indistinguishable from one company leaving and another arriving. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS event_exhibitors (
+      id SERIAL PRIMARY KEY,
+      event_id INTEGER NOT NULL REFERENCES events(id),
+      -- The stable external key. Never generated here, never reused.
+      exhibitor_source_id TEXT NOT NULL,
+      -- Verbatim from the source, so a rename is visible as a rename.
+      source_name TEXT NOT NULL,
+      name_key TEXT,
+      -- NULL means "not confidently matched", never "no company".
+      company_id INTEGER REFERENCES companies(id),
+      match_method TEXT,
+      match_confidence TEXT,
+      match_note TEXT,
+      /* listed  — present in the most recent authoritative pull
+         retired — was present before, absent now. NOT deleted: a company that
+                   withdraws is still a company we may have emailed about the
+                   show, and the record of having listed them is history. */
+      attendance_status TEXT NOT NULL DEFAULT 'listed',
+      hall TEXT,
+      source TEXT NOT NULL DEFAULT 'mapyourshow',
+      source_version TEXT,
+      first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+      -- What "as of" means when the assistant quotes attendance.
+      last_verified_at TIMESTAMPTZ DEFAULT NOW(),
+      retired_at TIMESTAMPTZ,
+      UNIQUE (event_id, exhibitor_source_id)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_exh_event ON event_exhibitors (event_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_exh_company ON event_exhibitors (company_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_exh_name_key ON event_exhibitors (name_key)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_exh_status ON event_exhibitors (attendance_status)`);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_exh_listed ON event_exhibitors (event_id) WHERE attendance_status = 'listed'`);
+
+  /* The booth numbers the authoritative source currently gives an exhibitor.
+     Separate from booth_map_booths, which holds the floor-plan geometry and
+     our own categories: one is "where the organiser says they are", the other
+     is "what our map draws". Keeping them apart is what lets the assistant say
+     "listed, but we have no booth for them" without inventing either half. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS exhibitor_booths (
+      id SERIAL PRIMARY KEY,
+      exhibitor_id INTEGER NOT NULL REFERENCES event_exhibitors(id) ON DELETE CASCADE,
+      booth_number TEXT NOT NULL,
+      hall TEXT,
+      source_version TEXT,
+      first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+      last_verified_at TIMESTAMPTZ DEFAULT NOW(),
+      -- A booth an exhibitor no longer holds is retired, not deleted: it may
+      -- be the booth quoted in an email somebody already sent.
+      retired_at TIMESTAMPTZ,
+      UNIQUE (exhibitor_id, booth_number)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_exhbooth_number ON exhibitor_booths (booth_number)`);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_exhbooth_live ON exhibitor_booths (exhibitor_id) WHERE retired_at IS NULL`);
+
+  /* The map's booth rows learn which exhibitor they belong to, and whether the
+     authoritative source still agrees that this company is standing there.
+     Added rather than replaced: the geometry, categories and curated prose in
+     booth_map_booths are still the only copy of that work. */
+  await pool.query(`ALTER TABLE booth_map_booths ADD COLUMN IF NOT EXISTS exhibitor_id INTEGER REFERENCES event_exhibitors(id)`);
+  /* current      — the source agrees this company is at this booth
+     reassigned   — the source puts a DIFFERENT company here now
+     vacated      — the booth is no longer in the source's floor plan
+     unverified   — not yet checked against a pull */
+  await pool.query(`ALTER TABLE booth_map_booths ADD COLUMN IF NOT EXISTS occupant_status TEXT DEFAULT 'unverified'`);
+  await pool.query(`ALTER TABLE booth_map_booths ADD COLUMN IF NOT EXISTS occupant_checked_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE booth_map_booths ADD COLUMN IF NOT EXISTS live_occupant_name TEXT`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bmb_exhibitor ON booth_map_booths (exhibitor_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bmb_occupant ON booth_map_booths (occupant_status)`);
+
+  /* Curated intelligence belongs to a COMPANY, not to a square of carpet.
+     Somebody decided Comau is a direct competitor; they did not decide that
+     booth 3626 is. When the organiser gives 3626 to INTECELLS, inheriting the
+     classification would silently label an unrelated company a competitor —
+     so these columns carry the judgement to the exhibitor, and anything that
+     can no longer be placed confidently goes to review rather than being
+     guessed at. */
+  await pool.query(`ALTER TABLE booth_intel ADD COLUMN IF NOT EXISTS exhibitor_id INTEGER REFERENCES event_exhibitors(id)`);
+  await pool.query(`ALTER TABLE booth_intel ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES companies(id)`);
+  await pool.query(`ALTER TABLE booth_intel ADD COLUMN IF NOT EXISTS subject_name TEXT`);
+  /* ok           — the classification still points at the company it was made about
+     needs_review — the booth changed hands, or the company left the show
+     A human decides; nothing here moves a judgement on its own. */
+  await pool.query(`ALTER TABLE booth_intel ADD COLUMN IF NOT EXISTS review_status TEXT DEFAULT 'ok'`);
+  await pool.query(`ALTER TABLE booth_intel ADD COLUMN IF NOT EXISTS review_reason TEXT`);
+  await pool.query(`ALTER TABLE booth_intel ADD COLUMN IF NOT EXISTS review_flagged_at TIMESTAMPTZ`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bintel_exhibitor ON booth_intel (exhibitor_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bintel_review ON booth_intel (review_status) WHERE review_status <> 'ok'`);
+
+  /* One row per exhibitor refresh. The counts are what make a rerun legible,
+     and `aborted` is what makes an expired cookie visible instead of looking
+     like nine hundred companies withdrawing overnight. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS exhibitor_import_runs (
+      id SERIAL PRIMARY KEY,
+      event_id INTEGER REFERENCES events(id),
+      source TEXT NOT NULL DEFAULT 'mapyourshow',
+      source_version TEXT,
+      dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      fetched INTEGER DEFAULT 0,
+      created INTEGER DEFAULT 0,
+      updated INTEGER DEFAULT 0,
+      unchanged INTEGER DEFAULT 0,
+      retired INTEGER DEFAULT 0,
+      revived INTEGER DEFAULT 0,
+      booths_added INTEGER DEFAULT 0,
+      booths_retired INTEGER DEFAULT 0,
+      matched INTEGER DEFAULT 0,
+      unmatched INTEGER DEFAULT 0,
+      ambiguous INTEGER DEFAULT 0,
+      intel_flagged INTEGER DEFAULT 0,
+      warnings JSONB,
+      error_message TEXT,
+      started_at TIMESTAMPTZ DEFAULT NOW(),
+      finished_at TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_eir_started ON exhibitor_import_runs (started_at DESC)`);
+
   /* One row per import. Without this, "is the booth data current?" is only
      answerable by reading rows and guessing, and a partial or failed sync
      leaves no trace at all. Counts are what make a rerun's effect legible. */
