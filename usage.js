@@ -63,19 +63,105 @@ const PROVIDER_DEFAULT = {
   bailian:   { in: 0.19, out: 1.13, cr: 0.019, cw: 0, est: true },
 };
 
-// Pricing loaded from the DB (ai_model_pricing) at startup overrides the seed
-// above. That table is keyed (provider, model), so the key is built the same way.
+/* Pricing loaded from the DB (ai_model_pricing) overrides the seed above. That
+   table is keyed (provider, model), so the key is built the same way.
+
+   It used to load once, at boot. The comment above the `est` field claimed
+   that confirming a price is a data change rather than a deploy, and the data
+   half was true — the running process simply never read it again. Correcting
+   qwen3.6-flash's flag in the table changed nothing until Render restarted, so
+   every turn in between recorded an unconfirmed rate as confirmed. A price
+   card that can only be corrected by redeploying is a price card nobody will
+   correct.
+
+   So the table is now reloaded behind a TTL. Deliberately not a subscription,
+   a NOTIFY listener or a dedicated connection: this is ten rows that change
+   perhaps twice a year, and the cost of being a few seconds stale is a label,
+   not a billing error. Freshness is bounded by AI_PRICING_TTL_MS. */
+const PRICING_TTL_MS = Number(process.env.AI_PRICING_TTL_MS || 10_000);
+
 let _pricing = null;
+let _pricingLoadedAt = 0;
+let _pricingLoader = null;
+let _pricingInFlight = null;
+
 function setPricingTable(rows) {
   _pricing = {};
   for (const r of rows || []) {
     _pricing[`${r.provider || 'anthropic'}:${r.model}`] = {
       in: Number(r.input_price_per_m), out: Number(r.output_price_per_m),
       cr: Number(r.cache_read_price_per_m || 0), cw: Number(r.cache_write_price_per_m || 0),
-      // Set on the row, so confirming a price is a data change, not a deploy.
+      // Set on the row, so confirming a price really is a data change.
       est: Boolean(r.is_estimated),
     };
   }
+  _pricingLoadedAt = Date.now();
+}
+
+/** How the table is re-read. Injected so usage.js never imports db.js. */
+function setPricingLoader(fn) { _pricingLoader = fn; }
+
+let _warnedRefresh = false;
+/**
+ * Reload the price card if it has gone stale.
+ *
+ * Cheap by construction: one query against ten rows, at most once per TTL, and
+ * concurrent callers share the single in-flight promise rather than stampeding
+ * the database. Awaiting it is optional — a caller that cannot wait can fire
+ * it and let the NEXT event benefit.
+ *
+ * It never rejects and never blanks the table. A failed or empty load keeps
+ * whatever was already loaded: a transient database blip must not silently
+ * reprice every model at the seeded defaults, which is a much worse outcome
+ * than being briefly stale.
+ */
+function refreshPricing({ force = false } = {}) {
+  if (!_pricingLoader) return Promise.resolve(false);
+  /* An empty card does not count as loaded. setPricingTable([]) leaves a card
+     that is present, fresh and useless, and the TTL would then suppress the
+     very load that would fix it — so every model would quietly fall through to
+     the seeded defaults for a full TTL after any empty read. */
+  const loaded = _pricing && Object.keys(_pricing).length > 0;
+  if (!force && loaded && Date.now() - _pricingLoadedAt < PRICING_TTL_MS) {
+    return Promise.resolve(false);
+  }
+  if (_pricingInFlight) return _pricingInFlight;
+
+  _pricingInFlight = Promise.resolve()
+    .then(() => _pricingLoader())
+    .then((rows) => {
+      if (!rows || !rows.length) {
+        /* An empty table is indistinguishable from a query that went wrong,
+           and the safe reading of both is "keep what we have". */
+        _pricingLoadedAt = Date.now();
+        return false;
+      }
+      setPricingTable(rows);
+      return true;
+    })
+    .catch((e) => {
+      if (!_warnedRefresh) {
+        _warnedRefresh = true;
+        console.warn(`[usage] pricing refresh failed (${e.message}) — `
+          + 'continuing on the last known price card.');
+      }
+      // Back off for a full TTL rather than retrying on every event.
+      _pricingLoadedAt = Date.now();
+      return false;
+    })
+    .finally(() => { _pricingInFlight = null; });
+
+  return _pricingInFlight;
+}
+
+/** What the price card looks like right now. Rates and ages only, never keys. */
+function pricingStatus() {
+  return {
+    models: _pricing ? Object.keys(_pricing).length : 0,
+    age_ms: _pricing ? Date.now() - _pricingLoadedAt : null,
+    ttl_ms: PRICING_TTL_MS,
+    loader: Boolean(_pricingLoader),
+  };
 }
 
 // Warn once per unpriced model rather than per request — a misconfigured model
@@ -214,6 +300,12 @@ function round6(x) { return Math.round(x * 1e6) / 1e6; }
 
 // The one instrumentation entry point. Returns the computed cost/savings.
 function recordAiEvent(evt = {}) {
+  /* Not awaited — this function is synchronous and returns the cost, and no
+     caller should wait on a price lookup to finish a request. It keeps the
+     card warm for whatever is recorded next; a caller that needs THIS event to
+     be current awaits refreshPricing() itself, as the chat route does. */
+  refreshPricing();
+
   const feature = FEATURES.includes(evt.feature) ? evt.feature : 'other';
   const outcome = evt.outcome || 'new_ai_call';
   const model = evt.model || null;
@@ -353,6 +445,7 @@ module.exports = {
   recordAiEvent, recordClaudeUsage,
   recordApolloPeopleCall, recordApolloOrgCall,
   getUsage, resetUsage, costFor, setPersist, setPricingTable,
+  setPricingLoader, refreshPricing, pricingStatus, PRICING_TTL_MS,
   PRICING, FEATURES, REUSE_OUTCOMES, WEB_SEARCH_USD_PER_CALL,
   costDetail, costOfAttempts, FEATURES,
 };

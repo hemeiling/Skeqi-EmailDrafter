@@ -59,7 +59,8 @@ const {
 const { contactsToCsv, contactsToXml, contactsToXlsx, safeFilename } = require('./export');
 const { parseCompanyFile } = require('./companyImport');
 const { normalizeFileToImages } = require('./cardBatch');
-const { getUsage, resetUsage, recordAiEvent, setPersist, setPricingTable } = require('./usage');
+const { getUsage, resetUsage, recordAiEvent, setPersist, setPricingTable,
+  setPricingLoader, refreshPricing, pricingStatus } = require('./usage');
 const { activeEmailModel } = require('./emailModel');
 const { listEmailModelChoices, DEFAULT_EMAIL_MODEL_ID } = require('./config');
 const emailSvc = require('./email');
@@ -608,6 +609,12 @@ app.post('/api/chat', async (req, res) => {
        it got as far as the provider, and a feature whose failures are invisible
        looks cheaper and more reliable than it is. `chat` is its own feature so
        it never mixes with email_draft or account_research in Analytics. */
+    /* Awaited, unlike everywhere else. cost_estimated is written onto the row
+       once and never recomputed, so a turn recorded against a stale card keeps
+       the wrong confidence label for good. A no-op unless the card is older
+       than the TTL, and the query behind it reads ten rows. */
+    try { await refreshPricing(); } catch { /* refreshPricing never rejects */ }
+
     const u = result.usage || {};
     recordAiEvent({
       feature: 'chat',
@@ -3747,7 +3754,11 @@ app.get('/api/ai-usage/export.csv', async (req, res) => {
 });
 
 app.get('/api/ai-usage/pricing', async (req, res) => {
-  try { res.json({ ok: true, pricing: await listActivePricing() }); }
+  try {
+    // Forced: someone reading this endpoint is asking what is true now.
+    await refreshPricing({ force: true });
+    res.json({ ok: true, pricing: await listActivePricing(), cache: pricingStatus() });
+  }
   catch (err) { res.status(500).json({ error: 'Failed to load pricing', details: err.message }); }
 });
 
@@ -3858,7 +3869,12 @@ app.post('/api/export-xlsx', async (req, res) => {
 
 initDb()
   .then(async () => {
-    // Load model pricing from the DB so cost is computed from ai_model_pricing.
+    /* Cost is computed from ai_model_pricing. Registering the loader as well
+       as loading once means a price corrected in the table takes effect on the
+       running instance, within AI_PRICING_TTL_MS, instead of waiting for a
+       redeploy — which is how an unconfirmed Qwen rate went on being reported
+       as confirmed after the table already said otherwise. */
+    setPricingLoader(listActivePricing);
     try { setPricingTable(await listActivePricing()); } catch (e) { console.error('pricing load failed:', e.message); }
     initOcrWorker();
     app.listen(PORT, '0.0.0.0', () => {
