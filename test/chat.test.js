@@ -31,6 +31,7 @@ let baseUrl;
 let script = [];
 let received = [];
 let mode = 'script';
+let failingModel = null;
 
 test.before(async () => {
   server = http.createServer((req, res) => {
@@ -42,6 +43,26 @@ test.before(async () => {
       if (mode === 'error') {
         res.writeHead(500, { 'content-type': 'application/json' });
         return res.end(JSON.stringify({ error: 'upstream exploded' }));
+      }
+      /* Only the primary model fails, so the chain has somewhere to fall TO.
+         Keyed on the model in the request body because every entry in the
+         catalogue points at this one stub — the model name is the only thing
+         that distinguishes an attempt on flash from an attempt on plus. */
+      if (mode === 'fail-primary') {
+        const asked = (() => { try { return JSON.parse(body).model; } catch { return null; } })();
+        if (asked === failingModel) {
+          res.writeHead(500, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'primary exploded' }));
+        }
+        const next = script.shift() || { content: 'Fallback answered.' };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({
+          model: asked,
+          choices: [{ message: { role: 'assistant', content: next.content }, finish_reason: 'stop' }],
+          // Deliberately different from the primary's 100/20, so a test can
+          // tell which model's tokens ended up where.
+          usage: { prompt_tokens: 300, completion_tokens: 50 },
+        }));
       }
       if (mode === 'hang') return; // never responds; exercises the timeout
       if (mode === 'empty') {
@@ -78,7 +99,7 @@ test.before(async () => {
 
 test.after(async () => { if (server) await new Promise((r) => server.close(r)); });
 
-test.beforeEach(() => { script = []; received = []; mode = 'script'; });
+test.beforeEach(() => { script = []; received = []; mode = 'script'; failingModel = null; });
 
 const ask = (text, opts = {}) =>
   chat.runChat({ messages: [{ role: 'user', content: text }], ...opts });
@@ -339,4 +360,64 @@ test('suggestions are offered in both languages', () => {
   for (const s of chat.SUGGESTIONS) {
     assert.ok(s.en && s.zh, 'every suggestion needs both languages');
   }
+});
+
+/* ── what a turn cost, and where ───────────────────────────────────────────
+   The assistant is the only feature here whose single turn can span more than
+   one model, and for a while Analytics could not express that: a turn was
+   costed entirely at whichever model answered. Within this chain that is a
+   real error and not a rounding one, because qwen3.8-max lists at ten times
+   qwen3.6-flash. These pin the accounting, not the prices. */
+
+test('a turn reports what each model spent, not just the total', async () => {
+  script = [
+    { tool_calls: toolCall('search_companies', { query: 'acme' }) },
+    { content: 'Found it.' },
+  ];
+  const r = await ask('tell me about acme');
+  assert.equal(r.ok, true, r.error);
+  assert.ok(Array.isArray(r.usage.attempts), 'attempts must be reported');
+  assert.equal(r.usage.attempts.length, 1, 'one model answered, so one attempt');
+  const a = r.usage.attempts[0];
+  assert.equal(a.calls, 2, 'two model calls: the tool request and the answer');
+  assert.equal(a.input_tokens, 200);
+  assert.equal(a.served, true);
+  // The per-model parts must reconcile with the turn total, always.
+  assert.equal(a.input_tokens, r.usage.input_tokens);
+  assert.equal(a.output_tokens, r.usage.output_tokens);
+});
+
+test('a fallback turn keeps each model\'s tokens on its own bill', async () => {
+  const cfg = require('../config');
+  mode = 'fail-primary';
+  failingModel = cfg.CHAT_MODELS.qwen.model;
+  script = [{ content: 'The second model answered.' }];
+
+  const r = await ask('anything');
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.usage.fell_back, true, 'the turn fell back and must say so');
+  assert.equal(r.usage.requested_model, cfg.CHAT_MODELS.qwen.model);
+  assert.notEqual(r.usage.model, r.usage.requested_model,
+    'the serving model must be distinguishable from the requested one');
+
+  const attempts = r.usage.attempts;
+  assert.equal(attempts.length, 2, 'the failed attempt is not erased from the bill');
+  const [first, second] = attempts;
+  assert.equal(first.model, cfg.CHAT_MODELS.qwen.model);
+  assert.equal(first.served, false, 'the primary failed — it did not serve');
+  assert.equal(second.served, true);
+  /* The primary failed before returning usage, so it spent nothing here; the
+     fallback's 300/50 must not be attributed to it either way. */
+  assert.equal(second.input_tokens, 300);
+  assert.equal(second.output_tokens, 50);
+  assert.equal(r.usage.input_tokens, 300, 'turn total is the sum of the parts');
+});
+
+test('a turn that fails on every model still reports its attempts', async () => {
+  mode = 'error';
+  const r = await ask('anything');
+  assert.equal(r.ok, false);
+  assert.ok(Array.isArray(r.usage.attempts), 'a failed turn must still be costable');
+  assert.equal(r.usage.attempts.every((a) => a.served === false), true,
+    'nothing served, so nothing may be marked as having served');
 });

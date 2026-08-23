@@ -725,6 +725,21 @@ async function initDb() {
        Qwen to Claude is indistinguishable from one that chose Claude.
        Nullable: research and older events simply leave it empty. */
     `requested_provider TEXT`,
+    /* The model asked for, alongside `model` (the one that answered) and
+       `requested_provider` (which does not distinguish qwen3.6-flash from
+       qwen3.8-max — they are the same provider). Fallback WITHIN a provider is
+       invisible without this. */
+    `requested_model TEXT`,
+    `fell_back BOOLEAN DEFAULT false`,
+    /* Whether the price card behind cost_usd is confirmed. Stored per event
+       rather than looked up at read time, so a cost computed under an
+       estimated rate stays labelled after the rate is confirmed. */
+    `cost_estimated BOOLEAN DEFAULT false`,
+    /* One turn can be several model calls — tool rounds, and failed attempts
+       that were still billed. This holds the per-model parts so cost can be
+       attributed to the model that actually spent it. Null for single-call
+       features, which are fully described by the columns above. */
+    `model_breakdown JSONB`,
   ]) {
     await pool.query(`ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS ${col}`);
   }
@@ -750,6 +765,10 @@ async function initDb() {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_ai_pricing_model ON ai_model_pricing (provider, model, effective_start)`);
+  /* Marks a rate we have not yet seen on an invoice. Default false so every
+     existing row keeps its current meaning: the vendor price lists behind the
+     Claude and GPT rows were confirmed when they were seeded. */
+  await pool.query(`ALTER TABLE ai_model_pricing ADD COLUMN IF NOT EXISTS is_estimated BOOLEAN DEFAULT false`);
   await seedAiModelPricing();
 
   // Strategic category carried over from the booth map (available / competitor /
@@ -3493,8 +3512,14 @@ const AI_PRICING_SEED = [
   { provider: 'openai', model: 'gpt-5.6-luna', in: 0.20, out: 1.20, cr: 0.02, cw: 0 },
   { provider: 'openai', model: 'gpt-5.6-terra', in: 1.25, out: 10.00, cr: 0.125, cw: 0 },
   { provider: 'openai', model: 'gpt-5.6-sol', in: 1.75, out: 14.00, cr: 0.175, cw: 0 },
-  // Provisional — see the note in usage.js. Correct here, not in code.
-  { provider: 'bailian', model: 'qwen3.6-flash', in: 0.19, out: 1.13, cr: 0.019, cw: 0 },
+  /* The assistant's chain. Alibaba's published per-token list prices, flagged
+     estimated because we bill against a prepaid Token Plan whose drawdown per
+     token is not the list price — see the note in usage.js. Correct these HERE,
+     in the table, not in code: set is_estimated = false once an invoice
+     confirms a rate and the "estimated" label stops appearing by itself. */
+  { provider: 'bailian', model: 'qwen3.6-flash', in: 0.19, out: 1.13, cr: 0.019, cw: 0, est: true },
+  { provider: 'bailian', model: 'qwen3.7-plus', in: 0.40, out: 1.60, cr: 0.04, cw: 0, est: true },
+  { provider: 'bailian', model: 'qwen3.8-max', in: 2.00, out: 6.00, cr: 0.20, cw: 0, est: true },
 ];
 /* Seeding was check-then-insert, which is not atomic: two processes running
    initDb() at once (a server booting while the test suite runs, say) could
@@ -3527,16 +3552,17 @@ async function seedAiModelPricing() {
   for (const p of AI_PRICING_SEED) {
     await q(`
       INSERT INTO ai_model_pricing
-        (provider, model, input_price_per_m, output_price_per_m, cache_read_price_per_m, cache_write_price_per_m, effective_start)
-      VALUES ($1,$2,$3,$4,$5,$6, DATE '2025-01-01')
+        (provider, model, input_price_per_m, output_price_per_m, cache_read_price_per_m, cache_write_price_per_m, is_estimated, effective_start)
+      VALUES ($1,$2,$3,$4,$5,$6,$7, DATE '2025-01-01')
       ON CONFLICT DO NOTHING
-    `, [p.provider, p.model, p.in, p.out, p.cr, p.cw]);
+    `, [p.provider, p.model, p.in, p.out, p.cr, p.cw, Boolean(p.est)]);
   }
 }
 async function listActivePricing() {
   return q(`
     SELECT provider, model, input_price_per_m, output_price_per_m,
-           cache_read_price_per_m, cache_write_price_per_m, reasoning_price_per_m, currency
+           cache_read_price_per_m, cache_write_price_per_m, reasoning_price_per_m,
+           currency, is_estimated
     FROM ai_model_pricing WHERE effective_end IS NULL ORDER BY model
   `);
 }
@@ -3549,8 +3575,8 @@ async function recordAiUsage(evt) {
        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens,
        cost_usd, currency, tokens_saved_input, tokens_saved_output, cost_saved_usd,
        company_id, contact_id, thread_id, session_id, user_id, response_ms, status, error_message, request_id,
-       web_search_calls, requested_provider)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+       web_search_calls, requested_provider, requested_model, fell_back, cost_estimated, model_breakdown)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
     ON CONFLICT (request_id) DO NOTHING
   `, [
     evt.feature, evt.sub_feature || null, evt.outcome, evt.request_type || null, evt.model || null, evt.provider || 'anthropic',
@@ -3559,6 +3585,8 @@ async function recordAiUsage(evt) {
     evt.company_id || null, evt.contact_id || null, evt.thread_id || null, evt.session_id || null, evt.user_id || null,
     evt.response_ms || null, evt.status || 'success', evt.error_message || null, evt.request_id || null,
     evt.web_search_calls || 0, evt.requested_provider || null,
+    evt.requested_model || null, Boolean(evt.fell_back), Boolean(evt.cost_estimated),
+    evt.model_breakdown ? JSON.stringify(evt.model_breakdown) : null,
   ]);
 }
 
@@ -3839,6 +3867,86 @@ async function aiUsageByModel(filter) {
   `, filter.params);
 }
 
+/**
+ * The AI Assistant, on its own terms.
+ *
+ * A chat turn is not a model call: one turn is a model call, some tools, and
+ * another model call — and if the first model fails, a second model's calls on
+ * top. Every other feature here is one row per call, so the generic breakdown
+ * counts requests and gets the right answer. For chat, requests and turns are
+ * the same number (one row per turn) but the cost inside a row is spread over
+ * several models, which is why cost-by-model reads model_breakdown rather than
+ * the `model` column.
+ */
+/* The SQL lives in these two constants rather than inline so the tests can run
+   the exact text the application runs. A test that retypes a query proves the
+   retyped query works. */
+const CHAT_SUMMARY_SQL = (where) => `
+    SELECT
+      COUNT(*) AS turns,
+      COUNT(*) FILTER (WHERE status = 'error') AS failures,
+      COUNT(*) FILTER (WHERE fell_back) AS fallbacks,
+      COALESCE(SUM(input_tokens),0)::bigint AS input_tokens,
+      COALESCE(SUM(output_tokens),0)::bigint AS output_tokens,
+      COALESCE(SUM(reasoning_tokens),0)::bigint AS reasoning_tokens,
+      COALESCE(SUM(input_tokens+output_tokens),0)::bigint AS total_tokens,
+      COALESCE(SUM(cost_usd),0) AS cost_usd,
+      AVG(response_ms) FILTER (WHERE response_ms IS NOT NULL) AS avg_response_ms,
+      -- One unconfirmed rate anywhere in the range makes the total an estimate.
+      COALESCE(BOOL_OR(cost_estimated), false) AS cost_estimated
+    FROM ai_usage_events
+    WHERE feature = 'chat' AND ${where}
+`;
+
+async function aiChatSummary(filter) {
+  const row = await q1(CHAT_SUMMARY_SQL(filter.sql), filter.params);
+  const n = (x) => Number(x || 0);
+  const turns = n(row.turns);
+  return {
+    turns,
+    failures: n(row.failures),
+    fallbacks: n(row.fallbacks),
+    input_tokens: n(row.input_tokens),
+    output_tokens: n(row.output_tokens),
+    reasoning_tokens: n(row.reasoning_tokens),
+    total_tokens: n(row.total_tokens),
+    cost_usd: n(row.cost_usd),
+    cost_estimated: Boolean(row.cost_estimated),
+    avg_response_ms: row.avg_response_ms != null ? Math.round(Number(row.avg_response_ms)) : null,
+    fallback_rate: turns ? n(row.fallbacks) / turns : 0,
+    failure_rate: turns ? n(row.failures) / turns : 0,
+  };
+}
+
+/**
+ * Chat cost per model, counting attempts that were paid for and thrown away.
+ *
+ * The LEFT JOIN LATERAL is what makes both shapes work in one query: a turn
+ * with a breakdown contributes one row per model it used, a turn without one
+ * (single call, or a row written before this column existed) contributes a
+ * single row that falls back to the flat columns. Neither is double-counted.
+ */
+const CHAT_BY_MODEL_SQL = (where) => `
+    SELECT
+      COALESCE(b->>'model', e.model, '(unknown)') AS model,
+      COALESCE(b->>'provider', e.provider) AS provider,
+      COUNT(*) AS attempts,
+      COUNT(*) FILTER (WHERE b IS NULL OR (b->>'served')::boolean) AS served,
+      COALESCE(SUM(COALESCE((b->>'input_tokens')::bigint, e.input_tokens)),0)::bigint AS input_tokens,
+      COALESCE(SUM(COALESCE((b->>'output_tokens')::bigint, e.output_tokens)),0)::bigint AS output_tokens,
+      COALESCE(SUM(COALESCE((b->>'cost_usd')::numeric, e.cost_usd)),0) AS cost_usd,
+      COALESCE(BOOL_OR(COALESCE((b->>'estimated')::boolean, e.cost_estimated)), false) AS cost_estimated
+    FROM ai_usage_events e
+    LEFT JOIN LATERAL jsonb_array_elements(e.model_breakdown) b ON true
+    WHERE e.feature = 'chat' AND ${where}
+    GROUP BY 1, 2
+    ORDER BY cost_usd DESC, attempts DESC
+`;
+
+async function aiChatByModel(filter) {
+  return q(CHAT_BY_MODEL_SQL(filter.sql), filter.params);
+}
+
 async function aiUsageByUser(filter) {
   return q(`
     SELECT COALESCE(user_id,'(unknown)') AS user_id,
@@ -3866,6 +3974,8 @@ async function aiUsageEvents(filter, opts = {}) {
   const rows = await q(`
     SELECT e.id, e.created_at, e.feature, e.sub_feature, e.outcome, e.request_type, e.status,
            e.model, e.provider, e.input_tokens, e.output_tokens, e.total_tokens, e.cost_usd,
+           -- So a single row in the log can be read as "asked for X, answered by Y".
+           e.requested_model, e.fell_back, e.cost_estimated,
            e.response_ms, e.user_id, e.company_id, e.contact_id, e.error_message,
            c.name AS company_name
     FROM ai_usage_events e LEFT JOIN companies c ON c.id = e.company_id
@@ -4083,6 +4193,7 @@ module.exports = {
   estimateAiSaved, getAiBudget, setAiBudget,
   seedAiModelPricing, listActivePricing, buildPeriodFilter,
   aiUsageKpis, aiUsageTimeseries, aiUsageFeatureBreakdown, aiUsageByModel, aiUsageByUser, aiUsageEvents,
+  aiChatSummary, aiChatByModel, CHAT_SUMMARY_SQL, CHAT_BY_MODEL_SQL,
   // email configuration
   getEmailOrgConfig, saveEmailOrgConfig,
   getEmailUserAccount, getEmailUserSecret, saveEmailUserAccount,

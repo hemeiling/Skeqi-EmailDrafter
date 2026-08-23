@@ -69,6 +69,7 @@ const {
   recordAiUsage, aiUsageTotals, aiUsageByFeature, aiUsageByCompany, estimateAiSaved,
   getAiBudget, setAiBudget, listActivePricing, buildPeriodFilter,
   aiUsageKpis, aiUsageTimeseries, aiUsageFeatureBreakdown, aiUsageByModel, aiUsageByUser, aiUsageEvents,
+  aiChatSummary, aiChatByModel,
   getEmailOrgConfig, saveEmailOrgConfig, getEmailUserAccount, getEmailUserSecret, saveEmailUserAccount,
   getEmailUserPrefs, saveEmailUserPrefs, recordEmailTest, listEmailTests,
   getTaxonomy, getCompanyIntelligence, listCompanyTags, applyCompanyTagSuggestions,
@@ -614,13 +615,22 @@ app.post('/api/chat', async (req, res) => {
       outcome: result.ok ? 'success' : 'error',
       status: result.ok ? 'success' : 'error',
       error_message: result.ok ? null : String(result.error || '').slice(0, 300),
+      // The model that answered, and the one we asked for. Both, because
+      // within Bailian they differ by 10× in price and not at all in provider.
       model: u.model || null,
       provider: u.provider || null,
       requested_provider: u.requested_provider || null,
+      requested_model: u.requested_model || null,
+      fell_back: Boolean(u.fell_back),
       input_tokens: u.input_tokens || 0,
       output_tokens: u.output_tokens || 0,
       cache_read_tokens: u.cache_read_tokens || 0,
       reasoning_tokens: u.reasoning_tokens || 0,
+      /* Every model call the turn made, including tool rounds and any attempt
+         that was billed and then failed. recordAiEvent prices each with its
+         own card and sums them, so a fallback turn costs what it cost rather
+         than what the winning model would have charged for all of it. */
+      attempts: u.attempts || null,
       response_ms: u.response_ms || (Date.now() - started),
       company_id: pageContext && pageContext.companyId ? pageContext.companyId : null,
       contact_id: pageContext && pageContext.contactId ? pageContext.contactId : null,
@@ -3648,7 +3658,12 @@ app.get('/api/ai-usage', async (req, res) => {
     const period = req.query.period || 'all';
     const filter = buildPeriodFilter(period, req.query.from, req.query.to);
     const bucket = req.query.bucket || ((period === 'year' || period === 'all') ? 'month' : 'day');
-    const [kpis, timeseries, byFeature, byModel, byCompany, byUser, budget, todayK, monthK] = await withDeadline(Promise.all([
+    /* The assistant needs its own filter object: aiChatByModel joins laterally
+       against the events table and aliases it, so the period predicate has to
+       be written against that alias rather than a bare column. */
+    const chatFilter = buildPeriodFilter(period, req.query.from, req.query.to, 'e');
+    const [kpis, timeseries, byFeature, byModel, byCompany, byUser, budget, todayK, monthK,
+      chatSummary, chatByModel] = await withDeadline(Promise.all([
       aiUsageKpis(filter),
       aiUsageTimeseries(filter, bucket),
       aiUsageFeatureBreakdown(filter),
@@ -3658,6 +3673,8 @@ app.get('/api/ai-usage', async (req, res) => {
       getAiBudget(),
       aiUsageKpis(buildPeriodFilter('today')),
       aiUsageKpis(buildPeriodFilter('month')),
+      aiChatSummary(filter),
+      aiChatByModel(chatFilter),
     ]));
     const warn = budget.warn_threshold_pct || 80;
     const pct = (used, cap) => (cap ? Math.round((used / cap) * 100) : 0);
@@ -3666,6 +3683,9 @@ app.get('/api/ai-usage', async (req, res) => {
       session: getUsage().ai,
       kpis, timeseries,
       by_feature: byFeature, by_model: byModel, by_company: byCompany, by_user: byUser,
+      // The AI Assistant as its own category — a turn is not a call, and its
+      // cost is spread across the models the turn actually used.
+      chat: { ...chatSummary, by_model: chatByModel },
       budget,
       budget_status: {
         warn_threshold_pct: warn,

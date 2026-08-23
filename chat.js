@@ -238,8 +238,37 @@ async function runChat({ messages, pageContext, modelId } = {}) {
   const toolCalls = [];
   const started = Date.now();
 
+  /* Tokens per MODEL, not just per turn.
+     The flat totals above are what the turn spent; they cannot say what it
+     spent WHERE. When flash burns four tool rounds and then fails, and plus
+     answers, pricing the lot at plus's card overstates the turn — and the
+     models in this chain differ by more than 10× at the top end, so this is
+     not a rounding question. Each attempt keeps its own counters and is
+     costed with its own card. */
+  const attempts = [];
+  const attemptFor = (cfg) => {
+    let a = attempts.find((x) => x.id === cfg.id);
+    if (!a) {
+      a = { id: cfg.id, model: cfg.model, provider: cfg.provider, calls: 0,
+        input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0,
+        served: false };
+      attempts.push(a);
+    }
+    return a;
+  };
+  /* Marks the attempt that produced the answer. Everything before it in the
+     list was paid for and discarded, which is exactly what the dashboard
+     needs to show a fallback honestly. */
+  const settle = (id) => attempts.map((a) => ({ ...a, served: a.id === id }));
+
   for (const id of chain) {
     const cfg = CHAT_MODELS[id];
+    /* Opened BEFORE the first call, not on the first successful one. A model
+       that fails outright returns no usage, and creating its row lazily made
+       it disappear from the bill entirely — the turn then looked like it had
+       only ever tried the model that answered. It spent no tokens, but it did
+       spend a timeout, and a fallback we cannot see is one we cannot cost. */
+    const attempt = attemptFor(cfg);
     const convo = [{ role: 'system', content: SYSTEM_PROMPT }];
     const ctx = contextMessage(pageContext);
     if (ctx) convo.push(ctx);
@@ -256,7 +285,11 @@ async function runChat({ messages, pageContext, modelId } = {}) {
         const r = await callModel(cfg, convo, { tools: budgetLeft > 0 ? tools : null });
 
         if (!r.ok) { lastError = r.error; break; }
-        for (const k of Object.keys(totals)) totals[k] += r.usage[k] || 0;
+        attempt.calls += 1;
+        for (const k of Object.keys(totals)) {
+          totals[k] += r.usage[k] || 0;
+          attempt[k] += r.usage[k] || 0;
+        }
 
         const calls = r.message.tool_calls || [];
         if (!calls.length) {
@@ -270,8 +303,10 @@ async function runChat({ messages, pageContext, modelId } = {}) {
               ...totals,
               provider: r.usage.provider, model: r.usage.model,
               requested_provider: CHAT_MODELS[requestedId].provider,
+              requested_model: CHAT_MODELS[requestedId].model,
               fell_back: id !== requestedId,
               response_ms: Date.now() - started,
+              attempts: settle(id),
             },
           };
         }
@@ -299,13 +334,21 @@ async function runChat({ messages, pageContext, modelId } = {}) {
         : `${cfg.label} error: ${err.message}`;
     }
 
+    attempt.error = lastError || null;
+
     const next = chain[chain.indexOf(id) + 1];
     if (next) console.warn(`[chat] ${cfg.label} failed (${lastError}) — falling back to ${CHAT_MODELS[next].label}`);
     else {
       return {
         ok: false, status: 502, error: lastError,
-        usage: { ...totals, requested_provider: CHAT_MODELS[requestedId].provider,
-          fell_back: chain.length > 1, response_ms: Date.now() - started },
+        /* A turn that failed still cost whatever it spent on the way down the
+           chain. Reporting it as free is how a broken fallback looks cheap. */
+        usage: { ...totals,
+          provider: cfg.provider, model: cfg.model,
+          requested_provider: CHAT_MODELS[requestedId].provider,
+          requested_model: CHAT_MODELS[requestedId].model,
+          fell_back: chain.length > 1, response_ms: Date.now() - started,
+          attempts: settle(null) },
         toolCalls,
       };
     }

@@ -347,7 +347,7 @@ async function loadDashboard(force) {
     company_research: ["公司研究", "🏢"], email_draft: ["邮件起草", "✉️"],
     contact_intel: ["联系人情报", "🧭"], product_match: ["产品匹配", "🔗"],
     attachment_rec: ["附件推荐", "📎"], email_classify: ["邮件分类", "🏷️"],
-    account_research: ["账户研究", "📄"], other: ["其他", "•"],
+    account_research: ["账户研究", "📄"], chat: ["AI 助手", "💬"], other: ["其他", "•"],
   };
   const feats = (usage && usage.by_feature) || [];
   renderRows("dash-recent-ai", feats.slice(0, 4).map((f) => {
@@ -2704,7 +2704,8 @@ document.getElementById("ai-usage-modal").addEventListener("click", (e) => {
 /* ── Detailed AI Usage & Budget modal ── */
 const AI_FEATURE_LABELS = {
   company_research: "Company research", email_draft: "Email drafts", contact_intel: "Contact intelligence",
-  product_match: "Product matching", attachment_rec: "Attachment recs", email_classify: "Email classify", other: "Other",
+  product_match: "Product matching", attachment_rec: "Attachment recs", email_classify: "Email classify",
+  account_research: "Account research", chat: "AI Assistant", other: "Other",
 };
 
 async function openAiUsageModal() {
@@ -7728,7 +7729,8 @@ let _aiuEventsPage = 0;
 let _aiuFeatureFilter = "";
 const AIU_FEATURE_LABELS = {
   company_research: "Company Intelligence", email_draft: "Email Drafting", contact_intel: "Contact Intelligence",
-  product_match: "Product Matching", attachment_rec: "Attachment Recs", email_classify: "Email Classification", other: "Other",
+  product_match: "Product Matching", attachment_rec: "Attachment Recs", email_classify: "Email Classification",
+  account_research: "Account Research", chat: "AI Assistant", other: "Other",
 };
 
 function initAiUsageDashboard() {
@@ -7844,6 +7846,16 @@ function aiuKpiCard(label, value, sub) {
 }
 function usd(x) { return "$" + Number(x || 0).toFixed(2); }
 function usd4(x) { return "$" + Number(x || 0).toFixed(4); }
+/* Two decimal places round a chat turn to $0.00 — the assistant's whole point
+   is that a turn costs a fraction of a cent, and a dashboard that reports it
+   as free is not reporting it. Scales the precision to the number instead. */
+function usdFine(x) {
+  const v = Number(x || 0);
+  if (v === 0) return "$0.00";
+  if (v < 0.01) return "$" + v.toFixed(5);
+  if (v < 1) return "$" + v.toFixed(4);
+  return "$" + v.toFixed(2);
+}
 
 function renderAiUsageDashboard(d) {
   const k = d.kpis || {};
@@ -7855,11 +7867,11 @@ function renderAiUsageDashboard(d) {
   // KPI cards
   html += `<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px;">
     ${aiuKpiCard("Total tokens", fmtTokens(k.total_tokens), `${fmtTokens(k.input_tokens)} in / ${fmtTokens(k.output_tokens)} out`)}
-    ${aiuKpiCard("Total AI cost", usd(k.cost_usd), `${k.new_calls || 0} billable calls`)}
+    ${aiuKpiCard("Total AI cost", usdFine(k.cost_usd), `${k.new_calls || 0} billable calls`)}
     ${aiuKpiCard("Tokens saved", fmtTokens(k.saved_total), usd(k.saved_cost_usd) + " saved")}
     ${aiuKpiCard("AI requests", fmtTokens(k.requests), `${k.new_calls || 0} new · ${k.reuses || 0} reuse`)}
     ${aiuKpiCard("Reuse rate", Math.round((k.reuse_rate || 0) * 100) + "%", "DB/cache-first")}
-    ${aiuKpiCard("Avg cost / call", usd4(k.avg_cost_usd), "per new AI call")}
+    ${aiuKpiCard("Avg cost / call", usdFine(k.avg_cost_usd), "per new AI call")}
     ${aiuKpiCard("Avg latency", k.avg_response_ms != null ? k.avg_response_ms + " ms" : "—", "AI response time")}
     ${aiuKpiCard("Failures", fmtTokens(k.failures), Math.round((k.failure_rate || 0) * 100) + "% fail rate")}
     ${aiuKpiCard("Input tokens", fmtTokens(k.input_tokens), "")}
@@ -7901,17 +7913,56 @@ function renderAiUsageDashboard(d) {
     html += `<tr style="cursor:pointer;" data-aiu-feature="${escapeAttr(f.feature)}">
       <td><strong>${escapeHtml(AIU_FEATURE_LABELS[f.feature] || f.feature)}</strong></td>
       <td>${f.requests}</td><td>${fmtTokens(f.input_tokens)}</td><td>${fmtTokens(f.output_tokens)}</td>
-      <td>${fmtTokens(f.total_tokens)}</td><td>${usd(f.cost_usd)}</td>
+      <td>${fmtTokens(f.total_tokens)}</td><td>${usdFine(f.cost_usd)}</td>
       <td style="color:#059669;">${fmtTokens(f.saved_total)} (${usd(f.saved_cost_usd)})</td>
       <td>${f.avg_response_ms != null ? Math.round(f.avg_response_ms) + " ms" : "—"}</td><td>${fail}%</td></tr>`;
   });
   if (!(d.by_feature || []).length) html += `<tr><td colspan="9" style="color:#9ca3af;">No AI usage in range.</td></tr>`;
   html += `</tbody></table></div>`;
 
+  /* ── AI Assistant ────────────────────────────────────────────────────────
+     Its own block because a chat turn is not a request and does not compare
+     like one. One turn is several model calls; the interesting numbers are how
+     often the chain had to fall back and what the discarded attempts cost,
+     neither of which the generic per-feature row can express.
+     Laid out with auto-fit rather than a fixed column count so it collapses to
+     one column on a phone instead of overflowing. */
+  const chat = d.chat || {};
+  if (chat.turns) {
+    const est = chat.cost_estimated
+      ? ` <span title="Priced from Alibaba's published per-token list rates. Our Bailian deployment bills against a prepaid Token Plan whose drawdown per token is not confirmed, so this is an estimate. Confirm the rate in ai_model_pricing to remove this label." style="font-size:0.62rem;font-weight:600;color:#92400e;background:#fef3c7;border-radius:4px;padding:1px 5px;vertical-align:middle;">EST</span>`
+      : "";
+    const tile = (label, value, note) => `<div style="border:1px solid #e5e7eb;border-radius:10px;padding:10px 12px;">
+        <div style="font-size:0.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:0.03em;">${escapeHtml(label)}</div>
+        <div style="font-size:1.15rem;font-weight:700;color:#111827;margin-top:2px;">${value}</div>
+        ${note ? `<div style="font-size:0.68rem;color:#9ca3af;margin-top:1px;">${note}</div>` : ""}</div>`;
+    const pct = (x) => `${Math.round((Number(x) || 0) * 100)}%`;
+
+    html += `<h3 style="font-size:0.9rem;margin:6px 0 6px;">AI Assistant <span style="font-weight:400;font-size:0.74rem;color:#9ca3af;">(chat turns — one turn may make several model calls)</span></h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px;">
+        ${tile("Chat turns", chat.turns, chat.failures ? `${chat.failures} failed` : "all answered")}
+        ${tile("Total tokens", fmtTokens(chat.total_tokens), `${fmtTokens(chat.input_tokens)} in / ${fmtTokens(chat.output_tokens)} out`)}
+        ${tile("Estimated cost", usdFine(chat.cost_usd) + est, chat.turns ? `${usdFine(chat.cost_usd / chat.turns)} per turn` : "")}
+        ${tile("Fallback rate", pct(chat.fallback_rate), `${chat.fallbacks} of ${chat.turns} turns`)}
+        ${tile("Avg latency", chat.avg_response_ms != null ? `${Math.round(chat.avg_response_ms)} ms` : "—", "per turn, tools included")}
+        ${tile("Errors", pct(chat.failure_rate), `${chat.failures} turn${chat.failures === 1 ? "" : "s"}`)}
+      </div>
+      <div style="overflow-x:auto;margin-bottom:16px;"><table class="intel-matrix-table" style="min-width:560px;"><thead><tr>
+        <th>Assistant model</th><th>Calls</th><th>Served</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>
+        ${(chat.by_model || []).map((m) => `<tr>
+          <td>${escapeHtml(m.model)}${m.cost_estimated ? ` <span style="font-size:0.62rem;color:#92400e;background:#fef3c7;border-radius:4px;padding:0 4px;">EST</span>` : ""}</td>
+          <td>${m.attempts}</td>
+          <td>${m.served}${Number(m.attempts) > Number(m.served) ? ` <span style="color:#9ca3af;font-size:0.72rem;">(${Number(m.attempts) - Number(m.served)} discarded)</span>` : ""}</td>
+          <td>${fmtTokens(Number(m.input_tokens) + Number(m.output_tokens))}</td>
+          <td>${usdFine(m.cost_usd)}</td></tr>`).join("")
+          || '<tr><td colspan="5" style="color:#9ca3af;">—</td></tr>'}
+      </tbody></table></div>`;
+  }
+
   // By model + by company side by side
   html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
     <div><h3 style="font-size:0.9rem;margin:0 0 6px;">By model</h3><table class="intel-matrix-table"><thead><tr><th>Model</th><th>Requests</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>
-      ${(d.by_model || []).map((m) => `<tr><td>${escapeHtml(m.model)}</td><td>${m.requests}</td><td>${fmtTokens(m.total_tokens)}</td><td>${usd(m.cost_usd)}</td></tr>`).join("") || '<tr><td colspan="4" style="color:#9ca3af;">—</td></tr>'}
+      ${(d.by_model || []).map((m) => `<tr><td>${escapeHtml(m.model)}</td><td>${m.requests}</td><td>${fmtTokens(m.total_tokens)}</td><td>${usdFine(m.cost_usd)}</td></tr>`).join("") || '<tr><td colspan="4" style="color:#9ca3af;">—</td></tr>'}
     </tbody></table></div>
     <div><h3 style="font-size:0.9rem;margin:0 0 6px;">Top companies</h3><table class="intel-matrix-table"><thead><tr><th>Company</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>
       ${(d.by_company || []).map((c) => `<tr><td>${escapeHtml(c.company_name || ("#" + c.company_id))}</td><td>${c.new_calls}</td><td>${fmtTokens(c.total_tokens)}</td><td>${usd(c.cost_usd)}</td></tr>`).join("") || '<tr><td colspan="4" style="color:#9ca3af;">—</td></tr>'}
@@ -7985,9 +8036,10 @@ async function loadAiUsageEvents() {
         <td>${escapeHtml(AIU_FEATURE_LABELS[e.feature] || e.feature)}${e.sub_feature ? ` <span style="color:#9ca3af;">/${escapeHtml(e.sub_feature)}</span>` : ""}</td>
         <td>${escapeHtml(e.request_type || e.outcome || "")}</td>
         <td style="color:${statusColor};">${escapeHtml(e.status || "")}</td>
-        <td>${escapeHtml(e.model || "—")}</td>
+        <td>${escapeHtml(e.model || "—")}${e.fell_back && e.requested_model && e.requested_model !== e.model
+          ? `<div style="font-size:0.7rem;color:#b45309;">fell back from ${escapeHtml(e.requested_model)}</div>` : ""}</td>
         <td>${fmtTokens(e.input_tokens)}</td><td>${fmtTokens(e.output_tokens)}</td><td>${fmtTokens(e.total_tokens)}</td>
-        <td>${usd4(e.cost_usd)}</td><td>${e.response_ms != null ? e.response_ms : "—"}</td>
+        <td>${usdFine(e.cost_usd)}${e.cost_estimated ? '<span style="font-size:0.6rem;color:#92400e;"> est</span>' : ""}</td><td>${e.response_ms != null ? e.response_ms : "—"}</td>
         <td>${escapeHtml(e.user_id || "—")}</td><td>${escapeHtml(e.company_name || (e.company_id ? "#" + e.company_id : "—"))}</td></tr>`;
     });
     if (!(d.rows || []).length) html += `<tr><td colspan="12" style="color:#9ca3af;">No requests.</td></tr>`;

@@ -30,20 +30,37 @@ const PRICING = {
   'openai:gpt-5.6-luna':         { in: 0.20, out: 1.20, cr: 0.02, cw: 0 },
   'openai:gpt-5.6-terra':        { in: 1.25, out: 10.00, cr: 0.125, cw: 0 },
   'openai:gpt-5.6-sol':          { in: 1.75, out: 14.00, cr: 0.175, cw: 0 },
-  /* PROVISIONAL — $0.19/$1.13 per 1M is from third-party trackers, not from
-     Alibaba's own price list, and the deployment points at a token-plan
-     endpoint where billing may be prepaid rather than per-token. Seeded so
-     Bailian is costed as itself rather than inheriting another vendor's
-     card; correct it in ai_model_pricing once a real invoice confirms. */
-  'bailian:qwen3.6-flash':       { in: 0.19, out: 1.13, cr: 0.019, cw: 0 },
+  /* ESTIMATED — and labelled as such everywhere the number is shown.
+
+     These are Alibaba's PUBLISHED PER-TOKEN LIST prices (Model Studio, checked
+     Aug 2026): flash $0.1875/$1.125, plus $0.40/$1.60, max $2.00/$6.00 per 1M.
+     Flash is carried at the 0.19/1.13 already seeded in ai_model_pricing so
+     the code and the table cannot disagree; the difference is under 2% and is
+     well inside the uncertainty below.
+
+     They are marked estimated because our deployment bills against a prepaid
+     Token Plan, and a Token Plan's drawdown per token is not something the
+     list price establishes. TPM/PTU capacity pricing is a third number again
+     and is deliberately not used here — capacity is not consumption, and
+     dividing one by the other would be inventing a rate rather than reading
+     one. Until an invoice confirms the drawdown, `est: true` follows the
+     number into the event row, the API and the dashboard.
+
+     `est` is a property of the RATE, not of the feature: set is_estimated to
+     false on the ai_model_pricing row once an invoice confirms it and the
+     label disappears on its own. Confirming a price is a data change here,
+     never a deploy. */
+  'bailian:qwen3.6-flash':       { in: 0.19, out: 1.13, cr: 0.019, cw: 0, est: true },
+  'bailian:qwen3.7-plus':        { in: 0.40, out: 1.60, cr: 0.04, cw: 0, est: true },
+  'bailian:qwen3.8-max':         { in: 2.00, out: 6.00, cr: 0.20, cw: 0, est: true },
 };
 // Per-provider last resort. Never cross-provider: an unknown Claude model is
 // guessed at Sonnet's rate, an unknown OpenAI model at Luna's — never at
 // each other's.
 const PROVIDER_DEFAULT = {
-  anthropic: { in: 3.00, out: 15.00, cr: 0.30, cw: 3.75 },
-  openai:    { in: 0.20, out: 1.20, cr: 0.02, cw: 0 },
-  bailian:   { in: 0.19, out: 1.13, cr: 0.019, cw: 0 },
+  anthropic: { in: 3.00, out: 15.00, cr: 0.30, cw: 3.75, est: true },
+  openai:    { in: 0.20, out: 1.20, cr: 0.02, cw: 0, est: true },
+  bailian:   { in: 0.19, out: 1.13, cr: 0.019, cw: 0, est: true },
 };
 
 // Pricing loaded from the DB (ai_model_pricing) at startup overrides the seed
@@ -55,6 +72,8 @@ function setPricingTable(rows) {
     _pricing[`${r.provider || 'anthropic'}:${r.model}`] = {
       in: Number(r.input_price_per_m), out: Number(r.output_price_per_m),
       cr: Number(r.cache_read_price_per_m || 0), cw: Number(r.cache_write_price_per_m || 0),
+      // Set on the row, so confirming a price is a data change, not a deploy.
+      est: Boolean(r.is_estimated),
     };
   }
 }
@@ -81,6 +100,54 @@ function costFor(model, input, output, cacheRead = 0, cacheWrite = 0, provider =
     + ((cacheRead || 0) / 1e6) * (p.cr || 0) + ((cacheWrite || 0) / 1e6) * (p.cw || 0);
 }
 
+/* The same number, plus whether the card behind it is confirmed. A cost the
+   dashboard cannot vouch for should not be displayed as though it can be. */
+function costDetail(model, input, output, cacheRead = 0, cacheWrite = 0, provider = 'anthropic') {
+  return {
+    cost: costFor(model, input, output, cacheRead, cacheWrite, provider),
+    estimated: Boolean(priceFor(model, provider).est),
+  };
+}
+
+/**
+ * Cost of ONE turn that may have taken several model calls.
+ *
+ * A turn is not one request. The assistant calls the model, runs tools, calls
+ * it again — and if the first model fails, everything it spent before failing
+ * is still billed. Charging those tokens at the SERVING model's rate is the
+ * bug this exists to prevent: qwen3.8-max costs nine times qwen3.6-flash, so a
+ * flash turn that fell back to max was being priced at max's card end to end.
+ *
+ * Each attempt is priced with its own model's card and the parts are summed.
+ * Attempts with no usage (a connection that never answered) cost nothing and
+ * are kept anyway, because "we tried it and got nothing" is worth seeing.
+ */
+function costOfAttempts(attempts) {
+  let cost = 0;
+  let estimated = false;
+  const breakdown = [];
+  for (const a of attempts || []) {
+    const d = costDetail(a.model, a.input_tokens, a.output_tokens,
+      a.cache_read_tokens, a.cache_write_tokens, a.provider);
+    cost += d.cost;
+    if (d.estimated) estimated = true;
+    breakdown.push({
+      model: a.model || null,
+      provider: a.provider || null,
+      input_tokens: a.input_tokens || 0,
+      output_tokens: a.output_tokens || 0,
+      cache_read_tokens: a.cache_read_tokens || 0,
+      reasoning_tokens: a.reasoning_tokens || 0,
+      calls: a.calls || 0,
+      cost_usd: round6(d.cost),
+      estimated: d.estimated,
+      // Which one actually produced the answer; the rest were paid for and discarded.
+      served: Boolean(a.served),
+    });
+  }
+  return { cost, estimated, breakdown };
+}
+
 /* The price card of whichever model currently drafts email. Required lazily —
    config.js is cheap, but emailModel.js must not be pulled in from here, since
    it imports this module in turn. */
@@ -98,10 +165,15 @@ const REQUEST_TYPE = {
   db_reuse: 'reuse', cache_hit: 'reuse', ai_avoided: 'reuse', background: 'background',
 };
 
+/* The catalogue. Anything not on this list is coerced to 'other' by
+   recordAiEvent — which is how the AI Assistant spent its first weeks filing
+   itself under 'other' despite passing feature: 'chat' at the call site. The
+   coercion is right (an unknown feature must not create a column out of
+   nowhere); the omission was the bug. */
 const FEATURES = [
   'company_research', 'email_draft', 'contact_intel',
   'product_match', 'attachment_rec', 'email_classify',
-  'account_research', 'other',
+  'account_research', 'chat', 'other',
 ];
 
 // Server-side tool fees that are billed on top of tokens. The Anthropic web
@@ -159,7 +231,18 @@ function recordAiEvent(evt = {}) {
   // Server-side tool fees (e.g. web search) are billed in addition to tokens.
   const searchCalls = evt.web_search_calls || 0;
   const toolCost = reuse ? 0 : searchCalls * WEB_SEARCH_USD_PER_CALL;
-  const cost = (reuse ? 0 : costFor(model, input, output, cacheRead, cacheWrite, provider)) + toolCost;
+
+  /* A caller that made several model calls in one turn passes them all, and
+     each is priced with its own model's card. Without this the whole turn is
+     costed at whichever model happened to answer last, which understates a
+     turn that fell UP the chain and overstates one that fell down. Callers
+     that make a single call pass nothing and are costed exactly as before. */
+  const attempts = Array.isArray(evt.attempts) && evt.attempts.length ? evt.attempts : null;
+  const parts = attempts && !reuse ? costOfAttempts(attempts) : null;
+  const single = reuse ? { cost: 0, estimated: false }
+    : costDetail(model, input, output, cacheRead, cacheWrite, provider);
+  const cost = (parts ? parts.cost : single.cost) + toolCost;
+  const costEstimated = parts ? parts.estimated : single.estimated;
   const savedCost = reuse ? costFor(model, savedIn, savedOut, 0, 0, provider) : 0;
 
   const f = session.by_feature[feature];
@@ -181,6 +264,15 @@ function recordAiEvent(evt = {}) {
       cache_write_tokens: reuse ? 0 : cacheWrite,
       reasoning_tokens: reuse ? 0 : (evt.reasoning_tokens || 0),
       cost_usd: cost, currency: 'USD', web_search_calls: reuse ? 0 : searchCalls,
+      /* Which model was ASKED for as against which answered, and whether the
+         difference cost anything. Fallback frequency is not recoverable from
+         the served model alone: a turn that started on flash and finished on
+         max looks identical to one that was sent to max deliberately. */
+      requested_model: evt.requested_model || null,
+      fell_back: Boolean(evt.fell_back),
+      cost_estimated: costEstimated,
+      // Per-model parts of a multi-call turn, including attempts that failed.
+      model_breakdown: parts ? parts.breakdown : null,
       tokens_saved_input: savedIn, tokens_saved_output: savedOut, cost_saved_usd: savedCost,
       company_id: evt.company_id || null, contact_id: evt.contact_id || null, thread_id: evt.thread_id || null,
       session_id: evt.session_id || null, user_id: evt.user_id || null,
@@ -189,7 +281,7 @@ function recordAiEvent(evt = {}) {
       request_id: evt.request_id || null,
     })).catch(() => { /* never let telemetry break a request */ });
   }
-  return { cost_usd: cost, cost_saved_usd: savedCost, reuse };
+  return { cost_usd: cost, cost_saved_usd: savedCost, reuse, cost_estimated: costEstimated };
 }
 
 /* Backward-compatible shim (email classification calls this).
@@ -262,4 +354,5 @@ module.exports = {
   recordApolloPeopleCall, recordApolloOrgCall,
   getUsage, resetUsage, costFor, setPersist, setPricingTable,
   PRICING, FEATURES, REUSE_OUTCOMES, WEB_SEARCH_USD_PER_CALL,
+  costDetail, costOfAttempts, FEATURES,
 };
