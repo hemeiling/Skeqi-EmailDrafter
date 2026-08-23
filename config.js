@@ -156,17 +156,36 @@ function emailProviderChain(selectedId) {
   return chain.filter(isEmailModelAvailable);
 }
 
-/* ── The assistant's model ─────────────────────────────────────────────────
+/* ── The assistant's models ────────────────────────────────────────────────
    Configured separately from drafting, on purpose. They are different
    workloads with different economics — drafting writes one paragraph from a
    fixed prompt, the assistant runs a tool loop and re-reads every result — and
    sharing a variable would mean retuning one silently moved the other.
 
-   Qwen 3.6 Flash by default, through the same Bailian endpoint and the same
-   OpenAI-compatible client. Thinking stays off: choosing among ten tools and
-   summarising their output is not a reasoning problem, and Qwen bills every
-   reasoning token at the output rate. Benchmark before turning it on. */
+   The chain stays inside Bailian. That is not a preference: a fallback has to
+   be able to do the job it is falling back to, and GPT-5.6 Luna rejects
+   function tools outright when `reasoning_effort` is present —
+
+     Function tools with reasoning_effort are not supported for gpt-5.6-luna
+
+   — so a chain that dropped to GPT produced an HTTP 400 rather than a degraded
+   answer. Live smoke tests hit that on two calls in five. Falling back within
+   one vendor keeps the tool contract identical; the models differ in capability
+   and price, not in dialect.
+
+   Order is smallest-first. The assistant's work is choosing among eleven tools
+   and summarising their output, which qwen3.6-flash handles at about 2.5s and a
+   twentieth of a cent; the larger models exist for the turns it cannot finish,
+   not as a default.
+
+   Every entry is env-configurable so the chain can be retuned without a
+   deploy — and so a model that turns out not to support tool calling can be
+   removed in one line rather than shipped around. */
 const BAILIAN_CHAT_MODEL = process.env.BAILIAN_CHAT_MODEL || 'qwen3.6-flash';
+const BAILIAN_CHAT_FALLBACK_MODELS = String(
+  process.env.BAILIAN_CHAT_FALLBACK_MODELS ?? 'qwen3.7-plus,qwen3.8-max',
+).split(',').map((m) => m.trim()).filter(Boolean);
+
 const CHAT_ENABLE_THINKING = String(process.env.CHAT_ENABLE_THINKING || 'false') === 'true';
 /* A stalled provider must not hold the panel open. Shorter than drafting's:
    a chat reply that takes a minute has already lost the conversation. */
@@ -176,33 +195,95 @@ const CHAT_REQUEST_TIMEOUT_MS = Number(process.env.CHAT_REQUEST_TIMEOUT_MS || 30
    one"; past that the model is usually going in circles. */
 const CHAT_MAX_TOOL_CALLS = Number(process.env.CHAT_MAX_TOOL_CALLS || 6);
 
-const CHAT_MODELS = {
-  qwen: {
-    id: 'qwen', label: 'Qwen 3.6 Flash', provider: 'bailian',
-    model: BAILIAN_CHAT_MODEL, baseUrl: chatCompletionsUrl(BAILIAN_BASE_URL), apiKey: BAILIAN_API_KEY,
-    dialect: { style: 'openai-compatible', maxTokensField: 'max_tokens', reasoningEffort: null,
-               extra: { enable_thinking: CHAT_ENABLE_THINKING } },
-  },
-  gpt: {
-    id: 'gpt', label: 'GPT', provider: 'openai',
-    model: OPENAI_EMAIL_MODEL, baseUrl: chatCompletionsUrl(OPENAI_CHAT_URL), apiKey: OPENAI_API_KEY,
-    dialect: { style: 'openai-compatible', maxTokensField: 'max_completion_tokens', reasoningEffort: OPENAI_EMAIL_REASONING_EFFORT },
+/* The emergency exit, off unless someone turns it on. A cross-provider
+   fallback is worth having when Bailian is unreachable entirely, and is worth
+   NOT having in the normal path: its dialect differs, its price differs, and
+   the reasoning_effort incompatibility above means it needs its own handling
+   rather than inheriting the drafting catalogue's. */
+const CHAT_EMERGENCY_FALLBACK = String(process.env.CHAT_EMERGENCY_FALLBACK || '')
+  .split(',').map((m) => m.trim()).filter(Boolean);
+
+/** One Bailian entry. All of them share the endpoint, the key and the dialect. */
+function bailianChatModel(id, model) {
+  return {
+    id,
+    label: model,
+    provider: 'bailian',
+    model,
+    baseUrl: chatCompletionsUrl(BAILIAN_BASE_URL),
+    apiKey: BAILIAN_API_KEY,
+    dialect: {
+      style: 'openai-compatible',
+      maxTokensField: 'max_tokens',
+      // Qwen has no concept of it, and sending OpenAI's spelling risks a 400.
+      reasoningEffort: null,
+      supportsTools: true,
+      extra: { enable_thinking: CHAT_ENABLE_THINKING },
+    },
+  };
+}
+
+const CHAT_MODELS = {};
+CHAT_MODELS.qwen = bailianChatModel('qwen', BAILIAN_CHAT_MODEL);
+BAILIAN_CHAT_FALLBACK_MODELS.forEach((m, i) => {
+  CHAT_MODELS[`qwen_fallback_${i + 1}`] = bailianChatModel(`qwen_fallback_${i + 1}`, m);
+});
+
+/* GPT and Claude remain available, but only when explicitly named in
+   CHAT_EMERGENCY_FALLBACK. `supportsTools: false` on GPT is the lesson from the
+   400 above: the tool loop must not offer tools to a model that will reject
+   them, and the client reads this flag rather than discovering it at runtime. */
+CHAT_MODELS.gpt = {
+  id: 'gpt', label: 'GPT', provider: 'openai',
+  model: OPENAI_EMAIL_MODEL, baseUrl: chatCompletionsUrl(OPENAI_CHAT_URL), apiKey: OPENAI_API_KEY,
+  dialect: {
+    style: 'openai-compatible',
+    maxTokensField: 'max_completion_tokens',
+    reasoningEffort: OPENAI_EMAIL_REASONING_EFFORT,
+    // Rejects function tools while reasoning_effort is set.
+    supportsTools: false,
   },
 };
+CHAT_MODELS.claude = {
+  id: 'claude', label: 'Claude', provider: 'anthropic',
+  model: CLAUDE_EMAIL_FALLBACK_MODEL, baseUrl: null, apiKey: CLAUDE_API_KEY,
+  dialect: { style: 'anthropic', supportsTools: false },
+};
 
-const DEFAULT_CHAT_MODEL_ID = process.env.DEFAULT_CHAT_MODEL_ID || 'qwen';
+const DEFAULT_CHAT_MODEL_ID = 'qwen';
 
 function isChatModelAvailable(id) {
   const m = CHAT_MODELS[id];
-  return Boolean(m && m.apiKey && m.baseUrl);
+  if (!m || !m.apiKey) return false;
+  return m.dialect.style === 'anthropic' ? true : Boolean(m.baseUrl);
 }
-function isChatConfigured() { return Object.keys(CHAT_MODELS).some(isChatModelAvailable); }
-/* Chosen first, then whatever else is configured. Claude is absent from the
-   catalogue: it is not OpenAI tool-call shaped, and a fallback that cannot
-   call tools would answer confidently with no data rather than failing. */
+function isChatConfigured() { return isChatModelAvailable('qwen'); }
+
+/**
+ * The order the assistant tries models in.
+ *
+ * Bailian first, in configured order; the emergency providers only if someone
+ * has named them. A model that cannot call tools is still worth having last —
+ * it can answer "I could not reach the data" in a sentence rather than the
+ * request failing outright — but it is never reached while a Qwen model works.
+ */
 function chatProviderChain(selectedId) {
-  const first = isChatModelAvailable(selectedId) ? selectedId : DEFAULT_CHAT_MODEL_ID;
-  return [first, ...Object.keys(CHAT_MODELS).filter((id) => id !== first)].filter(isChatModelAvailable);
+  const bailian = ['qwen', ...BAILIAN_CHAT_FALLBACK_MODELS.map((_, i) => `qwen_fallback_${i + 1}`)];
+  const emergency = CHAT_EMERGENCY_FALLBACK
+    .map((name) => (name === 'gpt' || name === 'claude' ? name : null))
+    .filter(Boolean);
+  const ordered = selectedId && bailian.includes(selectedId)
+    ? [selectedId, ...bailian.filter((id) => id !== selectedId)]
+    : bailian;
+  return [...ordered, ...emergency].filter(isChatModelAvailable);
+}
+
+/** What the chain looks like right now, for diagnostics. Never keys or URLs. */
+function describeChatChain() {
+  return chatProviderChain().map((id) => ({
+    id, model: CHAT_MODELS[id].model, provider: CHAT_MODELS[id].provider,
+    tools: CHAT_MODELS[id].dialect.supportsTools !== false,
+  }));
 }
 
 function isApolloConfigured() {
@@ -224,9 +305,9 @@ function isLoginGateConfigured() {
 }
 
 module.exports = {
-  CHAT_MODELS, DEFAULT_CHAT_MODEL_ID, BAILIAN_CHAT_MODEL, CHAT_ENABLE_THINKING,
-  CHAT_REQUEST_TIMEOUT_MS, CHAT_MAX_TOOL_CALLS,
-  isChatModelAvailable, isChatConfigured, chatProviderChain,
+  CHAT_MODELS, DEFAULT_CHAT_MODEL_ID, BAILIAN_CHAT_MODEL, BAILIAN_CHAT_FALLBACK_MODELS,
+  CHAT_ENABLE_THINKING, CHAT_REQUEST_TIMEOUT_MS, CHAT_MAX_TOOL_CALLS, CHAT_EMERGENCY_FALLBACK,
+  isChatModelAvailable, isChatConfigured, chatProviderChain, describeChatChain,
 
   APOLLO_API_KEY,
   CLAUDE_API_KEY,

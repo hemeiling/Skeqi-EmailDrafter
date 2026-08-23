@@ -188,6 +188,109 @@ function renderReport(r, full) {
 
 const TOOLS = {
 
+  get_booth_occupant: {
+    description:
+      'Who is at a given booth NOW, according to the official event floor plan. '
+      + 'Use this for any "who is at booth X", "which company is at X", or "is '
+      + 'company Y still at booth X" question. The booth map we render is a '
+      + 'snapshot and can be out of date; this is the authoritative answer.',
+    parameters: {
+      type: 'object',
+      properties: { booth_number: { type: 'string' } },
+      required: ['booth_number'],
+    },
+    async run(args) {
+      const booth = asText(args.booth_number, 20);
+      if (!booth) return { error: 'booth_number is required' };
+      const eventId = await currentEventId();
+
+      /* The official assignment first. exhibitor_booths is refreshed from the
+         event source; booth_map_booths is our own rendering snapshot. When they
+         disagree the source wins — that ordering is the whole point of this
+         tool, because the snapshot said Comau was at 3626 five months after
+         INTECELLS took it. */
+      const { rows: live } = await pool.query(
+        `select e.source_name, e.company_id, e.attendance_status, e.last_verified_at,
+                e.exhibitor_source_id, c.name company_name
+           from exhibitor_booths b
+           join event_exhibitors e on e.id = b.exhibitor_id
+           left join companies c on c.id = e.company_id
+          where b.booth_number = $1 and b.retired_at is null
+            and e.attendance_status = 'listed'
+            and ($2::int is null or e.event_id = $2)
+          order by e.source_name`, [booth, eventId]);
+
+      // What our own map still shows, kept separate and labelled as history.
+      const { rows: [snapshot] } = await pool.query(
+        `select source_company_name, company_id, category, occupant_status,
+                live_occupant_name, occupant_checked_at, dims, x, y
+           from booth_map_booths
+          where booth_number = $1 and retired_at is null
+            and ($2::int is null or event_id = $2)
+          limit 1`, [booth, eventId]);
+
+      const { rows: [run] } = await pool.query(
+        `select finished_at, fetched from exhibitor_import_runs
+          where status = 'success' order by finished_at desc limit 1`);
+
+      const provenance = compact({
+        source: 'official event floor plan (MapYourShow)',
+        last_verified: run ? run.finished_at : undefined,
+        exhibitors_in_list: run ? run.fetched : undefined,
+      });
+
+      if (!live.length) {
+        /* No current occupant. Say what the snapshot used to show, clearly
+           marked as former — never as "the company at this booth". */
+        return compact({
+          booth: booth,
+          occupied: false,
+          statement: snapshot && snapshot.source_company_name
+            ? `no company is currently assigned to booth ${booth} in the official floor plan`
+            : `booth ${booth} is not assigned in the official floor plan`,
+          former_occupant_on_our_map: snapshot && snapshot.source_company_name
+            ? compact({
+              name: snapshot.source_company_name,
+              note: 'from our own booth-map snapshot, NOT current — this company '
+                + 'is no longer shown at this booth in the official floor plan',
+              snapshot_status: snapshot.occupant_status,
+            })
+            : undefined,
+          size: snapshot ? snapshot.dims : undefined,
+          as_of: provenance,
+        });
+      }
+
+      const changed = snapshot && snapshot.source_company_name
+        && snapshot.occupant_status === 'reassigned';
+
+      return compact({
+        booth: booth,
+        occupied: true,
+        current_occupant: live.map((r) => compact({
+          name: r.source_name,
+          company_id: r.company_id,
+          crm_name: r.company_name,
+          crm_link: r.company_id ? undefined : 'not linked to a CRM company',
+          attending: true,
+        })),
+        statement: `booth ${booth} is assigned to ${live.map((r) => r.source_name).join(', ')}`,
+        /* The previous tenant, only when it actually changed, and explicitly
+           flagged so it can never be read as the current answer. */
+        previous_occupant_on_our_map: changed
+          ? compact({
+            name: snapshot.source_company_name,
+            note: 'PREVIOUS occupant from our booth-map snapshot — no longer at '
+              + 'this booth. Any classification we hold about them applies to '
+              + 'THEM, not to the current occupant.',
+          })
+          : undefined,
+        size: snapshot ? snapshot.dims : undefined,
+        as_of: provenance,
+      });
+    },
+  },
+
   check_event_attendance: {
     description:
       'Whether a company is an exhibitor at the show, and if so where. This is '
@@ -350,9 +453,20 @@ const TOOLS = {
       const company = await db.getCompany(id);
       if (!company) return { found: false, company_id: id };
 
+      /* occupant_status comes from the official floor plan. Without it this
+         returned our snapshot as fact, which is how "Comau is at booth 3626"
+         survived five months after INTECELLS moved in. */
       const { rows: booths } = await pool.query(
-        `select booth_number, category, status, dims, x, y, intro
+        `select booth_number, category, status, dims, x, y, intro,
+                occupant_status, live_occupant_name
            from booth_map_booths where company_id = $1 and retired_at is null`, [id]);
+
+      // What the official floor plan currently assigns this company.
+      const { rows: officialBooths } = await pool.query(
+        `select b.booth_number from exhibitor_booths b
+           join event_exhibitors e on e.id = b.exhibitor_id
+          where e.company_id = $1 and b.retired_at is null
+            and e.attendance_status = 'listed'`, [id]);
       const { rows: intel } = await pool.query(
         `select i.kind, i.reason, i.priority_label, i.background, i.role, i.segments
            from booth_intel i join booth_map_booths b on b.id = i.booth_id
@@ -373,9 +487,20 @@ const TOOLS = {
         zh: company.chinese_name,
         industry: company.industry,
         website: company.website,
+        // Confirmed by the official floor plan, and therefore quotable.
+        current_booths: officialBooths.map((b) => b.booth_number),
         booths: booths.map((b) => compact({
           booth: b.booth_number, category: b.category, status: b.status,
           size: b.dims, intro: snip(b.intro, 300),
+          /* A snapshot row whose booth has changed hands or emptied is
+             history. Named as such so it cannot be quoted as a location. */
+          occupancy: b.occupant_status === 'reassigned'
+            ? `NOT CURRENT — this booth is now assigned to ${b.live_occupant_name || 'another company'}`
+            : b.occupant_status === 'vacated'
+              ? 'NOT CURRENT — this booth is no longer in the official floor plan'
+              : undefined,
+          historical: b.occupant_status === 'reassigned' || b.occupant_status === 'vacated'
+            ? true : undefined,
         })),
         show_classification: intel.map((i) => compact({
           kind: i.kind, why: snip(i.reason || i.background, 300),

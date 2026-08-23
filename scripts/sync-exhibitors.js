@@ -159,7 +159,8 @@ async function main() {
 
     await client.query('COMMIT');
     console.log(`\n  Applied as run #${runId}: ${p.created.length} new, ${p.retired.length} retired, `
-      + `${applied.boothsAdded} booth rows, ${applied.flagged} classifications flagged.`);
+      + `${applied.boothsAdded} booth rows, ${applied.flagged} classifications flagged`
+      + (applied.unflagged ? `, ${applied.unflagged} review flags cleared as disproved` : '') + '.');
     console.log(`  booth occupancy — current ${applied.occupancy.current}, `
       + `reassigned ${applied.occupancy.reassigned}, vacated ${applied.occupancy.vacated}\n`);
   } catch (e) {

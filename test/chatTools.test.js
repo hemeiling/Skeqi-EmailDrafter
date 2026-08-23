@@ -58,7 +58,7 @@ test('the catalogue contains the approved tools and nothing else', () => {
     // Attendance is its own tool on purpose: inferring it from a booth lookup
     // is what produced "CATL is not attending" when the truth was "we have no
     // booth number for CATL".
-    'check_event_attendance',
+    'check_event_attendance', 'get_booth_occupant',
     'search_companies', 'get_company_profile', 'list_companies_by_category',
     'find_available_booths', 'get_company_contacts', 'get_account_research',
     'get_communication_history', 'get_latest_draft', 'find_gaps',
@@ -338,4 +338,66 @@ dbTest('a company absent from the exhibitor list is a verified negative, not a m
   assert.equal(r.status, 'not_in_official_list');
   assert.match(r.statement, /not present in the latest official exhibitor list/);
   assert.ok(r.as_of, 'an attendance claim must carry its as-of provenance');
+});
+
+/* Occupancy questions must come from the official floor plan, not from our
+   rendering snapshot. Production answered "Comau LLC is at booth 3626" from
+   the snapshot for months; the snapshot was not wrong about Comau, but it
+   could not have known about INTECELLS sharing the stand either way. */
+test('get_booth_occupant exists and states its precedence', () => {
+  const t = chatTools.TOOLS.get_booth_occupant;
+  assert.ok(t, 'get_booth_occupant must exist');
+  assert.match(t.description, /official event floor plan/i);
+  assert.match(t.description, /snapshot|out of date/i);
+  assert.equal(t.parameters.required[0], 'booth_number');
+});
+
+/* Shape, not contents. The occupants of a given booth are live data that a
+   scratch test database does not have; what must hold everywhere is that the
+   answer comes from the official assignment and reports EVERY occupant rather
+   than picking one. The contents are asserted in exhibitorSync.test.js against
+   a seeded shared stand. */
+dbTest('booth occupancy is answered from the official assignment', async () => {
+  const r = await chatTools.runTool('get_booth_occupant', { booth_number: '3626' });
+  assert.ok(!r.error, r.error);
+  assert.equal(typeof r.occupied, 'boolean');
+  assert.ok(r.as_of, 'an occupancy claim must carry its provenance');
+  if (r.occupied) {
+    assert.ok(Array.isArray(r.current_occupant),
+      'occupants are a list — a booth can hold several exhibitors');
+  } else {
+    // Never offer the snapshot's company as the current occupant.
+    if (r.former_occupant_on_our_map) {
+      assert.match(r.former_occupant_on_our_map.note, /NOT current/i);
+    }
+  }
+});
+
+dbTest('an unassigned booth is not reported as occupied', async () => {
+  const r = await chatTools.runTool('get_booth_occupant', { booth_number: 'ZZ-NOSUCH' });
+  assert.ok(!r.error, r.error);
+  assert.equal(r.occupied, false);
+  assert.equal(r.current_occupant, undefined);
+});
+
+dbTest('a company profile labels a booth it can no longer vouch for', async () => {
+  const found = await chatTools.runTool('search_companies', { query: 'Zeta Energy', limit: 1 });
+  if (!found.companies.length) return;
+  const p = await chatTools.runTool('get_company_profile', { company_id: found.companies[0].id });
+  for (const b of p.booths || []) {
+    if (b.historical) {
+      assert.match(b.occupancy, /NOT CURRENT/,
+        'a stale booth must be labelled, never offered as a location');
+    }
+  }
+});
+
+test('a model that cannot call tools is never offered them', () => {
+  const config = require('../config');
+  assert.equal(config.CHAT_MODELS.gpt.dialect.supportsTools, false,
+    'GPT-5.6 Luna rejects function tools while reasoning_effort is set');
+  const chain = config.describeChatChain();
+  assert.ok(chain.every((m) => m.provider === 'bailian'),
+    'the normal chain stays inside one vendor so the tool contract is identical');
+  assert.ok(chain.length >= 1 && chain[0].model.includes('qwen'));
 });

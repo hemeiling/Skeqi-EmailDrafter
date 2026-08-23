@@ -346,3 +346,146 @@ if (!PGlite) {
     assert.fail(`PGlite not found at ${PGLITE}`);
   });
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Booth occupancy: several exhibitors can share one stand.
+
+   The first version of this compared one snapshot name against one live name,
+   so whichever exhibitor was written last won and the other looked evicted. It
+   reported that INTECELLS had replaced Comau at booth 3626 when the official
+   floor plan lists BOTH — they share the stand — and it sent Comau's
+   competitor classification to review on that false premise.
+
+   Nine booths at this show are shared. The tests below encode "present among
+   the occupants", not "equal to the occupant".
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+dbTest('a shared stand is not a reassignment', async () => {
+  const db = await freshDb();
+  const c = asClient(db);
+  const eventId = await sync.resolveEvent(c);
+  await db.exec(`
+    insert into booth_map_booths (event_id, booth_number, source_company_name)
+      values (1, '3626', 'Comau LLC');
+    insert into booth_intel (booth_id, kind) values (1, 'competitor_direct');`);
+
+  // The official list puts both companies on booth 3626.
+  const live = [E(1, 'Comau LLC', ['3626']), E(2, 'INTECELLS', ['3626']),
+    ...Array.from({ length: 10 }, (_, i) => E(100 + i, `Base ${i}`))];
+
+  const flags = await sync.planIntelReview(c, live, eventId);
+  assert.deepEqual(flags, [],
+    'Comau is still on that stand, so its classification is still valid');
+
+  await sync.apply(c, await sync.plan(c, live, eventId, TINY), eventId, 'v1', flags);
+  const { rows } = await db.query('select occupant_status, live_occupant_name from booth_map_booths');
+  assert.equal(rows[0].occupant_status, 'current', 'sharing a booth is not being evicted');
+  assert.match(rows[0].live_occupant_name, /Comau LLC/);
+  assert.match(rows[0].live_occupant_name, /INTECELLS/,
+    'both occupants are recorded, so the answer can name both');
+});
+
+dbTest('a genuine replacement is still detected', async () => {
+  const db = await freshDb();
+  const c = asClient(db);
+  const eventId = await sync.resolveEvent(c);
+  await db.exec(`
+    insert into booth_map_booths (event_id, booth_number, source_company_name)
+      values (1, '2802', 'AVILOO Inc.');
+    insert into booth_intel (booth_id, kind) values (1, 'target_customer');`);
+
+  // AVILOO is absent from this booth; somebody else holds it.
+  const live = [E(1, 'Strunk connect automated solutions', ['2802']),
+    ...Array.from({ length: 10 }, (_, i) => E(100 + i, `Base ${i}`))];
+
+  const flags = await sync.planIntelReview(c, live, eventId);
+  assert.equal(flags.length, 1, 'a real replacement must still be flagged');
+  assert.match(flags[0].review_reason, /Strunk/);
+  assert.equal(flags[0].subject_name, 'AVILOO Inc.');
+
+  await sync.apply(c, await sync.plan(c, live, eventId, TINY), eventId, 'v1', flags);
+  const { rows } = await db.query('select occupant_status from booth_map_booths');
+  assert.equal(rows[0].occupant_status, 'reassigned');
+});
+
+dbTest('a vacated booth is not reported as still occupied', async () => {
+  const db = await freshDb();
+  const c = asClient(db);
+  const eventId = await sync.resolveEvent(c);
+  await db.exec(`
+    insert into booth_map_booths (event_id, booth_number, source_company_name)
+      values (1, '1201', 'Aisin World Corp. of America');`);
+  const live = Array.from({ length: 10 }, (_, i) => E(100 + i, `Base ${i}`));
+  await sync.apply(c, await sync.plan(c, live, eventId, TINY), eventId, 'v1', []);
+
+  const { rows } = await db.query(
+    'select occupant_status, live_occupant_name from booth_map_booths');
+  assert.equal(rows[0].occupant_status, 'vacated');
+  assert.equal(rows[0].live_occupant_name, null,
+    'nobody is there, so no name may be offered as the occupant');
+});
+
+dbTest('the new occupant of a replaced booth inherits nothing', async () => {
+  const db = await freshDb();
+  const c = asClient(db);
+  const eventId = await sync.resolveEvent(c);
+  await db.exec(`
+    insert into booth_map_booths (event_id, booth_number, source_company_name)
+      values (1, '6030', 'Zeta Energy');
+    insert into booth_intel (booth_id, kind) values (1, 'ess_ev');`);
+  const live = [E(1, 'Cofan Thermal, Inc.', ['6030']),
+    ...Array.from({ length: 10 }, (_, i) => E(100 + i, `Base ${i}`))];
+  const flags = await sync.planIntelReview(c, live, eventId);
+  await sync.apply(c, await sync.plan(c, live, eventId, TINY), eventId, 'v1', flags);
+
+  const { rows } = await db.query(
+    `select bi.review_status, bi.subject_name, bi.exhibitor_id, e.source_name
+       from booth_intel bi left join event_exhibitors e on e.id = bi.exhibitor_id`);
+  assert.equal(rows[0].review_status, 'needs_review');
+  assert.equal(rows[0].subject_name, 'Zeta Energy');
+  assert.notEqual(rows[0].source_name, 'Cofan Thermal, Inc.',
+    'Cofan Thermal must not acquire an ESS/EV classification by taking the booth');
+});
+
+/* Un-flagging is as dangerous as flagging, in the other direction: clearing a
+   review that is still warranted hides a real problem. It happens only when
+   the corrected data positively shows the subject still at its booth. */
+dbTest('a flag disproved by corrected data is cleared', async () => {
+  const db = await freshDb();
+  const c = asClient(db);
+  const eventId = await sync.resolveEvent(c);
+  await db.exec(`
+    insert into booth_map_booths (event_id, booth_number, source_company_name)
+      values (1, '3626', 'Comau LLC');
+    insert into booth_intel (booth_id, kind, review_status, review_reason, subject_name)
+      values (1, 'competitor_direct', 'needs_review', 'flagged by the single-occupant bug', 'Comau LLC');`);
+
+  const live = [E(1, 'Comau LLC', ['3626']), E(2, 'INTECELLS', ['3626']),
+    ...Array.from({ length: 10 }, (_, i) => E(100 + i, `Base ${i}`))];
+  const flags = await sync.planIntelReview(c, live, eventId);
+  const applied = await sync.apply(c, await sync.plan(c, live, eventId, TINY), eventId, 'v2', flags);
+
+  assert.equal(applied.unflagged, 1);
+  const { rows } = await db.query('select review_status, review_reason from booth_intel');
+  assert.equal(rows[0].review_status, 'ok');
+  assert.equal(rows[0].review_reason, null);
+});
+
+dbTest('a flag for a company that really left is NOT cleared', async () => {
+  const db = await freshDb();
+  const c = asClient(db);
+  const eventId = await sync.resolveEvent(c);
+  await db.exec(`
+    insert into booth_map_booths (event_id, booth_number, source_company_name)
+      values (1, '2604', 'Kautex Textron');
+    insert into booth_intel (booth_id, kind, review_status, review_reason, subject_name)
+      values (1, 'ess_ev', 'needs_review', 'not in the latest list', 'Kautex Textron');`);
+
+  const live = Array.from({ length: 10 }, (_, i) => E(100 + i, `Base ${i}`));
+  const flags = await sync.planIntelReview(c, live, eventId);
+  const applied = await sync.apply(c, await sync.plan(c, live, eventId, TINY), eventId, 'v2', flags);
+
+  assert.equal(applied.unflagged, 0, 'a genuinely absent company stays flagged');
+  const { rows } = await db.query('select review_status from booth_intel');
+  assert.equal(rows[0].review_status, 'needs_review');
+});

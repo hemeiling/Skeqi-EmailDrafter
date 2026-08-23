@@ -249,7 +249,11 @@ async function planIntelReview(client, exhibitors, eventId) {
   const liveByKey = new Map();
   for (const e of exhibitors) {
     liveByKey.set(e.name_key, e);
-    for (const b of e.booths) liveByBooth.set(String(b), e);
+    for (const b of e.booths) {
+      const k = String(b);
+      if (!liveByBooth.has(k)) liveByBooth.set(k, []);
+      liveByBooth.get(k).push(e);
+    }
   }
 
   let rows = [];
@@ -270,12 +274,17 @@ async function planIntelReview(client, exhibitors, eventId) {
   const flag = [];
   for (const r of rows) {
     const mineKey = normalizeNameKey(r.source_company_name);
-    const occupant = liveByBooth.get(String(r.booth_number));
+    const occupants = liveByBooth.get(String(r.booth_number)) || [];
     const stillListed = liveByKey.has(mineKey);
+    /* Only flag when the company we judged is genuinely NOT among the current
+       occupants. Sharing a stand is not a reassignment, and flagging it sent
+       three perfectly good classifications to review. */
+    const stillAtBooth = occupants.some((o) => normalizeNameKey(o.source_name) === mineKey);
 
-    if (occupant && normalizeNameKey(occupant.source_name) !== mineKey) {
+    if (occupants.length && !stillAtBooth) {
       flag.push({ ...r, review_reason:
-        `booth ${r.booth_number} is now listed to "${occupant.source_name}"; `
+        `booth ${r.booth_number} is now listed to `
+        + `${occupants.map((o) => `"${o.source_name}"`).join(', ')}; `
         + `this classification was made about "${r.source_company_name}"`,
         subject_name: r.source_company_name,
         exhibitor: stillListed ? liveByKey.get(mineKey) : null });
@@ -366,27 +375,44 @@ async function apply(client, p, eventId, version, intelFlags) {
   /* Link the map's booths to exhibitors, and record whether the source still
      agrees about who is standing there. Nothing is moved or deleted — the map
      keeps its geometry and its categories; it just learns the truth. */
+  /* A booth can hold SEVERAL exhibitors — co-exhibitors share a stand, and
+     nine of them do at this show. The first version of this kept one row per
+     booth, so whichever exhibitor happened to be written last won and the
+     other looked evicted: it reported Comau as replaced by INTECELLS when both
+     are on the same stand, and flagged Comau's competitor classification for
+     review on that false premise. */
   const liveByBooth = new Map();
-  for (const row of all) for (const b of row.booths) liveByBooth.set(String(b), row);
+  for (const row of all) {
+    for (const b of row.booths) {
+      const k = String(b);
+      if (!liveByBooth.has(k)) liveByBooth.set(k, []);
+      liveByBooth.get(k).push(row);
+    }
+  }
 
   const { rows: mapBooths } = await client.query(
     `select id, booth_number, source_company_name from booth_map_booths
       where event_id = $1 and retired_at is null and source_company_name is not null`, [eventId]);
   let current = 0, reassigned = 0, vacated = 0;
   for (const b of mapBooths) {
-    const occupant = liveByBooth.get(String(b.booth_number));
+    const occupants = liveByBooth.get(String(b.booth_number)) || [];
+    const mineKey = normalizeNameKey(b.source_company_name);
+    // "Still here" means present among the occupants, not identical to one.
+    const mine = occupants.find((o) => normalizeNameKey(o.source_name) === mineKey);
+
     let status;
     let exhibitorId = null;
-    if (!occupant) { status = 'vacated'; vacated++; } else if (
-      normalizeNameKey(occupant.source_name) === normalizeNameKey(b.source_company_name)) {
-      status = 'current'; current++; exhibitorId = idFor.get(occupant.exhibitor_source_id) || null;
+    if (!occupants.length) { status = 'vacated'; vacated++; } else if (mine) {
+      status = 'current'; current++; exhibitorId = idFor.get(mine.exhibitor_source_id) || null;
     } else { status = 'reassigned'; reassigned++; }
+
     await client.query(
       `update booth_map_booths
           set exhibitor_id = $2, occupant_status = $3,
               live_occupant_name = $4, occupant_checked_at = NOW()
         where id = $1`,
-      [b.id, exhibitorId, status, occupant ? occupant.source_name : null]);
+      // Every current occupant, so a shared stand reads as a shared stand.
+      [b.id, exhibitorId, status, occupants.length ? occupants.map((o) => o.source_name).join(' | ') : null]);
   }
 
   /* Classifications: attached to the exhibitor where that is unambiguous,
@@ -404,6 +430,37 @@ async function apply(client, p, eventId, version, intelFlags) {
     flagged++;
   }
 
+  /* Clear a review flag that the corrected data disproves.
+     
+     Narrowly, and only in one direction. A classification is un-flagged when
+     the official floor plan now shows its subject still standing at its booth
+     — which is precisely the case the single-occupant bug got wrong, because
+     sharing a stand read as being evicted from it. A flag raised because the
+     company actually left the show is untouched: that one is still true, and
+     is still a human's to resolve.
+     
+     `subject_name` is the test rather than the booth's own name, because it
+     records who the judgement was about. */
+  let unflagged = 0;
+  const { rows: reviewing } = await client.query(
+    `select bi.id, bi.subject_name, b.booth_number
+       from booth_intel bi join booth_map_booths b on b.id = bi.booth_id
+      where bi.review_status = 'needs_review' and bi.retired_at is null
+        and b.event_id = $1 and bi.subject_name is not null`, [eventId]);
+  const stillFlagged = new Set(intelFlags.map((f) => f.id));
+  for (const r of reviewing) {
+    if (stillFlagged.has(r.id)) continue;
+    const occupants = liveByBooth.get(String(r.booth_number)) || [];
+    const present = occupants.some(
+      (o) => normalizeNameKey(o.source_name) === normalizeNameKey(r.subject_name));
+    if (!present) continue;          // flagged for some other, still-valid reason
+    await client.query(
+      `update booth_intel
+          set review_status = 'ok', review_reason = null, review_flagged_at = null
+        where id = $1`, [r.id]);
+    unflagged++;
+  }
+
   // Everything not flagged is anchored to the company it was made about.
   await client.query(
     `update booth_intel bi
@@ -416,7 +473,7 @@ async function apply(client, p, eventId, version, intelFlags) {
              and ee.name_key = lower(regexp_replace(coalesce(b.source_company_name,''), '\\s+', ' ', 'g'))
       where bi.booth_id = b.id and bi.review_status = 'ok' and bi.retired_at is null`);
 
-  return { boothsAdded, boothsRetired, occupancy: { current, reassigned, vacated }, flagged };
+  return { boothsAdded, boothsRetired, occupancy: { current, reassigned, vacated }, flagged, unflagged };
 }
 
 module.exports = {

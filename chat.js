@@ -132,11 +132,18 @@ async function callModel(cfg, messages, { tools, maxTokens = 1500 } = {}) {
     messages,
     [cfg.dialect.maxTokensField]: maxTokens,
   };
-  if (cfg.dialect.reasoningEffort) body.reasoning_effort = cfg.dialect.reasoningEffort;
   if (cfg.dialect.extra) Object.assign(body, cfg.dialect.extra);
-  if (tools && tools.length) {
+
+  /* Tools and reasoning_effort are mutually exclusive on GPT-5.6 Luna, which
+     answers a request carrying both with an HTTP 400 rather than ignoring one.
+     A model declared unable to call tools is simply never offered them. */
+  const wantsTools = Boolean(tools && tools.length) && cfg.dialect.supportsTools !== false;
+  if (wantsTools) {
     body.tools = tools;
     body.tool_choice = 'auto';
+  }
+  if (cfg.dialect.reasoningEffort && !wantsTools) {
+    body.reasoning_effort = cfg.dialect.reasoningEffort;
   }
 
   const res = await fetchWithTimeout(cfg.baseUrl, {
