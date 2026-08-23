@@ -71,6 +71,9 @@ const {
   getAiBudget, setAiBudget, listActivePricing, buildPeriodFilter,
   aiUsageKpis, aiUsageTimeseries, aiUsageFeatureBreakdown, aiUsageByModel, aiUsageByUser, aiUsageEvents,
   aiChatSummary, aiChatByModel,
+  createChatThread, getChatThread, listChatThreads, listChatMessages, recentChatMessages,
+  addChatMessage, setChatThreadTitle, setChatThreadArchived, deleteChatThread,
+  setChatThreadSummary, chatThreadUsage,
   getEmailOrgConfig, saveEmailOrgConfig, getEmailUserAccount, getEmailUserSecret, saveEmailUserAccount,
   getEmailUserPrefs, saveEmailUserPrefs, recordEmailTest, listEmailTests,
   getTaxonomy, getCompanyIntelligence, listCompanyTags, applyCompanyTagSuggestions,
@@ -82,7 +85,8 @@ const {
   listSkqModules, listSkqSystems, listSkqEquipment
 } = require('./db');
 const { researchCompanyTags } = require('./research');
-const { runChat, SUGGESTIONS } = require('./chat');
+const chat = require('./chat');
+const { runChat, SUGGESTIONS } = chat;
 const { parsePageContext } = require('./chatContext');
 
 const app = express();
@@ -586,6 +590,124 @@ app.get('/api/companies/source-counts', async (req, res) => {
    no write tool in that catalogue — not a guarded one, none — so no prompt can
    reach an action. Everything here is read-only by construction rather than by
    permission check. */
+/* ── assistant conversations ───────────────────────────────────────────────
+   Every route below scopes on reqUser(req) and takes 404 as the answer to
+   "not yours". Today the login gate validates one shared credential, so that
+   identity is the SKQ workspace rather than a person — the UI says "Chat
+   History" and not "my chats" for exactly that reason. The scoping is in
+   place regardless, so introducing real accounts later is an auth change and
+   not a rewrite of this feature.
+
+   A thread id arrives as a string from JSON and goes into a bigint column.
+   Parsed strictly here, once, so no route has to think about it again — and
+   so "12abc" or "1 OR 1=1" is a 400 rather than anything more interesting. */
+function toThreadId(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * Folds turns that have dropped out of the context window into the digest.
+ *
+ * Only past a threshold, and only ever forward: the digest covers everything
+ * up to summary_upto_message_id and the window covers everything after it, so
+ * a turn is in exactly one of them and never in neither.
+ */
+const CHAT_COMPACT_AFTER = 24;
+async function compactThread(user, threadId) {
+  const t = await getChatThread(user, threadId);
+  if (!t || t.message_count < CHAT_COMPACT_AFTER) return;
+  const all = await listChatMessages(user, threadId, { limit: 500 });
+  const keep = chat.MAX_HISTORY;
+  const older = all.slice(0, Math.max(0, all.length - keep));
+  if (!older.length) return;
+  const upto = older[older.length - 1].id;
+  if (t.summary_upto_message_id && Number(t.summary_upto_message_id) >= Number(upto)) return;
+  await setChatThreadSummary(user, threadId, chat.digest(older), upto);
+}
+
+app.get('/api/chat/threads', async (req, res) => {
+  try {
+    const rows = await listChatThreads(reqUser(req), {
+      q: req.query.q || null,
+      archived: req.query.archived === '1' || req.query.archived === 'true',
+      limit: parseInt(req.query.limit, 10) || 40,
+      offset: parseInt(req.query.offset, 10) || 0,
+    });
+    res.json({ ok: true, threads: rows });
+  } catch (err) {
+    console.error('[chat] thread list failed:', err.message);
+    res.status(500).json({ error: 'Could not load conversations.' });
+  }
+});
+
+app.get('/api/chat/threads/:id', async (req, res) => {
+  const id = toThreadId(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Bad conversation id.' });
+  try {
+    const user = reqUser(req);
+    const thread = await getChatThread(user, id);
+    if (!thread) return res.status(404).json({ error: 'Conversation not found.' });
+    const messages = await listChatMessages(user, id, { limit: 200 });
+    res.json({ ok: true, thread, messages });
+  } catch (err) {
+    console.error('[chat] thread read failed:', err.message);
+    res.status(500).json({ error: 'Could not load that conversation.' });
+  }
+});
+
+// Rename, archive and unarchive. One route because they are one row.
+app.patch('/api/chat/threads/:id', async (req, res) => {
+  const id = toThreadId(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Bad conversation id.' });
+  const user = reqUser(req);
+  try {
+    let out = null;
+    if (typeof req.body.title === 'string') {
+      const title = req.body.title.trim();
+      if (!title) return res.status(400).json({ error: 'A name cannot be empty.' });
+      out = await setChatThreadTitle(user, id, title, 'user');
+    }
+    if (typeof req.body.archived === 'boolean') {
+      out = await setChatThreadArchived(user, id, req.body.archived);
+    }
+    if (!out) return res.status(404).json({ error: 'Conversation not found.' });
+    res.json({ ok: true, thread: out });
+  } catch (err) {
+    console.error('[chat] thread update failed:', err.message);
+    res.status(500).json({ error: 'Could not update that conversation.' });
+  }
+});
+
+// Soft. The row and its messages stay; nothing here destroys a conversation.
+app.delete('/api/chat/threads/:id', async (req, res) => {
+  const id = toThreadId(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Bad conversation id.' });
+  try {
+    const gone = await deleteChatThread(reqUser(req), id);
+    if (!gone) return res.status(404).json({ error: 'Conversation not found.' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[chat] thread delete failed:', err.message);
+    res.status(500).json({ error: 'Could not delete that conversation.' });
+  }
+});
+
+// What one conversation cost, read from the usage events already recorded.
+app.get('/api/chat/threads/:id/usage', async (req, res) => {
+  const id = toThreadId(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Bad conversation id.' });
+  try {
+    const user = reqUser(req);
+    if (!await getChatThread(user, id)) return res.status(404).json({ error: 'Conversation not found.' });
+    res.json({ ok: true, usage: await chatThreadUsage(user, id) });
+  } catch (err) {
+    console.error('[chat] thread usage failed:', err.message);
+    res.status(500).json({ error: 'Could not load usage for that conversation.' });
+  }
+});
+
 app.post('/api/chat', async (req, res) => {
   if (!config.isChatConfigured()) {
     return res.status(503).json({ error: 'The assistant is not configured.' });
@@ -597,12 +719,61 @@ app.post('/api/chat', async (req, res) => {
 
   const started = Date.now();
   const pageContext = parsePageContext(req.body && req.body.pageContext);
+  const user = reqUser(req);
 
   try {
+    /* ── which conversation is this? ───────────────────────────────────────
+       A request with no thread_id behaves exactly as it always has, which is
+       what keeps an older client working against this build. A thread_id that
+       is not this user's resolves to nothing and 404s — never 403, which
+       would confirm the row exists. */
+    const askedThread = toThreadId(req.body && req.body.thread_id);
+    let thread = null;
+    if (askedThread) {
+      thread = await getChatThread(user, askedThread);
+      if (!thread) return res.status(404).json({ error: 'Conversation not found.' });
+      if (thread.archived_at) {
+        return res.status(409).json({ error: 'This conversation is archived. Unarchive it to continue.' });
+      }
+    }
+
+    const incoming = Array.isArray(req.body && req.body.messages) ? req.body.messages : [];
+    const latest = incoming.length ? incoming[incoming.length - 1] : null;
+    const question = latest && latest.role === 'user' ? String(latest.content || '').trim() : '';
+    if (!question) return res.status(400).json({ error: 'Ask a question to begin.' });
+
+    /* Where the conversation so far comes from.
+
+       For a KNOWN thread: the database, never the request. The browser's copy
+       is a rendering of the conversation, not the record of it. Reading it
+       back from the client would let an edited transcript be replayed at the
+       model — put words in the assistant's mouth and then ask it to build on
+       them — and would break anyway the moment the same thread is open on a
+       phone and a laptop at once.
+
+       With NO thread, the client's array is used exactly as it always was.
+       That is the pre-threading contract and it stays intact, so an older
+       build of the panel keeps working against this server. Nothing is being
+       protected by refusing it either: a first turn has no stored history to
+       contradict, and anyone who can post here can simply ask the question. */
+    let history = Array.isArray(incoming) && incoming.length
+      ? incoming
+      : [{ role: 'user', content: question }];
+    let summary = null;
+    if (thread) {
+      const prior = await recentChatMessages(user, thread.id, chat.MAX_HISTORY - 1);
+      history = prior.map((m) => ({ role: m.role, content: m.content }))
+        .concat([{ role: 'user', content: question }]);
+      summary = thread.summary || null;
+    }
+
     const result = await runChat({
-      messages: req.body && req.body.messages,
+      messages: history,
       pageContext,
       modelId: req.body && req.body.modelId,
+      summary,
+      // Only ever on the first exchange, and never over a name a human chose.
+      needTitle: !thread || (!thread.title && thread.title_source !== 'user'),
     });
 
     /* Recorded whether it succeeded or not. A failed turn still cost tokens if
@@ -615,10 +786,26 @@ app.post('/api/chat', async (req, res) => {
        than the TTL, and the query behind it reads ten rows. */
     try { await refreshPricing(); } catch { /* refreshPricing never rejects */ }
 
+    /* The thread is created only once the model has actually answered, so a
+       provider outage does not litter the history drawer with empty
+       conversations nobody started. */
+    if (result.ok && !thread) {
+      thread = await createChatThread(user, result.title || chat.fallbackTitle(question));
+    }
+
     const u = result.usage || {};
     recordAiEvent({
       feature: 'chat',
-      sub_feature: (result.toolCalls || []).map((t) => t.name).slice(0, 4).join('+') || 'no_tools',
+      // Ties spend to a conversation. Nullable, and written only here — the
+      // drafting and research events keep leaving it NULL.
+      thread_id: thread ? thread.id : null,
+      /* A refused turn is labelled as such rather than as 'no_tools', so the
+         guard's rate is visible in Analytics. A model that starts refusing
+         often is a model that has stopped calling tools, and that should be
+         findable without reading transcripts. */
+      sub_feature: result.refused
+        ? 'grounding_refused'
+        : ((result.toolCalls || []).map((t) => t.name).slice(0, 4).join('+') || 'no_tools'),
       outcome: result.ok ? 'success' : 'error',
       status: result.ok ? 'success' : 'error',
       error_message: result.ok ? null : String(result.error || '').slice(0, 300),
@@ -649,6 +836,29 @@ app.post('/api/chat', async (req, res) => {
       return res.status(result.status || 502).json({ error: result.error });
     }
 
+    /* Persisted after the answer, both halves together, so a failed turn
+       leaves no orphan question in the transcript. Failures here are logged
+       and swallowed: losing the archive copy of a message is bad, and refusing
+       to show the user an answer they have already paid for is worse. */
+    try {
+      await addChatMessage(user, thread.id, {
+        role: 'user', content: question, page_context: pageContext || null,
+      });
+      await addChatMessage(user, thread.id, {
+        role: 'assistant', content: result.reply,
+        tools_used: (result.toolCalls || []).map((t) => t.name),
+        entities: result.entities && result.entities.length ? result.entities : null,
+        page_context: pageContext || null,
+      });
+      if (result.title && !thread.title) {
+        const named = await setChatThreadTitle(user, thread.id, result.title, 'auto');
+        if (named) thread = named;
+      }
+      await compactThread(user, thread.id);
+    } catch (e) {
+      console.error('[chat] could not persist the turn:', e.message);
+    }
+
     /* Which tools ran is returned so the panel can show what was consulted —
        an assistant that shows its working is easier to trust and much easier
        to debug. Never the arguments or the rows: those are CRM content. */
@@ -656,6 +866,9 @@ app.post('/api/chat', async (req, res) => {
       reply: result.reply,
       consulted: (result.toolCalls || []).map((t) => t.name),
       fell_back: Boolean(u.fell_back),
+      thread_id: thread ? thread.id : null,
+      title: thread ? thread.title : null,
+      entities: result.entities && result.entities.length ? result.entities : undefined,
     });
   } catch (err) {
     console.error('[chat]', err);

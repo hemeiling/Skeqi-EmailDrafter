@@ -746,6 +746,97 @@ async function initDb() {
   // Idempotency: a non-null request_id may appear at most once (multiple NULLs allowed).
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_usage_request_id ON ai_usage_events (request_id)`);
 
+  /* ── Threaded assistant chat ──────────────────────────────────────────────
+     Additive: two new tables and one nullable column elsewhere. Nothing
+     existing is altered, so an old build and a new one can serve the same
+     database — a request without a thread_id still behaves exactly as it did.
+
+     user_id is present from the first row even though the login gate today
+     validates a single shared credential, so every session is the same
+     identity. That is deliberate. The scoping is structurally correct now and
+     becomes materially correct the day real accounts exist, without a rewrite
+     — and the shared identity is itself the marker that separates today's
+     workspace threads from tomorrow's personal ones, which is why there is no
+     separate visibility column here. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS chat_threads (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      title TEXT,
+      /* 'user' once someone renames it, so auto-titling never overwrites a
+         name a human chose. */
+      title_source TEXT,
+      summary TEXT,
+      summary_upto_message_id BIGINT,
+      message_count INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      last_message_at TIMESTAMPTZ,
+      archived_at TIMESTAMPTZ,
+      -- Soft, like every other retirement in this schema.
+      deleted_at TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id BIGSERIAL PRIMARY KEY,
+      thread_id BIGINT NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+      /* Denormalised so an authorisation check never has to trust a join.
+         A message query filters on user_id in the same statement that finds
+         the row, rather than fetching first and checking afterwards. */
+      user_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      tools_used TEXT[],
+      /* Identifiers and display names only — never tool payloads. Enough to
+         re-render a company or booth reference by looking it up fresh. */
+      entities JSONB,
+      page_context JSONB,
+      -- Points at ai_usage_events rather than copying any of it.
+      usage_event_id BIGINT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      deleted_at TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_chat_threads_user
+    ON chat_threads (user_id, archived_at, last_message_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_chat_messages_thread
+    ON chat_messages (thread_id, id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_chat_messages_user
+    ON chat_messages (user_id, created_at DESC)`);
+  /* Search. pg_trgm is created earlier in initDb where available and skipped
+     silently where it is not, so both indexes are attempted the same way:
+     without them search still works, just without an index behind it. */
+  try {
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_chat_threads_title_trgm
+      ON chat_threads USING GIN (title gin_trgm_ops)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_chat_messages_content_trgm
+      ON chat_messages USING GIN (content gin_trgm_ops)`);
+  } catch (e) {
+    console.warn('chat search indexes skipped (pg_trgm unavailable):', e.message);
+  }
+
+  /* Ties a usage event to the conversation that caused it, so cost, tokens,
+     model, fallback and latency can be totalled per thread. Nullable, and
+     written only by the chat route — email_draft and account_research rows
+     keep leaving it NULL and their analytics are untouched. */
+  await pool.query(`ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS thread_id BIGINT`);
+  /* The column already exists on deployed databases, declared INTEGER by an
+     earlier migration and never written to by anything. ADD COLUMN IF NOT
+     EXISTS therefore does nothing there, and the code would go on claiming
+     BIGINT while the table said INTEGER — the sort of quiet disagreement that
+     is discovered years later by a value that does not fit.
+     Widened explicitly. INTEGER to BIGINT loses nothing, and the check keeps
+     it a no-op everywhere it has already been done. */
+  const [threadCol] = await q(
+    `SELECT data_type FROM information_schema.columns
+      WHERE table_name = 'ai_usage_events' AND column_name = 'thread_id'`);
+  if (threadCol && threadCol.data_type === 'integer') {
+    await pool.query(`ALTER TABLE ai_usage_events ALTER COLUMN thread_id TYPE BIGINT`);
+  }
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ai_usage_thread
+    ON ai_usage_events (thread_id) WHERE thread_id IS NOT NULL`);
+
   // Model pricing table — cost is computed from the price ACTIVE at request time
   // and the resulting cost_usd is stored on each event (preserved if prices change).
   await pool.query(`
@@ -3567,6 +3658,172 @@ async function listActivePricing() {
   `);
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   Threaded assistant chat.
+
+   Every function here takes userId and puts it in the WHERE clause of the same
+   statement that finds the row. Not a lookup followed by a check: the two can
+   drift, and the one that gets forgotten is the check. A thread that is not
+   yours is indistinguishable from one that does not exist — these return
+   undefined, and the routes turn that into 404 rather than 403, because 403
+   confirms the row is there.
+
+   Deletion and archiving are soft, like every other retirement in this schema.
+   A conversation someone deletes by accident is recoverable by an operator;
+   one that is gone is gone.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const THREAD_COLS = `id, title, title_source, message_count, created_at, updated_at,
+                     last_message_at, archived_at`;
+
+async function createChatThread(userId, title) {
+  const row = await q1(
+    `INSERT INTO chat_threads (user_id, title, title_source, last_message_at)
+     VALUES ($1, $2, $3, NOW()) RETURNING ${THREAD_COLS}`,
+    [userId, title || null, title ? 'auto' : null]);
+  return row;
+}
+
+/** The thread, or undefined — for any reason, including "not yours". */
+async function getChatThread(userId, threadId) {
+  return q1(
+    `SELECT ${THREAD_COLS}, summary, summary_upto_message_id
+       FROM chat_threads
+      WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+    [threadId, userId]);
+}
+
+/**
+ * The thread list, newest activity first.
+ *
+ * `q` searches titles AND message bodies, because people remember what they
+ * asked far more often than what the thread ended up being called. Matching
+ * messages contribute their thread once, with a snippet.
+ */
+async function listChatThreads(userId, opts = {}) {
+  const params = [userId];
+  let where = `t.user_id = $1 AND t.deleted_at IS NULL`;
+  where += opts.archived ? ` AND t.archived_at IS NOT NULL` : ` AND t.archived_at IS NULL`;
+
+  let snippet = `NULL::text AS snippet`;
+  if (opts.q) {
+    params.push(`%${String(opts.q).slice(0, 120)}%`);
+    const i = params.length;
+    where += ` AND (t.title ILIKE $${i} OR EXISTS (
+                 SELECT 1 FROM chat_messages m
+                  WHERE m.thread_id = t.id AND m.user_id = $1
+                    AND m.deleted_at IS NULL AND m.content ILIKE $${i}))`;
+    snippet = `(SELECT LEFT(m.content, 160) FROM chat_messages m
+                 WHERE m.thread_id = t.id AND m.user_id = $1
+                   AND m.deleted_at IS NULL AND m.content ILIKE $${i}
+                 ORDER BY m.id LIMIT 1) AS snippet`;
+  }
+  const limit = Math.min(100, Math.max(1, opts.limit || 40));
+  const offset = Math.max(0, opts.offset || 0);
+  params.push(limit, offset);
+  return q(
+    `SELECT ${THREAD_COLS.split(',').map((c) => 't.' + c.trim()).join(', ')}, ${snippet}
+       FROM chat_threads t
+      WHERE ${where}
+      ORDER BY t.last_message_at DESC NULLS LAST, t.id DESC
+      LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params);
+}
+
+/** Messages, oldest first. Scoped by user as well as thread, deliberately. */
+async function listChatMessages(userId, threadId, opts = {}) {
+  const limit = Math.min(500, Math.max(1, opts.limit || 200));
+  return q(
+    `SELECT id, role, content, tools_used, entities, page_context, created_at
+       FROM chat_messages
+      WHERE thread_id = $1 AND user_id = $2 AND deleted_at IS NULL
+      ORDER BY id ASC LIMIT $3`,
+    [threadId, userId, limit]);
+}
+
+/** The tail the model is actually shown, oldest-first once reversed. */
+async function recentChatMessages(userId, threadId, limit) {
+  const rows = await q(
+    `SELECT id, role, content FROM chat_messages
+      WHERE thread_id = $1 AND user_id = $2 AND deleted_at IS NULL
+      ORDER BY id DESC LIMIT $3`,
+    [threadId, userId, Math.min(100, Math.max(1, limit || 12))]);
+  return rows.reverse();
+}
+
+async function addChatMessage(userId, threadId, msg) {
+  const row = await q1(
+    `INSERT INTO chat_messages
+       (thread_id, user_id, role, content, tools_used, entities, page_context, usage_event_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, created_at`,
+    [threadId, userId, msg.role, msg.content,
+      msg.tools_used && msg.tools_used.length ? msg.tools_used : null,
+      msg.entities ? JSON.stringify(msg.entities) : null,
+      msg.page_context ? JSON.stringify(msg.page_context) : null,
+      msg.usage_event_id || null]);
+
+  /* Counters on the thread rather than a COUNT(*) per list request: the list
+     is the hottest read here and it must not scan messages to render. */
+  await q(
+    `UPDATE chat_threads
+        SET message_count = message_count + 1, last_message_at = NOW(), updated_at = NOW()
+      WHERE id = $1 AND user_id = $2`,
+    [threadId, userId]);
+  return row;
+}
+
+/** Only ever sets a title; never clears one, and never overrides a human. */
+async function setChatThreadTitle(userId, threadId, title, source) {
+  const clean = String(title || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (!clean) return undefined;
+  return q1(
+    `UPDATE chat_threads SET title = $3, title_source = $4, updated_at = NOW()
+      WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+        AND ($4 = 'user' OR title_source IS DISTINCT FROM 'user')
+      RETURNING ${THREAD_COLS}`,
+    [threadId, userId, clean, source === 'user' ? 'user' : 'auto']);
+}
+
+async function setChatThreadArchived(userId, threadId, archived) {
+  return q1(
+    `UPDATE chat_threads SET archived_at = ${archived ? 'NOW()' : 'NULL'}, updated_at = NOW()
+      WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+      RETURNING ${THREAD_COLS}`,
+    [threadId, userId]);
+}
+
+async function deleteChatThread(userId, threadId) {
+  return q1(
+    `UPDATE chat_threads SET deleted_at = NOW(), updated_at = NOW()
+      WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+      RETURNING id`,
+    [threadId, userId]);
+}
+
+async function setChatThreadSummary(userId, threadId, summary, uptoId) {
+  return q1(
+    `UPDATE chat_threads SET summary = $3, summary_upto_message_id = $4, updated_at = NOW()
+      WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL RETURNING id`,
+    [threadId, userId, summary || null, uptoId || null]);
+}
+
+/** Per-thread cost, from the events already recorded. Nothing is duplicated. */
+async function chatThreadUsage(userId, threadId) {
+  return q1(
+    `SELECT COUNT(*)::int turns,
+            COALESCE(SUM(e.input_tokens),0)::bigint input_tokens,
+            COALESCE(SUM(e.output_tokens),0)::bigint output_tokens,
+            COALESCE(SUM(e.reasoning_tokens),0)::bigint reasoning_tokens,
+            COALESCE(SUM(e.cost_usd),0) cost_usd,
+            COALESCE(BOOL_OR(e.cost_estimated), false) cost_estimated,
+            COUNT(*) FILTER (WHERE e.fell_back)::int fallbacks,
+            AVG(e.response_ms) FILTER (WHERE e.response_ms IS NOT NULL) avg_response_ms
+       FROM ai_usage_events e
+       JOIN chat_threads t ON t.id = e.thread_id
+      WHERE e.thread_id = $1 AND t.user_id = $2 AND t.deleted_at IS NULL`,
+    [threadId, userId]);
+}
+
 async function recordAiUsage(evt) {
   const total = (evt.input_tokens || 0) + (evt.output_tokens || 0);
   await q(`
@@ -4194,6 +4451,9 @@ module.exports = {
   seedAiModelPricing, listActivePricing, buildPeriodFilter,
   aiUsageKpis, aiUsageTimeseries, aiUsageFeatureBreakdown, aiUsageByModel, aiUsageByUser, aiUsageEvents,
   aiChatSummary, aiChatByModel, CHAT_SUMMARY_SQL, CHAT_BY_MODEL_SQL,
+  createChatThread, getChatThread, listChatThreads, listChatMessages, recentChatMessages,
+  addChatMessage, setChatThreadTitle, setChatThreadArchived, deleteChatThread,
+  setChatThreadSummary, chatThreadUsage,
   // email configuration
   getEmailOrgConfig, saveEmailOrgConfig,
   getEmailUserAccount, getEmailUserSecret, saveEmailUserAccount,

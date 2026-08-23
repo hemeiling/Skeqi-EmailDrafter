@@ -98,6 +98,15 @@ test.before(async () => {
   process.env.CLAUDE_MESSAGES_URL = `http://127.0.0.1:${server.address().port}/v1/messages`;
 
   ({ callClaude, describeFetchError, classifyFailure } = require('../accountResearch').__test);
+
+  /* This suite records usage rows and deletes them again afterwards, so the
+     table has to exist. It never created it — it inherited one, because some
+     other suite happened to have run initDb against the same database first.
+     Alphabetically this file runs BEFORE any of them, so on a genuinely fresh
+     database the teardown was deleting from a table nobody had made yet.
+     Invisible for as long as the test database was reused between runs. */
+  const dbGuard = require('./dbGuard');
+  if (dbGuard.available) await require('../db').initDb();
 });
 
 test.after(async () => {

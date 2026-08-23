@@ -126,7 +126,7 @@ async function fetchWithTimeout(url, options, ms) {
  * mode wants the plain one and needs `enable_thinking` sent TOP-LEVEL, which
  * is the detail that silently costs ten times as much when it is wrong.
  */
-async function callModel(cfg, messages, { tools, maxTokens = 1500 } = {}) {
+async function callModel(cfg, messages, { tools, maxTokens = 1500, toolChoice } = {}) {
   const body = {
     model: cfg.model,
     messages,
@@ -140,7 +140,11 @@ async function callModel(cfg, messages, { tools, maxTokens = 1500 } = {}) {
   const wantsTools = Boolean(tools && tools.length) && cfg.dialect.supportsTools !== false;
   if (wantsTools) {
     body.tools = tools;
-    body.tool_choice = 'auto';
+    /* 'required' is how the OpenAI-compatible API is told the model may not
+       answer without calling something. Used only on the grounding retry — as
+       the default it would force a tool call onto "what can you do?", which
+       needs none. */
+    body.tool_choice = toolChoice || 'auto';
   }
   if (cfg.dialect.reasoningEffort && !wantsTools) {
     body.reasoning_effort = cfg.dialect.reasoningEffort;
@@ -215,6 +219,175 @@ function trimHistory(messages) {
   return clean.slice(-MAX_HISTORY);
 }
 
+/* ── grounding ─────────────────────────────────────────────────────────────
+   A system prompt is guidance, not a guarantee.
+
+   Live testing caught the assistant answering "What booth is CATL at?" with a
+   confident, specific, invented booth number and no tool call at all. It does
+   this rarely — the same question answered correctly on the three runs either
+   side of it — which is exactly what makes it dangerous. A salesperson has no
+   way to tell the one wrong answer from the many right ones, and a booth
+   number is the kind of fact that gets acted on immediately.
+
+   So the rule is enforced in the loop rather than requested in the prompt: a
+   question about SKQ data does not get a factual answer unless the model
+   actually consulted something. If it tries, it is asked again with the tool
+   call made mandatory by the API. If it still will not, the turn refuses to
+   make the claim rather than passing memory off as retrieval.
+
+   The classifier is deliberately keyword-driven and deliberately biased. It
+   costs nothing, it cannot itself hallucinate, and where it is wrong it is
+   wrong towards consulting the database, which is the harmless direction. */
+
+/* Questions about the assistant itself, or about the conversation so far, are
+   answered from the conversation. Checked first, and kept narrow — anything
+   that also names SKQ data falls through to the subjects below. */
+var META_QUESTION = new RegExp([
+  '^\\s*(what can you|what do you do|who are you|how do you work|what are you)',
+  '\\b(summar(ise|ize|y)|recap)\\b[^.?]{0,24}\\b(what|our|this|the conversation|we)',
+  '\\b(rewrite|rephrase|reword|shorten|expand|translate)\\b[^.?]{0,24}\\b(that|this|it|your|the (answer|reply))',
+  '\u4f60\u80fd\u505a\u4ec0\u4e48|\u4f60\u662f\u8c01|\u4f60\u4f1a\u505a\u4ec0\u4e48',
+  '(\u603b\u7ed3|\u6982\u62ec)[^\u3002\uff1f]{0,8}(\u4e00\u4e0b|\u6211\u4eec|\u5bf9\u8bdd|\u521a\u624d)',
+  '(\u91cd\u5199|\u6539\u5199|\u7b80\u5316|\u7ffb\u8bd1)[^\u3002\uff1f]{0,8}(\u4e00\u4e0b|\u8fd9\u4e2a|\u90a3\u4e2a|\u521a\u624d)',
+].join('|'), 'i');
+
+/* The subjects that live in our database rather than in a model's memory.
+   English and Chinese both, because half of this CRM is written in Chinese and
+   a guard that reads only one of them protects only half the users. */
+var SKQ_SUBJECT = new RegExp([
+  'booth|floor ?plan|exhibit(or|ors|ing|s)?|attend(ing|ance|ed|s)?',
+  'compan(y|ies)|contacts?|competitors?|customers?|prospects?|accounts?|suppliers?',
+  'email(ed|s)?|outreach|contacted|drafts?|repl(y|ies)|follow[- ]?up',
+  'research|intel(ligence)?|crm|activity|history|records?',
+  '\u5c55\u4f4d|\u5c55\u53f0|\u53c2\u5c55|\u5c55\u4f1a',
+  '\u516c\u53f8|\u8054\u7cfb\u4eba|\u7ade\u4e89\u5bf9\u624b|\u5ba2\u6237|\u4f9b\u5e94\u5546',
+  '\u90ae\u4ef6|\u8054\u7cfb\u8fc7|\u8ddf\u8fdb|\u56de\u590d',
+  '\u8c03\u7814|\u7814\u7a76|\u60c5\u62a5|\u8bb0\u5f55|\u5386\u53f2',
+].join('|'), 'i');
+
+/**
+ * Does this question have to be answered from our data rather than from memory?
+ *
+ * False for anything conversational; true whenever it names something the
+ * database is authoritative about.
+ */
+function needsGrounding(text) {
+  var q = String(text || '');
+  if (!q.trim()) return false;
+  if (META_QUESTION.test(q)) return false;
+  return SKQ_SUBJECT.test(q);
+}
+
+/** What the assistant says instead of guessing. Contains no claim at all. */
+function groundingRefusal(zh) {
+  return zh
+    ? '\u6211\u65e0\u6cd5\u5728 SKQ \u6570\u636e\u4e2d\u6838\u5b9e\u8fd9\u4e2a\u95ee\u9898\uff0c\u56e0\u6b64\u4e0d\u80fd\u51ed\u5370\u8c61\u4f5c\u7b54\u3002'
+      + '\u8bf7\u6362\u4e00\u79cd\u95ee\u6cd5\uff0c\u6216\u6307\u660e\u5177\u4f53\u7684\u516c\u53f8\u3001\u5c55\u4f4d\u53f7\u6216\u8054\u7cfb\u4eba\u3002'
+    : 'I could not ground that in SKQ data, and I will not answer it from memory — '
+      + 'a confident guess about a booth, a company or an email history is worse than no answer. '
+      + 'Name the specific company, booth number or contact and I will look it up.';
+}
+
+/** Rough on purpose: this only picks which refusal string to use. */
+function looksChinese(text) { return /[\u4e00-\u9fff]/.test(String(text || '')); }
+
+/* ── what a turn was ABOUT ─────────────────────────────────────────────────
+   Enough to re-render a reopened conversation, and no more.
+
+   Identifiers and display names are kept; tool payloads are not. A stored
+   result is a snapshot, and a snapshot of CRM data is exactly the thing that
+   goes stale and then gets quoted back as current — the failure this
+   assistant has already had once, over a booth. Keeping the ID means a
+   reopened thread looks the company up again and shows what is true today.
+
+   Bounded, because a broad search can return hundreds of rows and none of
+   them belong in a message record. */
+var ENTITY_LIMIT = 24;
+
+function collectEntities(result, into) {
+  if (!result || typeof result !== 'object' || into.length >= ENTITY_LIMIT) return;
+  if (Array.isArray(result)) {
+    for (const item of result) collectEntities(item, into);
+    return;
+  }
+  const push = (type, id, name) => {
+    if (id == null && !name) return;
+    if (into.length >= ENTITY_LIMIT) return;
+    const key = type + ':' + (id != null ? id : name);
+    if (into.some((e) => e.key === key)) return;
+    into.push({ key, type, id: id != null ? id : undefined, name: name || undefined });
+  };
+  if (result.company_id != null || result.crm_name || result.company_name) {
+    push('company', result.company_id, result.crm_name || result.company_name || result.name);
+  }
+  if (result.booth || result.booth_number) push('booth', null, String(result.booth || result.booth_number));
+  if (result.contact_id != null) push('contact', result.contact_id, result.contact_name || result.name);
+  for (const v of Object.values(result)) {
+    if (v && typeof v === 'object') collectEntities(v, into);
+  }
+}
+
+/* ── the title ────────────────────────────────────────────────────────────
+   Asked for inline, on the turn that was going to happen anyway. A dedicated
+   model call to name a conversation would double the request count of every
+   first message to save nothing a salesperson would notice.
+
+   Fragile by nature — a model asked for an out-of-band line will sometimes
+   not produce one — so the parser is strict and the fallback is deterministic.
+   A thread never goes untitled because a model was creative. */
+const TITLE_MARK = /^\s*TITLE:\s*(.{1,80}?)\s*$/im;
+
+const TITLE_INSTRUCTION = `
+NAMING THIS CONVERSATION
+This is the first exchange in a new conversation. Begin your reply with a
+single line of the form:
+TITLE: <three to six words naming the topic>
+Then a blank line, then your answer as normal.
+Name the SUBJECT, not the action: "Battery Show competitors", "CATL outreach
+history", "Available booths near CATL". Never mention that you were asked for
+a title, and never refer to the title again.`;
+
+/** Pulls the title line out of a reply, returning the reply without it. */
+function extractTitle(reply) {
+  const m = String(reply || '').match(TITLE_MARK);
+  if (!m) return { reply: reply, title: null };
+  return {
+    reply: String(reply).replace(TITLE_MARK, '').replace(/^\s*\n/, '').trim(),
+    title: m[1].replace(/^["'\u201c\u2018]|["'\u201d\u2019]$/g, '').trim() || null,
+  };
+}
+
+/** When the model does not name it, the question does. */
+function fallbackTitle(text) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return 'New chat';
+  if (clean.length <= 48) return clean;
+  const cut = clean.slice(0, 48);
+  const space = cut.lastIndexOf(' ');
+  return (space > 24 ? cut.slice(0, space) : cut) + '…';
+}
+
+/**
+ * A compact digest of turns that have fallen out of the context window.
+ *
+ * Built from the messages themselves rather than by asking a model to
+ * summarise them. That is a deliberate trade: an LLM summary reads better, and
+ * it can also quietly invent a fact which then persists as context for every
+ * later turn in the thread. A digest cannot say anything that was not said.
+ * If this proves too blunt, the upgrade is a summarising call — but it should
+ * be a decision, not a default.
+ */
+function digest(messages) {
+  const parts = [];
+  for (const m of messages) {
+    const who = m.role === 'user' ? 'Asked' : 'Answered';
+    const text = String(m.content || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (text) parts.push(`${who}: ${text}`);
+  }
+  const out = parts.join('\n');
+  return out.length > 900 ? out.slice(0, 900) + '…' : out;
+}
+
 /**
  * Runs one turn: model, tools, model again, until it answers or the budget runs out.
  *
@@ -223,7 +396,7 @@ function trimHistory(messages) {
  * made four tool calls cost four completions and reporting only the last one
  * would understate it fourfold.
  */
-async function runChat({ messages, pageContext, modelId } = {}) {
+async function runChat({ messages, pageContext, modelId, summary, needTitle } = {}) {
   const chain = chatProviderChain(modelId || DEFAULT_CHAT_MODEL_ID);
   if (!chain.length) {
     return { ok: false, error: 'The assistant is not configured.', status: 503 };
@@ -234,6 +407,7 @@ async function runChat({ messages, pageContext, modelId } = {}) {
 
   const requestedId = chain[0];
   const tools = chatTools.toolSchemas();
+  const entities = [];
   const totals = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0 };
   const toolCalls = [];
   const started = Date.now();
@@ -245,6 +419,13 @@ async function runChat({ messages, pageContext, modelId } = {}) {
      models in this chain differ by more than 10× at the top end, so this is
      not a rounding question. Each attempt keeps its own counters and is
      costed with its own card. */
+  /* Set when the question is about SKQ data. The turn may not end with a
+     factual answer while this is true and nothing has been consulted. */
+  const mustGround = needsGrounding(
+    (history.filter((m) => m.role === 'user').pop() || {}).content);
+  let forceTools = false;
+  let groundingRetried = false;
+
   const attempts = [];
   const attemptFor = (cfg) => {
     let a = attempts.find((x) => x.id === cfg.id);
@@ -269,7 +450,17 @@ async function runChat({ messages, pageContext, modelId } = {}) {
        only ever tried the model that answered. It spent no tokens, but it did
        spend a timeout, and a fallback we cannot see is one we cannot cost. */
     const attempt = attemptFor(cfg);
-    const convo = [{ role: 'system', content: SYSTEM_PROMPT }];
+    var system = SYSTEM_PROMPT;
+    if (needTitle) system += '\n' + TITLE_INSTRUCTION;
+    const convo = [{ role: 'system', content: system }];
+    /* Earlier turns, compacted. Labelled as history rather than as findings:
+       it is a record of what was said, and nothing in it may be quoted as a
+       current fact about the CRM or the show. */
+    if (summary) {
+      convo.push({ role: 'system', content:
+        'EARLIER IN THIS CONVERSATION (a record of what was said, not current data — '
+        + 're-check any fact with a tool before relying on it):\n' + summary });
+    }
     const ctx = contextMessage(pageContext);
     if (ctx) convo.push(ctx);
     convo.push(...history);
@@ -282,7 +473,11 @@ async function runChat({ messages, pageContext, modelId } = {}) {
            answer from what has already been gathered instead of a reply that
            asks for an eleventh tool call and never arrives. */
         const budgetLeft = config.CHAT_MAX_TOOL_CALLS - toolCalls.length;
-        const r = await callModel(cfg, convo, { tools: budgetLeft > 0 ? tools : null });
+        const r = await callModel(cfg, convo, {
+          tools: budgetLeft > 0 ? tools : null,
+          toolChoice: forceTools ? 'required' : 'auto',
+        });
+        forceTools = false;      // one forced round, not a forced conversation
 
         if (!r.ok) { lastError = r.error; break; }
         attempt.calls += 1;
@@ -293,11 +488,48 @@ async function runChat({ messages, pageContext, modelId } = {}) {
 
         const calls = r.message.tool_calls || [];
         if (!calls.length) {
-          const text = (r.message.content || '').trim();
+          /* An answer to a question about our data, produced without looking
+             at any of it. Ask once more with the tool call made mandatory —
+             discarding this reply rather than feeding it back, so the model
+             re-reads the question instead of defending its own guess. */
+          if (mustGround && !toolCalls.length && !groundingRetried && budgetLeft > 0) {
+            groundingRetried = true;
+            forceTools = true;
+            continue;
+          }
+          /* It was asked twice and consulted nothing. The honest answer is
+             that there isn't one — a confident guess about a booth number or
+             an email history is worse than an admission. */
+          if (mustGround && !toolCalls.length) {
+            return {
+              ok: true,
+              refused: true,
+              reply: groundingRefusal(looksChinese(
+                (history.filter((m) => m.role === 'user').pop() || {}).content)),
+              title: null,
+              entities: [],
+              toolCalls,
+              usage: {
+                ...totals,
+                provider: r.usage.provider, model: r.usage.model,
+                requested_provider: CHAT_MODELS[requestedId].provider,
+                requested_model: CHAT_MODELS[requestedId].model,
+                fell_back: id !== requestedId,
+                response_ms: Date.now() - started,
+                attempts: settle(id),
+              },
+            };
+          }
+
+          var text = (r.message.content || '').trim();
           if (!text) { lastError = `${cfg.label} returned an empty answer.`; break; }
+          var titled = needTitle ? extractTitle(text) : { reply: text, title: null };
+          text = titled.reply || text;
           return {
             ok: true,
             reply: text,
+            title: titled.title,
+            entities: entities.map(function (e) { return { type: e.type, id: e.id, name: e.name }; }),
             toolCalls,
             usage: {
               ...totals,
@@ -324,6 +556,7 @@ async function runChat({ messages, pageContext, modelId } = {}) {
           const result = await chatTools.runTool(name, call.function && call.function.arguments);
           toolCalls.push({ name, ok: !result.error, ms: result._ms });
           delete result._ms;
+          if (!result.error) collectEntities(result, entities);
           convo.push({ role: 'tool', tool_call_id: call.id, name, content: JSON.stringify(result) });
         }
       }
@@ -367,4 +600,6 @@ const SUGGESTIONS = [
     zh: '哪些电池材料公司我们还没联系过？' },
 ];
 
-module.exports = { runChat, SYSTEM_PROMPT, SUGGESTIONS, contextMessage, trimHistory, MAX_HISTORY, MAX_MESSAGE_CHARS };
+module.exports = { runChat, SYSTEM_PROMPT, SUGGESTIONS, contextMessage, trimHistory,
+  MAX_HISTORY, MAX_MESSAGE_CHARS, extractTitle, fallbackTitle, digest, collectEntities,
+  needsGrounding, groundingRefusal };

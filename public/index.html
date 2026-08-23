@@ -170,9 +170,28 @@
       display: flex; align-items: center; gap: 16px; padding: 0 24px; position: sticky; top: 0; z-index: 200;
       box-shadow: var(--shadow-xs);
     }
-    .app-breadcrumb { font-size: 0.8rem; color: var(--color-text-tertiary); display: flex; align-items: center; gap: 6px; }
-    .app-breadcrumb b { color: var(--color-text); font-weight: 600; }
-    .app-topbar-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+    /* The label half of the bar yields space before the controls do.
+
+       Every item in this bar is nowrap, and a flex item will not shrink below
+       its content unless it is told it may — so the bar used to overflow its
+       own container rather than compress, pushing the profile menu and the AI
+       usage pill off the right-hand edge. Invisible while nothing sat there;
+       the moment the assistant docked beside the workspace, the controls it
+       had pushed out ended up underneath the panel.
+
+       min-width: 0 lets the breadcrumb and title give way, and they truncate
+       with an ellipsis instead of shoving. The actions never shrink: a control
+       you cannot reach is worse than a heading you cannot finish reading. */
+    .app-breadcrumb {
+      font-size: 0.8rem; color: var(--color-text-tertiary); display: flex; align-items: center; gap: 6px;
+      min-width: 0; overflow: hidden;
+    }
+    .app-breadcrumb b {
+      color: var(--color-text); font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .app-topbar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .app-topbar-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex: none; }
     .app-icon-btn {
       background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm);
       padding: 6px 8px; font-size: 1rem; color: var(--color-text-secondary); position: relative; line-height: 1;

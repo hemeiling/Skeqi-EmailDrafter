@@ -421,3 +421,119 @@ test('a turn that fails on every model still reports its attempts', async () => 
   assert.equal(r.usage.attempts.every((a) => a.served === false), true,
     'nothing served, so nothing may be marked as having served');
 });
+
+/* ── grounding ─────────────────────────────────────────────────────────────
+   The assistant was caught, once, answering "What booth is CATL at?" with a
+   specific invented booth number and no tool call. Rarely — which is what
+   makes it dangerous, because a salesperson cannot tell that answer from the
+   many correct ones, and a booth number gets acted on the same afternoon.
+
+   The stub below is a model that has decided not to use tools. That is the
+   only interesting case: a model that calls tools needs no guard, and no test
+   can make a real model misbehave to order. These assert that when it does,
+   the turn cannot end in a factual claim. */
+
+/** A model that answers everything immediately, with a made-up fact. */
+function refusesTools(answer) {
+  mode = 'script';
+  script = [{ content: answer }, { content: answer }, { content: answer }];
+}
+
+test('a booth question is never answered without consulting anything', async () => {
+  refusesTools('CATL is at booth 1345.');
+  const r = await ask('Who is at booth 3626?');
+  assert.equal(r.ok, true);
+  assert.equal(r.refused, true, 'the turn must refuse rather than pass the guess along');
+  assert.equal(r.toolCalls.length, 0);
+  assert.ok(!/1345|3626 is/.test(r.reply), `the invented fact leaked through: ${r.reply}`);
+  assert.match(r.reply, /could not ground|will not answer it from memory/i);
+});
+
+test('the model is asked a second time, with the tool call made mandatory', async () => {
+  refusesTools('CATL is at booth 1345.');
+  await ask('Who is at booth 3626?');
+  const forced = received.filter((b) => b && b.tool_choice === 'required');
+  assert.equal(forced.length, 1, 'exactly one retry, and it must be the forced one');
+  assert.equal(received[0].tool_choice, 'auto', 'the first attempt is not forced');
+});
+
+test('the ungrounded draft is discarded, not argued with', async () => {
+  refusesTools('CATL is at booth 1345.');
+  await ask('Who is at booth 3626?');
+  const retry = received.find((b) => b && b.tool_choice === 'required');
+  const carried = JSON.stringify(retry.messages);
+  assert.ok(!carried.includes('booth 1345'),
+    'the rejected answer must not be fed back — the model would defend it');
+});
+
+for (const [label, question] of [
+  ['event attendance', 'Is CATL attending?'],
+  ['contact counts', 'How many contacts do we have for CATL?'],
+  ['outreach history', 'Have we emailed this company?'],
+  ['competitors', 'Which of our competitors are exhibiting?'],
+  ['account research', 'What does the account research say about TESVOLT?'],
+  ['Chinese attendance', 'CATL 参展了吗？'],
+  ['Chinese outreach', '我们给这家公司发过邮件吗？'],
+]) {
+  test(`${label}: no tool, no factual answer`, async () => {
+    refusesTools('Yes, definitely — I remember this clearly.');
+    const r = await ask(question);
+    assert.equal(r.refused, true, `"${question}" was answered from memory`);
+    assert.ok(!/definitely/i.test(r.reply), 'and the remembered claim must not survive');
+  });
+}
+
+test('a grounded answer is returned normally, with no retry', async () => {
+  script = [
+    { tool_calls: toolCall('get_booth_occupant', { booth_number: '3626' }) },
+    { content: 'Booth 3626 is assigned to Comau LLC and INTECELLS.' },
+  ];
+  const r = await ask('Who is at booth 3626?');
+  assert.equal(r.ok, true, r.error);
+  assert.ok(!r.refused, 'a turn that consulted a tool must not be refused');
+  assert.match(r.reply, /Comau/);
+  assert.equal(received.filter((b) => b && b.tool_choice === 'required').length, 0,
+    'nothing to force — it called the tool on its own');
+});
+
+test('one tool call is enough; the guard does not demand a particular one', async () => {
+  script = [
+    { tool_calls: toolCall('search_companies', { query: 'CATL' }) },
+    { content: 'I found the company record.' },
+  ];
+  const r = await ask('Have we emailed CATL?');
+  assert.ok(!r.refused, 'the turn consulted the database, which is what the guard is for');
+});
+
+test('conversational questions are answered without forcing a tool', async () => {
+  for (const q of ['What can you do?', 'Summarize what we discussed.',
+    'Rewrite that more concisely.', '你能做什么？', '总结一下我们刚才的对话']) {
+    received = [];
+    script = [{ content: 'Here is a short answer.' }];
+    const r = await ask(q);
+    assert.equal(r.ok, true, `"${q}" failed: ${r.error}`);
+    assert.ok(!r.refused, `"${q}" was wrongly treated as a data question`);
+    assert.equal(received.filter((b) => b && b.tool_choice === 'required').length, 0,
+      `"${q}" should not force a tool call`);
+  }
+});
+
+test('a refused turn still reports what it cost', async () => {
+  refusesTools('CATL is at booth 1345.');
+  const r = await ask('Is CATL attending?');
+  assert.equal(r.refused, true);
+  assert.ok(r.usage.input_tokens > 0, 'both attempts were paid for and must be recorded');
+  assert.ok(Array.isArray(r.usage.attempts) && r.usage.attempts.length >= 1);
+});
+
+test('the guard reads the question, not the whole transcript', async () => {
+  // An earlier data question must not force tools onto a later meta one.
+  script = [{ content: 'A concise version.' }];
+  const r = await chat.runChat({ messages: [
+    { role: 'user', content: 'Who is at booth 3626?' },
+    { role: 'assistant', content: 'Comau LLC and INTECELLS.' },
+    { role: 'user', content: 'Rewrite that more concisely.' },
+  ] });
+  assert.equal(r.ok, true, r.error);
+  assert.ok(!r.refused, 'the LAST question is the one being answered');
+});
