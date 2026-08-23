@@ -2821,8 +2821,21 @@
 
   <!-- ── Battery Show booth map view (ported Skeqi) ── -->
   <div class="card view-hidden" data-view="booth-map" style="padding:0;overflow:hidden;">
+    <!-- A thin strip ABOVE the map, in the shell's own chrome. The Booth Map is
+         a designed product surface and nothing here touches it: no markup,
+         styling, geometry or behaviour inside the iframe changes. The strip
+         belongs to the shell; the map belongs to its author. -->
+    <div id="bm-bar" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+         padding:8px 14px;border-bottom:1px solid var(--color-border);background:var(--color-surface);">
+      <span style="font-size:0.76rem;color:var(--color-text-tertiary);">
+        Last verified <span style="opacity:.7">最后核实</span>: <b id="bm-verified-at">—</b></span>
+      <span id="bm-listed" style="font-size:0.76rem;color:var(--color-text-tertiary);"></span>
+      <button id="bm-refresh" class="btn-sm" style="margin-left:auto;display:none;">
+        🔄 Refresh Exhibitor Data <span style="opacity:.7;font-weight:500;">更新展商数据</span>
+      </button>
+    </div>
     <iframe id="bm-frame" title="Battery Show 2026 Booth Map"
-            style="display:block;width:100%;height:calc(100vh - 132px);border:0;"
+            style="display:block;width:100%;height:calc(100vh - 176px);border:0;"
             referrerpolicy="same-origin"></iframe>
   </div>
 
@@ -3161,6 +3174,19 @@
 </div>
 
 <!-- ── AI Usage detail modal ── -->
+<!-- ── Refresh Exhibitor Data (admin) ─────────────────────────────────────
+     Preview first, always. The previewed and applied states are worded and
+     coloured differently on purpose: they must never be mistaken for each
+     other, because one of them changed production and the other did not. -->
+<div class="modal-overlay" id="bm-refresh-modal">
+  <div class="modal" style="max-width:840px;">
+    <button class="modal-close" id="bm-refresh-close" title="Close">×</button>
+    <h2 style="margin-bottom:4px;">Refresh Exhibitor Data <span style="opacity:.55;font-weight:500;font-size:0.9rem;">更新展商数据</span></h2>
+    <div id="bm-refresh-body" style="max-height:62vh;overflow:auto;"></div>
+    <div id="bm-refresh-foot" style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:14px;"></div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="ai-usage-modal">
   <div class="modal" style="max-width:760px;">
     <button class="modal-close" id="ai-usage-close" title="Close">×</button>

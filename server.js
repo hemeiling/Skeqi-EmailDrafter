@@ -3488,6 +3488,398 @@ app.post('/api/settings/sender', async (req, res) => {
 // Email configuration (My Email Account + Org config [admin] + Preferences)
 // =========================================================================
 
+/* ── Refresh Exhibitor Data ────────────────────────────────────────────────
+   An admin button over the sync that has until now only run from a terminal.
+
+   The rule this is built around: there is ONE synchronisation pathway, and
+   these routes call it rather than reproducing it. exhibitorSync and
+   exhibitorReconcile are imported untouched — every guard they contain (the
+   non-JSON refusal that catches an expired cookie, the mass-retirement floor,
+   the incomplete-fetch check, retire-never-delete, no-guess identity matching)
+   applies here because it is the same code. A second implementation for the UI
+   would be a second thing to get wrong, and the two would drift on the first
+   change to either.
+
+   Preview writes nothing and Apply re-derives everything. Nothing is carried
+   between them except a fingerprint used to detect that the source moved. */
+
+const exhibitorSync = require('./exhibitorSync');
+const exhibitorReconcile = require('./exhibitorReconcile');
+
+/* How much detail the review panel gets. Enough to inspect a real change,
+   bounded so a first import of a thousand exhibitors cannot try to render a
+   thousand rows into a modal. Uses the same total/returned/truncated contract
+   the chat tools do, so a capped list can never read as a total. */
+const REFRESH_SAMPLE = 200;
+const sample = (rows, map) => ({
+  total: rows.length,
+  returned: Math.min(rows.length, REFRESH_SAMPLE),
+  truncated: rows.length > REFRESH_SAMPLE,
+  items: rows.slice(0, REFRESH_SAMPLE).map(map),
+});
+
+/** Maps a sync/fetch failure to something a person can act on. */
+function refreshFailure(err) {
+  const msg = String((err && err.message) || err || 'unknown error');
+  /* An expired MYS_COOKIE does not announce itself: the source answers a
+     logged-out request with an HTML login page under HTTP 200, which parses as
+     "no exhibitors". exhibitorSync already refuses that; this turns its
+     wording into something a salesperson can act on, without ever echoing the
+     credential or the URL. */
+  if (/expired|non-JSON|401|403|unexpected shape/i.test(msg)) {
+    return { status: 502, error: 'Official exhibitor source needs to be re-authenticated.',
+      detail: 'reauth_required' };
+  }
+  if (/event not found/i.test(msg)) {
+    return { status: 503, error: 'This event is not set up on this server yet.', detail: 'no_event' };
+  }
+  if (/tables do not exist|undefined_table|42P01/i.test(msg)) {
+    return { status: 503, error: 'Exhibitor tables are not ready on this server.', detail: 'not_ready' };
+  }
+  if (/incomplete fetch/i.test(msg)) {
+    return { status: 502, error: 'The official source returned an incomplete list. Nothing was changed.',
+      detail: 'incomplete' };
+  }
+  return { status: 500, error: 'Could not read the official exhibitor list. Nothing was changed.',
+    detail: 'error' };
+}
+
+/** Provenance for the page header: the last SUCCESSFUL verification. */
+app.get('/api/exhibitors/status', async (req, res) => {
+  try {
+    const { rows: [run] } = await pool.query(
+      `select id, finished_at, fetched, created, retired, source_version
+         from exhibitor_import_runs
+        where status = 'success' and dry_run = false
+        order by finished_at desc limit 1`);
+    const { rows: [live] } = await pool.query(
+      `select count(*)::int listed,
+              count(*) filter (where exists (
+                select 1 from exhibitor_booths b
+                 where b.exhibitor_id = e.id and b.retired_at is null))::int with_booth
+         from event_exhibitors e where e.attendance_status = 'listed'`);
+    res.json({
+      ok: true,
+      is_admin: isAdmin(req),
+      source_configured: Boolean(process.env.MYS_COOKIE),
+      last_verified_at: run ? run.finished_at : null,
+      last_run: run || null,
+      listed: live ? live.listed : 0,
+      with_booth: live ? live.with_booth : 0,
+      without_booth: live ? live.listed - live.with_booth : 0,
+    });
+  } catch (err) {
+    console.error('[exhibitors] status failed:', err.message);
+    res.status(500).json({ error: 'Could not read exhibitor status.' });
+  }
+});
+
+/**
+ * PREVIEW — reads the official source, plans everything, writes nothing.
+ *
+ * Deliberately never opens a transaction: there is no write to roll back, and
+ * a BEGIN here would hold a connection open across a network fetch that can
+ * take half a minute.
+ */
+app.post('/api/exhibitors/preview', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+
+  let exhibitors;
+  try {
+    /* MYS_COOKIE is sent when it is set and is not required.
+       Measured, rather than assumed: this endpoint currently answers an
+       unauthenticated request with the full 984-exhibitor list, so demanding a
+       credential the source does not ask for would block the feature for no
+       gain. What protects us is not the cookie but the guards below it — if
+       the source ever does start requiring a session, it will answer with an
+       HTML login page, fetchExhibitors will refuse the non-JSON body, and this
+       becomes "needs to be re-authenticated" rather than "no exhibitors". */
+    exhibitors = await exhibitorSync.fetchExhibitors({ cookie: process.env.MYS_COOKIE || '' });
+  } catch (err) {
+    const f = refreshFailure(err);
+    console.warn('[exhibitors] preview fetch failed:', err.message);
+    return res.status(f.status).json(f);
+  }
+
+  const client = await pool.connect();
+  try {
+    const eventId = await exhibitorSync.resolveEvent(client);
+    const plan = await exhibitorSync.plan(client, exhibitors, eventId);
+    const version = exhibitorSync.sourceVersion(exhibitors);
+
+    if (plan.refuse) {
+      /* The guard that matters most. A small or empty list is indistinguishable
+         from every exhibitor having withdrawn, so the planner refuses rather
+         than retiring a show. Surfaced as a refusal to proceed, not an error
+         to retry. */
+      return res.status(409).json({
+        error: 'The official list looks wrong, so nothing will be changed.',
+        detail: 'refused', reason: plan.refuse, fetched: plan.liveCount, source_version: version,
+      });
+    }
+
+    const flags = await exhibitorSync.planIntelReview(client, exhibitors, eventId);
+    const reconcile = await exhibitorReconcile.planReconcile(client);
+    const by = { link_existing: [], create_new: [], review: [] };
+    for (const r of reconcile) (by[r.outcome] || by.review).push(r);
+
+    /* Booth changes come from the booth table, not from the plan.
+       plan()'s `prev` is an event_exhibitors row and carries no booths —
+       booth reconciliation happens inside apply() — so comparing
+       prev.booths against row.booths compared undefined with the incoming
+       list and reported EVERY updated exhibitor as a booth change. On a
+       re-run that changed nothing it claimed 976 of them. A preview that
+       overstates change is worse than no preview: it teaches an admin that
+       the numbers are noise and to click through them. */
+    const { rows: currentBooths } = await client.query(
+      `select e.exhibitor_source_id,
+              coalesce(array_agg(b.booth_number order by b.booth_number)
+                       filter (where b.booth_number is not null), '{}') booths
+         from event_exhibitors e
+         left join exhibitor_booths b on b.exhibitor_id = e.id and b.retired_at is null
+        where e.attendance_status = 'listed'
+          and ($1::int is null or e.event_id = $1)
+        group by e.exhibitor_source_id`, [eventId]);
+    const boothsNow = new Map(currentBooths.map((r) => [String(r.exhibitor_source_id), r.booths.map(String)]));
+    const sortedKey = (a) => (a || []).map(String).slice().sort().join(',');
+
+    const changedBooths = exhibitors
+      .filter((e) => boothsNow.has(String(e.exhibitor_source_id)))     // new ones count as added, not changed
+      .map((e) => ({ e, from: boothsNow.get(String(e.exhibitor_source_id)) }))
+      .filter(({ e, from }) => sortedKey(from) !== sortedKey(e.booths))
+      .map(({ e, from }) => ({ prev: { booths: from }, row: e }));
+
+    const renamed = plan.updated.filter((u) => u.prev.source_name !== u.row.source_name);
+
+    res.json({
+      ok: true,
+      preview: true,
+      source_version: version,          // carried into apply, to detect drift
+      fetched_at: new Date().toISOString(),
+      event_id: eventId,
+      tables_ready: plan.tablesReady !== false,
+
+      official: {
+        total_listed: exhibitors.length,
+        with_booth: exhibitors.filter((e) => e.booths.length).length,
+        without_booth: exhibitors.filter((e) => !e.booths.length).length,
+      },
+      exhibitors: {
+        added: sample(plan.created, (r) => ({ name: r.source_name, exhid: r.exhibitor_source_id, booths: r.booths })),
+        retired: sample(plan.retired, (r) => ({ name: r.source_name, exhid: r.exhibitor_source_id })),
+        revived: sample(plan.revived, (r) => ({ name: r.source_name, exhid: r.exhibitor_source_id })),
+        renamed: sample(renamed, (u) => ({ from: u.prev.source_name, to: u.row.source_name })),
+        unchanged: plan.unchanged.length,
+      },
+      booths: {
+        changed: sample(changedBooths, (u) => ({
+          name: u.row.source_name,
+          from: u.prev.booths || [], to: (u.row.booths || []).map(String),
+        })),
+      },
+      crm: {
+        link_existing: sample(by.link_existing, (r) => ({
+          exhibitor: r.exhibitor.source_name, company_id: r.company_id,
+          company: r.company_name, why: r.reason })),
+        create_new: sample(by.create_new, (r) => ({ exhibitor: r.exhibitor.source_name, why: r.reason })),
+        review: sample(by.review, (r) => ({ exhibitor: r.exhibitor.source_name, why: r.reason })),
+        matched: plan.stats.matched, unmatched: plan.stats.unmatched, ambiguous: plan.stats.ambiguous,
+      },
+      classifications: {
+        needs_review: sample(flags, (f) => ({ kind: f.kind, subject: f.subject_name, why: f.review_reason })),
+      },
+    });
+  } catch (err) {
+    const f = refreshFailure(err);
+    console.error('[exhibitors] preview failed:', err.message);
+    res.status(f.status).json(f);
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * APPLY — the real synchronisation, in one transaction.
+ *
+ * Re-fetches and re-plans from scratch rather than trusting anything the
+ * preview produced. A plan held server-side between two requests is a plan
+ * that can be replayed or applied to a database that has since moved; a plan
+ * posted back by the browser is worse. The only thing carried across is the
+ * source fingerprint, and it is carried in order to REFUSE, not to trust.
+ */
+app.post('/api/exhibitors/apply', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  const expected = String((req.body || {}).source_version || '').trim();
+  if (!expected) {
+    return res.status(400).json({ error: 'Run a preview first.', detail: 'preview_required' });
+  }
+
+  let exhibitors;
+  try {
+    exhibitors = await exhibitorSync.fetchExhibitors({ cookie: process.env.MYS_COOKIE || '' });
+  } catch (err) {
+    const f = refreshFailure(err);
+    console.warn('[exhibitors] apply fetch failed:', err.message);
+    return res.status(f.status).json(f);
+  }
+
+  const version = exhibitorSync.sourceVersion(exhibitors);
+  if (version !== expected) {
+    /* The official list moved between the review and the click. Whatever the
+       admin approved is not what would be written, so nothing is. */
+    return res.status(409).json({
+      error: 'The official exhibitor list changed since you reviewed it. Nothing was applied — '
+        + 'please review the new version.',
+      detail: 'source_changed',
+      reviewed_version: expected, current_version: version,
+      fetched: exhibitors.length,
+    });
+  }
+
+  const client = await pool.connect();
+  let released = false;
+  const release = () => { if (!released) { released = true; client.release(); } };
+  let runId = null;
+
+  try {
+    const eventId = await exhibitorSync.resolveEvent(client);
+    const plan = await exhibitorSync.plan(client, exhibitors, eventId);
+
+    if (plan.refuse) {
+      /* Recorded as an aborted run before returning: a refusal is a fact about
+         the source worth keeping, not just a message on a screen. */
+      await client.query(
+        `insert into exhibitor_import_runs (event_id, source, dry_run, status, fetched, error_message, finished_at)
+         values ($1,$2,false,'aborted',$3,$4,NOW())`,
+        [eventId, exhibitorSync.SOURCE, plan.liveCount, String(plan.refuse).slice(0, 400)]);
+      return res.status(409).json({
+        error: 'The official list looks wrong, so nothing was changed.',
+        detail: 'refused', reason: plan.refuse,
+      });
+    }
+    if (plan.tablesReady === false) {
+      return res.status(503).json({ error: 'Exhibitor tables are not ready on this server.',
+        detail: 'not_ready' });
+    }
+
+    const flags = await exhibitorSync.planIntelReview(client, exhibitors, eventId);
+
+    await client.query('BEGIN');
+    const { rows: [run] } = await client.query(
+      `insert into exhibitor_import_runs (event_id, source, source_version, dry_run, status, fetched)
+       values ($1,$2,$3,false,'pending',$4) returning id`,
+      [eventId, exhibitorSync.SOURCE, version, exhibitors.length]);
+    runId = run.id;
+
+    // Attendance, booths and occupancy — the same call the CLI makes.
+    const applied = await exhibitorSync.apply(client, plan, eventId, version, flags);
+
+    await client.query(
+      `update exhibitor_import_runs set status='success', created=$2, updated=$3, unchanged=$4,
+              retired=$5, revived=$6, booths_added=$7, booths_retired=$8,
+              matched=$9, unmatched=$10, ambiguous=$11, intel_flagged=$12, finished_at=NOW()
+        where id=$1`,
+      [runId, plan.created.length, plan.updated.length, plan.unchanged.length, plan.retired.length,
+        plan.revived.length, applied.boothsAdded, applied.boothsRetired,
+        plan.stats.matched, plan.stats.unmatched, plan.stats.ambiguous, applied.flagged]);
+
+    await client.query('COMMIT');
+
+    const { rows: [verified] } = await client.query(
+      `select finished_at from exhibitor_import_runs where id = $1`, [runId]);
+    release();
+
+    /* ── phase two: CRM identity ───────────────────────────────────────────
+       Deliberately AFTER the commit and deliberately not transactional,
+       because that is what the tested pathway does. upsertCompany owns its own
+       connection — it is the single creation path every ingestion route in
+       this application funnels through, and the normalised-name resolution
+       inside it is the duplicate guard that makes running this twice safe.
+       Wrapping it in the transaction above would mean either bypassing it with
+       a bare INSERT, which loses that guard, or changing a function the whole
+       CRM depends on to satisfy one caller.
+
+       The trade is real and worth stating: if this phase fails halfway,
+       attendance is correct and some exhibitors are not yet linked to a
+       company. That state is recoverable by running it again — it is
+       idempotent — and it is reported as partial rather than as success. */
+    const crm = { linked: 0, created: 0, reused: 0, declined: 0, unresolved: 0, failed: 0 };
+    let crmError = null;
+    try {
+      const reconcile = await exhibitorReconcile.planReconcile(pool);
+      for (const r of reconcile) {
+        if (r.outcome === 'link_existing') {
+          await pool.query('update event_exhibitors set company_id = $2 where id = $1',
+            [r.exhibitor.id, r.company_id]);
+          crm.linked++;
+        } else if (r.outcome === 'create_new') {
+          const company = await upsertCompany({
+            name: r.exhibitor.source_name,
+            source: 'exhibitor_import',
+            sourceFile: 'mapyourshow:battery-show-na-2026',
+          });
+          // upsertCompany refuses names that are not companies. That is its
+          // judgement and this defers to it rather than forcing a row.
+          if (!company) { crm.declined++; continue; }
+          if (company.updated) crm.reused++; else crm.created++;
+          await pool.query('update event_exhibitors set company_id = $2 where id = $1',
+            [r.exhibitor.id, company.id]);
+        } else {
+          crm.unresolved++;      // ambiguous — left alone, never guessed
+        }
+      }
+    } catch (e) {
+      crmError = e.message;
+      crm.failed = 1;
+      console.error('[exhibitors] CRM reconciliation failed after a successful sync:', e.message);
+    }
+
+    res.json({
+      ok: true,
+      applied: true,
+      // Not "success" when half of it did not happen.
+      status: crmError ? 'partial' : 'success',
+      partial_reason: crmError
+        ? 'Attendance and booths were updated, but linking exhibitors to CRM companies did not '
+          + 'finish. Nothing is lost — run the refresh again to complete it.'
+        : undefined,
+      run_id: runId, source_version: version,
+      last_verified_at: verified ? verified.finished_at : null,
+      results: {
+        created: plan.created.length,
+        retired: plan.retired.length,
+        revived: plan.revived.length,
+        booth_changed: applied.boothsAdded,
+        booths_retired: applied.boothsRetired,
+        linked: crm.linked,
+        companies_created: crm.created,
+        companies_reused: crm.reused,
+        companies_declined: crm.declined,
+        needs_review: applied.flagged,
+        review_cleared: applied.unflagged || 0,
+        unresolved: crm.unresolved,
+        failed: crm.failed,
+      },
+      occupancy: applied.occupancy,
+    });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* the connection may be gone */ }
+    release();      // free the connection before recording the failure
+    console.error('[exhibitors] apply failed:', err.message);
+    try {
+      await pool.query(
+        `insert into exhibitor_import_runs (source, dry_run, status, error_message, finished_at)
+         values ($1,false,'failed',$2,NOW())`,
+        [exhibitorSync.SOURCE, String(err.message).slice(0, 400)]);
+    } catch { /* nothing further to do */ }
+    const f = refreshFailure(err);
+    // Never a partial success: the transaction rolled back, so nothing changed.
+    res.status(f.status).json({ ...f, applied: false, run_id: runId });
+  } finally {
+    release();
+  }
+});
+
 app.get('/api/me', (req, res) => {
   res.json({ ok: true, user: reqUser(req), is_admin: isAdmin(req) });
 });

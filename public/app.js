@@ -45,7 +45,10 @@ function showView(name) {
   if (window.skqSetChatContext) {
     try { window.skqSetChatContext(name ? { view: name } : null); } catch (e) { /* widget absent */ }
   }
-  if (name === "booth-map") ensureFrameLoaded("bm-frame", "/booth-map/");
+  if (name === "booth-map") {
+    ensureFrameLoaded("bm-frame", "/booth-map/");
+    loadBoothMapStatus();          // last-verified comes from the audit trail
+  }
   if (name === "account-research") ensureFrameLoaded("ar-frame", "/account-research/");
   if (name === "home") loadDashboard();
   /* Fetching belongs to the view, not to one button that opens it. The
@@ -2694,12 +2697,264 @@ document.getElementById("usage-reset-btn").addEventListener("click", async () =>
   await fetch("/api/usage/reset", { method: "POST" });
   refreshUsage();
 });
+/* Refresh Exhibitor Data. The button only appears for an admin, and the
+   endpoint checks again — a hidden control is not a permission. */
+document.getElementById("bm-refresh")?.addEventListener("click", bmPreview);
+document.getElementById("bm-refresh-close")?.addEventListener("click",
+  () => closeModal("bm-refresh-modal"));
+
 document.getElementById("usage-details-btn").addEventListener("click", () => showView("ai-usage"));
 document.getElementById("ai-usage-close").addEventListener("click", () => closeModal("ai-usage-modal"));
 document.getElementById("draft-preview-close").addEventListener("click", () => closeModal("draft-preview-modal"));
 document.getElementById("ai-usage-modal").addEventListener("click", (e) => {
   if (e.target === document.getElementById("ai-usage-modal")) closeModal("ai-usage-modal");
 });
+
+/* ══ Refresh Exhibitor Data (admin) ═════════════════════════════════════════
+   Preview, review, then apply — in that order, with no shortcut.
+
+   The first click only ever reads. The second click re-derives everything on
+   the server; nothing this file computes is trusted, and the only thing it
+   carries between the two is the source fingerprint, which exists so the
+   server can REFUSE if the official list moved while it was being reviewed.
+
+   Nothing here touches the Booth Map. The strip and this modal are the
+   shell's; the map inside the iframe is a designed surface and is left alone.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+var _bmPreview = null;          // the last preview, for the Apply step
+
+function bmWhen(iso) {
+  if (!iso) return "never";
+  var d = new Date(iso);
+  if (isNaN(d)) return "unknown";
+  return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit" });
+}
+
+async function loadBoothMapStatus() {
+  try {
+    const r = await fetch("/api/exhibitors/status");
+    const d = await r.json();
+    if (!d || !d.ok) return;
+    const at = document.getElementById("bm-verified-at");
+    if (at) at.textContent = bmWhen(d.last_verified_at);
+    const listed = document.getElementById("bm-listed");
+    if (listed && d.listed) {
+      listed.textContent = `· ${d.listed} exhibitors listed 参展商 · ${d.with_booth} with a booth`
+        + (d.without_booth ? ` · ${d.without_booth} without` : "");
+    }
+    const btn = document.getElementById("bm-refresh");
+    if (btn && d.is_admin) {
+      btn.style.display = "";
+      /* Shown but disabled when the server has no credential for the official
+         source: hiding it would leave an admin wondering where the feature
+         went, and a tooltip explains what is missing without naming it. */
+      /* Never disabled on the credential alone: the official source answers
+         unauthenticated requests, so the button works without one. If that
+         ever changes the server says so in words, which is more useful than a
+         control that is greyed out for a reason nobody can see. */
+      btn.disabled = false;
+      btn.title = "Check the official exhibitor list for changes";
+    }
+  } catch (e) { /* the strip is informational; a failure must not break the view */ }
+}
+
+function bmFoot(buttons) {
+  const foot = document.getElementById("bm-refresh-foot");
+  foot.innerHTML = "";
+  buttons.forEach(function (b) {
+    const el = document.createElement("button");
+    el.className = b.primary ? "btn-sm btn-primary" : "btn-sm";
+    el.textContent = b.label;
+    el.disabled = Boolean(b.disabled);
+    el.addEventListener("click", b.onClick);
+    foot.appendChild(el);
+  });
+}
+
+function bmSection(title, block) {
+  if (!block || !block.total) return "";
+  const rows = (block.items || []).map(function (i) {
+    if (i.from !== undefined && i.to !== undefined && Array.isArray(i.from)) {
+      return `<li>${escapeHtml(i.name)}: <code>${escapeHtml((i.from || []).join(", ") || "none")}</code> → <code>${escapeHtml((i.to || []).join(", ") || "none")}</code></li>`;
+    }
+    if (i.from !== undefined) return `<li>“${escapeHtml(i.from)}” → “${escapeHtml(i.to)}”</li>`;
+    if (i.exhibitor) {
+      return `<li>${escapeHtml(i.exhibitor)}${i.company ? " → " + escapeHtml(i.company) : ""}`
+        + `${i.why ? ` <span style="color:#9ca3af;">(${escapeHtml(i.why)})</span>` : ""}</li>`;
+    }
+    if (i.subject) return `<li>${escapeHtml(i.kind)} — ${escapeHtml(i.subject)}</li>`;
+    return `<li>${escapeHtml(i.name || "")}${i.booths && i.booths.length ? " · booth " + escapeHtml(i.booths.join(", ")) : ""}</li>`;
+  }).join("");
+  /* Every list says whether it is the whole set. A page that looks like a
+     total is the mistake that produced a wrong exhibitor count once already. */
+  const more = block.truncated
+    ? `<li style="color:#9ca3af;">…and ${block.total - block.returned} more (showing ${block.returned} of ${block.total})</li>`
+    : "";
+  return `<details style="margin:4px 0;"><summary style="cursor:pointer;font-size:0.84rem;">
+      <b>${block.total}</b> ${escapeHtml(title)}</summary>
+      <ul style="margin:6px 0 10px 18px;font-size:0.8rem;line-height:1.6;">${rows}${more}</ul></details>`;
+}
+
+function bmError(d, status) {
+  const body = document.getElementById("bm-refresh-body");
+  const reauth = d && d.detail === "reauth_required";
+  body.innerHTML = `<div style="border:1px solid #FCA5A5;background:#FEF2F2;color:#991B1B;
+      border-radius:10px;padding:12px 14px;font-size:0.86rem;line-height:1.5;">
+      <b>${escapeHtml((d && d.error) || "Could not reach the official exhibitor source.")}</b>
+      ${d && d.reason ? `<div style="margin-top:6px;">${escapeHtml(d.reason)}</div>` : ""}
+      <div style="margin-top:8px;color:#7F1D1D;">Nothing was changed.</div>
+      ${reauth ? `<div style="margin-top:8px;font-size:0.8rem;">An administrator needs to refresh the
+        official source session on the server.</div>` : ""}
+    </div>`;
+  bmFoot([{ label: "Close", onClick: function () { closeModal("bm-refresh-modal"); } }]);
+}
+
+async function bmPreview() {
+  const body = document.getElementById("bm-refresh-body");
+  openModal("bm-refresh-modal");
+  body.innerHTML = `<div style="padding:22px 0;text-align:center;color:#6B6480;">
+      <span class="spinner"></span> Checking the official exhibitor list…
+      <div style="font-size:0.78rem;margin-top:6px;">Reading only — nothing will be changed.</div></div>`;
+  bmFoot([{ label: "Cancel", onClick: function () { closeModal("bm-refresh-modal"); } }]);
+
+  let d; let status;
+  try {
+    const r = await fetch("/api/exhibitors/preview", { method: "POST",
+      headers: { "content-type": "application/json" }, body: "{}" });
+    status = r.status;
+    d = await r.json().catch(function () { return null; });
+    if (!r.ok || !d || !d.ok) return bmError(d, status);
+  } catch (e) {
+    return bmError({ error: "Could not reach the server." }, 0);
+  }
+
+  _bmPreview = d;
+  const o = d.official; const ex = d.exhibitors; const crm = d.crm;
+  const willChange = ex.added.total + ex.retired.total + ex.revived.total
+    + d.booths.changed.total + crm.create_new.total + crm.link_existing.total;
+
+  body.innerHTML = `
+    <div style="border:1px solid #BFDBFE;background:#EFF6FF;color:#1E3A8A;border-radius:10px;
+         padding:10px 13px;font-size:0.84rem;margin-bottom:12px;">
+      <b>Preview completed.</b> Nothing has been changed yet.
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px;">
+      ${[["Official list", o.total_listed], ["With a booth", o.with_booth],
+         ["Without a booth", o.without_booth], ["Would change", willChange]]
+        .map(function (p) {
+          return `<div style="border:1px solid #E5E7EB;border-radius:9px;padding:8px 10px;">
+            <div style="font-size:0.68rem;color:#6B7280;text-transform:uppercase;">${p[0]}</div>
+            <div style="font-size:1.05rem;font-weight:700;">${p[1]}</div></div>`;
+        }).join("")}
+    </div>
+    <h4 style="margin:10px 0 4px;font-size:0.86rem;">Exhibitors</h4>
+    ${bmSection("newly added", ex.added) || ""}
+    ${bmSection("retired — gone from the official list", ex.retired) || ""}
+    ${bmSection("revived — back after being retired", ex.revived) || ""}
+    ${bmSection("renamed", ex.renamed) || ""}
+    ${bmSection("booth assignment changes", d.booths.changed) || ""}
+    <h4 style="margin:12px 0 4px;font-size:0.86rem;">CRM</h4>
+    ${bmSection("would link to an existing company", crm.link_existing) || ""}
+    ${bmSection("would create a new company", crm.create_new) || ""}
+    ${bmSection("ambiguous — left for a human", crm.review) || ""}
+    <h4 style="margin:12px 0 4px;font-size:0.86rem;">Classifications</h4>
+    ${bmSection("would be flagged for review", d.classifications.needs_review) || ""}
+    ${willChange === 0 ? `<div style="color:#059669;font-size:0.85rem;margin-top:10px;">
+        The official list matches what we already hold. There is nothing to apply.</div>` : ""}
+    <div style="font-size:0.72rem;color:#9ca3af;margin-top:12px;">
+      Source version ${escapeHtml(String(d.source_version))} · read ${bmWhen(d.fetched_at)}</div>`;
+
+  bmFoot([
+    { label: "Cancel", onClick: function () { closeModal("bm-refresh-modal"); } },
+    { label: "Apply Update 应用更新", primary: true, disabled: willChange === 0,
+      onClick: function () { bmConfirm(willChange); } },
+  ]);
+}
+
+/* A deliberate pause before anything is written, naming the numbers that
+   would look alarming afterwards. */
+function bmConfirm(willChange) {
+  const d = _bmPreview;
+  const body = document.getElementById("bm-refresh-body");
+  body.innerHTML = `<div style="font-size:0.88rem;line-height:1.6;">
+      <p>This will update the official exhibitor records, booth assignments and booth
+      occupancy, and link exhibitors to CRM companies.</p>
+      <ul style="margin:8px 0 8px 18px;">
+        <li><b>${d.exhibitors.added.total}</b> exhibitors added</li>
+        <li><b>${d.exhibitors.retired.total}</b> retired — kept, marked as no longer listed</li>
+        <li><b>${d.booths.changed.total}</b> booth assignment changes</li>
+        <li><b>${d.crm.create_new.total}</b> new CRM companies created</li>
+        <li><b>${d.crm.link_existing.total}</b> linked to companies we already have</li>
+        <li><b>${d.crm.review.total}</b> left ambiguous and untouched</li>
+      </ul>
+      <p style="color:#6B6480;">Nothing is deleted. Contacts, research, emails and anything
+      entered by hand are not affected.</p></div>`;
+  bmFoot([
+    { label: "Back", onClick: function () { bmPreviewRender(); } },
+    { label: "Yes, apply the update", primary: true, onClick: bmApply },
+  ]);
+}
+
+function bmPreviewRender() { if (_bmPreview) bmPreview(); }
+
+async function bmApply() {
+  const body = document.getElementById("bm-refresh-body");
+  body.innerHTML = `<div style="padding:22px 0;text-align:center;color:#6B6480;">
+      <span class="spinner"></span> Applying the update…
+      <div style="font-size:0.78rem;margin-top:6px;">Do not close this window.</div></div>`;
+  bmFoot([]);
+
+  let d;
+  try {
+    const r = await fetch("/api/exhibitors/apply", { method: "POST",
+      headers: { "content-type": "application/json" },
+      // The fingerprint the admin reviewed. The server refuses if it moved.
+      body: JSON.stringify({ source_version: _bmPreview && _bmPreview.source_version }) });
+    d = await r.json().catch(function () { return null; });
+    if (!r.ok || !d || !d.ok) return bmError(d, r.status);
+  } catch (e) {
+    return bmError({ error: "Could not reach the server. Nothing was applied." }, 0);
+  }
+
+  const res = d.results;
+  const partial = d.status === "partial";
+  body.innerHTML = `
+    <div style="border:1px solid ${partial ? "#FDE68A" : "#A7F3D0"};
+         background:${partial ? "#FFFBEB" : "#ECFDF5"};
+         color:${partial ? "#92400E" : "#065F46"};border-radius:10px;padding:10px 13px;
+         font-size:0.86rem;margin-bottom:12px;">
+      <b>${partial ? "Partially applied." : "Update successfully applied."}</b>
+      ${partial ? `<div style="margin-top:6px;">${escapeHtml(d.partial_reason || "")}</div>` : ""}
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;">
+      ${[["Created", res.created], ["Linked", res.linked], ["New companies", res.companies_created],
+         ["Retired", res.retired], ["Booth changed", res.booth_changed],
+         ["Needs review", res.needs_review], ["Unresolved", res.unresolved], ["Failed", res.failed]]
+        .map(function (p) {
+          return `<div style="border:1px solid #E5E7EB;border-radius:9px;padding:8px 10px;">
+            <div style="font-size:0.68rem;color:#6B7280;text-transform:uppercase;">${p[0]}</div>
+            <div style="font-size:1.05rem;font-weight:700;">${p[1]}</div></div>`;
+        }).join("")}
+    </div>
+    ${d.occupancy ? `<div style="font-size:0.78rem;color:#6B6480;margin-top:10px;">
+      Booth occupancy — current ${d.occupancy.current}, reassigned ${d.occupancy.reassigned},
+      vacated ${d.occupancy.vacated}</div>` : ""}
+    <div style="font-size:0.72rem;color:#9ca3af;margin-top:10px;">
+      Run #${d.run_id} · verified ${bmWhen(d.last_verified_at)}</div>`;
+
+  bmFoot([{ label: "Done", primary: true, onClick: function () {
+    closeModal("bm-refresh-modal");
+    loadBoothMapStatus();          // the strip now reflects the new verification
+    /* The Booth Map iframe is reloaded rather than reached into: its internals
+       are not this code's business. Today its exhibitor data is still the
+       curated snapshot it ships with — the CRM and the assistant are the
+       canonical readers until that is converted separately. */
+    const f = document.getElementById("bm-frame");
+    if (f && f.src) f.src = f.src;
+  } }]);
+}
 
 /* ── Detailed AI Usage & Budget modal ── */
 const AI_FEATURE_LABELS = {
