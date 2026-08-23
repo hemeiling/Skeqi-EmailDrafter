@@ -193,7 +193,25 @@ const CHAT_REQUEST_TIMEOUT_MS = Number(process.env.CHAT_REQUEST_TIMEOUT_MS || 30
 /* The loop is bounded so a vague question cannot spend the afternoon calling
    tools. Six covers "research but no outreach, then tell me about the top
    one"; past that the model is usually going in circles. */
-const CHAT_MAX_TOOL_CALLS = Number(process.env.CHAT_MAX_TOOL_CALLS || 6);
+/* Tool budgets, per model attempt and per turn.
+
+   Measured rather than chosen. Over eleven representative live questions the
+   healthy turns used 0-3 tool calls — median 1, p95 3 — and the only turns
+   that reached the old ceiling of 6 were the two asking how many companies
+   were attending, which hit it because the capability to answer was missing
+   rather than because the work was large.
+
+   So 5 is comfortably above the p95 for a first attempt, and a fallback needs
+   3 to run any path in that distribution end to end. The turn ceiling is their
+   sum: a fallback can never be squeezed below what a p95 path costs, which was
+   the flaw in 6/3/8 — a maximal primary left the fallback 2.
+
+   These bound EXECUTION, never availability. Tools stay attached to every
+   factual attempt; what runs out is permission to run them. Withdrawing the
+   schema is what produced the protocol leak in the first place. */
+const CHAT_MAX_TOOL_CALLS = Number(process.env.CHAT_MAX_TOOL_CALLS || 5);
+const CHAT_FALLBACK_TOOL_CALLS = Number(process.env.CHAT_FALLBACK_TOOL_CALLS || 3);
+const CHAT_TURN_TOOL_CEILING = Number(process.env.CHAT_TURN_TOOL_CEILING || 8);
 
 /* The emergency exit, off unless someone turns it on. A cross-provider
    fallback is worth having when Bailian is unreachable entirely, and is worth
@@ -306,7 +324,8 @@ function isLoginGateConfigured() {
 
 module.exports = {
   CHAT_MODELS, DEFAULT_CHAT_MODEL_ID, BAILIAN_CHAT_MODEL, BAILIAN_CHAT_FALLBACK_MODELS,
-  CHAT_ENABLE_THINKING, CHAT_REQUEST_TIMEOUT_MS, CHAT_MAX_TOOL_CALLS, CHAT_EMERGENCY_FALLBACK,
+  CHAT_ENABLE_THINKING, CHAT_REQUEST_TIMEOUT_MS, CHAT_MAX_TOOL_CALLS,
+  CHAT_FALLBACK_TOOL_CALLS, CHAT_TURN_TOOL_CEILING, CHAT_EMERGENCY_FALLBACK,
   isChatModelAvailable, isChatConfigured, chatProviderChain, describeChatChain,
 
   APOLLO_API_KEY,

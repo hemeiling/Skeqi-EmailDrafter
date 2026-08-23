@@ -46,6 +46,49 @@ function asInt(v, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   return Math.min(Math.max(n, min), max);
 }
 
+/**
+ * The size contract for every list this module returns.
+ *
+ * `count: rows.length` is a page size wearing the name of a total, and a model
+ * reads it as the answer. Asked how many companies were at the show, the
+ * assistant called six category tools, each capped at 25, and reported
+ * 19 + 25 + 25 + 25 = 94. The true figure was 984, and three of those 25s were
+ * really 488, 67 and 53.
+ *
+ * So a capped list now says so, in three fields that cannot be confused:
+ *   total      what the database holds, from its own COUNT(*)
+ *   returned   how many are in this payload
+ *   truncated  whether the two differ
+ *
+ * `truncated` is redundant with total > returned and is included anyway,
+ * because it is the field a model cannot misread. Two tools already used this
+ * shape (get_company_contacts, get_communication_history); this makes it the
+ * rule rather than the exception.
+ */
+function cardinality(total, rows) {
+  const returned = rows.length;
+  const t = Number(total);
+  const known = Number.isFinite(t) ? t : returned;
+  return {
+    total: known,
+    returned,
+    truncated: known > returned,
+    ...(known > returned
+      ? { note: `showing ${returned} of ${known} — this is a page, not the total` }
+      : {}),
+  };
+}
+
+/** COUNT(*) for a capped list, run as its own query so `total` is a fact. */
+async function totalFor(sql, params) {
+  try {
+    const { rows } = await pool.query(sql, params);
+    return rows.length ? Number(rows[0].n) : null;
+  } catch {
+    return null;      // a failed count must not fail the tool
+  }
+}
+
 function asLimit(v, fallback = 10) {
   const n = asInt(v, { min: 1, max: MAX_ROWS });
   return n == null ? Math.min(fallback, MAX_ROWS) : n;
@@ -291,6 +334,55 @@ const TOOLS = {
     },
   },
 
+  get_event_attendance_summary: {
+    description:
+      'HOW MANY companies are at the show, in total. Use this for any question '
+      + 'about the SIZE of the event — "how many companies are attending", '
+      + '"how many exhibitors", "多少家公司去展会", "参展商总数". It is the ONLY '
+      + 'correct source for a global count. Never add up category lists to reach '
+      + 'a total: the categories overlap, most of them are capped, and a company '
+      + 'can be in several at once. Never use the booth map row count either — '
+      + 'that counts stands, including empty ones, not exhibitors.',
+    parameters: { type: 'object', properties: {} },
+    async run() {
+      const eventId = await currentEventId();
+
+      /* One query, from the attendance table itself. event_exhibitors is the
+         canonical record of who is coming — booths are a separate fact, which
+         is why a company can be listed with no booth and why counting booths
+         answers a different question from the one being asked. */
+      const { rows: [t] } = await pool.query(
+        `select count(*)::int listed,
+                count(*) filter (where exists (
+                  select 1 from exhibitor_booths b
+                   where b.exhibitor_id = e.id and b.retired_at is null))::int with_booth
+           from event_exhibitors e
+          where e.attendance_status = 'listed'
+            and ($1::int is null or e.event_id = $1)`, [eventId]);
+
+      const { rows: [ev] } = await pool.query(
+        `select name from events where ($1::int is null or id = $1) order by id limit 1`, [eventId]);
+      const { rows: [run] } = await pool.query(
+        `select finished_at, fetched from exhibitor_import_runs
+          where status = 'success' order by finished_at desc limit 1`);
+
+      const listed = Number(t.listed) || 0;
+      const withBooth = Number(t.with_booth) || 0;
+      return compact({
+        event: ev ? ev.name : undefined,
+        total_listed: listed,
+        with_booth: withBooth,
+        without_booth: listed - withBooth,
+        // Not a page. Said explicitly, because every other list here is one.
+        is_complete_total: true,
+        verified_at: run ? run.finished_at : undefined,
+        source: 'official event exhibitor list (MapYourShow), stored in event_exhibitors',
+        note: 'Attendance and booth assignment are separate facts. A company can be '
+          + 'listed as attending with no booth published yet.',
+      });
+    },
+  },
+
   check_event_attendance: {
     description:
       'Whether a company is an exhibitor at the show, and if so where. This is '
@@ -417,7 +509,10 @@ const TOOLS = {
           order by (lower(c.name) = $2) desc, c.name
           limit $3`, [like, query.toLowerCase(), limit]);
       return {
-        count: rows.length,
+        ...cardinality(await totalFor(
+          `select count(*)::int n from companies c
+            where lower(c.name) like $1 or lower(coalesce(c.chinese_name,'')) like $1
+               or lower(coalesce(c.industry,'')) like $1`, [like]), rows),
         companies: rows.map((r) => compact({
           id: r.id, name: r.name, zh: r.chinese_name, industry: r.industry,
           booth: r.booth_number || r.booth, category: r.booth_category,
@@ -562,7 +657,11 @@ const TOOLS = {
             limit $3`, [INTEL_KINDS[raw], eventId, limit]);
         return {
           category: raw,
-          count: rows.length,
+          ...cardinality(await totalFor(
+            `select count(*)::int n from booth_intel i
+               join booth_map_booths b on b.id = i.booth_id
+              where i.kind = any($1) and i.retired_at is null and b.retired_at is null
+                and ($2::int is null or b.event_id = $2)`, [INTEL_KINDS[raw], eventId]), rows),
           companies: rows.map((r) => compact({
             booth: r.booth_number,
             name: r.source_company_name,
@@ -589,7 +688,10 @@ const TOOLS = {
           order by booth_number limit $3`, [codes, eventId, limit]);
       return {
         category: raw,
-        count: rows.length,
+        ...cardinality(await totalFor(
+          `select count(*)::int n from booth_map_booths
+            where category = any($1) and retired_at is null
+              and ($2::int is null or event_id = $2)`, [codes, eventId]), rows),
         companies: rows.map((r) => compact({
           booth: r.booth_number, name: r.source_company_name,
           company_id: r.company_id,
@@ -639,7 +741,10 @@ const TOOLS = {
           near_booth: near,
           near_company: origin.source_company_name,
           note: 'Ordered by proximity on the floor-plan grid, nearest first.',
-          count: rows.length,
+          ...cardinality(await totalFor(
+            `select count(*)::int n from booth_map_booths b
+              where b.category = 'available' and b.retired_at is null
+                and ($1::int is null or b.event_id = $1)`, [eventId]), rows),
           booths: rows.map((r) => compact({
             booth: r.booth_number, size: r.dims,
             proximity_rank_units: Math.round(Number(r.dist)),
@@ -658,7 +763,10 @@ const TOOLS = {
           order by i.score desc nulls last, b.booth_number
           limit $2`, [eventId, limit]);
       return {
-        count: rows.length,
+        ...cardinality(await totalFor(
+          `select count(*)::int n from booth_map_booths b
+            where b.category = 'available' and b.retired_at is null
+              and ($1::int is null or b.event_id = $1)`, [eventId]), rows),
         booths: rows.map((r) => compact({
           booth: r.booth_number, size: r.dims,
           score: r.score ? Number(r.score) : undefined,
@@ -758,7 +866,9 @@ const TOOLS = {
       return {
         company_id: id,
         has_research: rows.length > 0,
-        report_count: rows.length,
+        // Capped at 5 like every other list here, and says so.
+        ...cardinality(await totalFor(
+          `select count(*)::int n from account_reports where company_id = $1`, [id]), rows),
         // Newest in full, the rest as headers — "summarise the latest" is the
         // question, and five full reports would be most of a context window.
         latest: rows.length ? renderReport(rows[0], true) : undefined,
@@ -958,7 +1068,7 @@ const TOOLS = {
       return {
         gap,
         category: catRaw || undefined,
-        count: rows.length,
+        ...cardinality(null, rows),
         companies: rows.map((r) => compact({
           booth: r.booth_number, name: r.source_company_name, company_id: r.company_id,
           crm_link: r.company_id ? undefined : 'not linked to a CRM company',

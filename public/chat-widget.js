@@ -756,13 +756,18 @@
     el.log.appendChild(wrap);
   }
 
-  function bubble(who, text, consulted) {
+  function bubble(who, text, sources) {
     var row = h('div', 'skq-ai-msg');
     row.setAttribute('data-who', who);
     var b = h('div', 'skq-ai-bubble', text);
-    if (consulted && consulted.length) {
+    /* Sources, not function names. "consulted:
+       list_companies_by_category, list_companies_by_category, ..." told a
+       salesperson nothing they could act on and leaked our internals into the
+       conversation. What matters to them is whether the answer came from the
+       official exhibitor list or from our own CRM. */
+    if (sources && sources.length) {
       b.appendChild(h('div', 'skq-ai-consulted',
-        (zh() ? '查询：' : 'consulted: ') + consulted.join(', ')));
+        (zh() ? '来源：' : 'Sources: ') + sources.join(' · ')));
     }
     row.appendChild(b);
     el.log.appendChild(row);
@@ -831,7 +836,7 @@
         autosize();
         return;
       }
-      bubble('ai', data.reply, data.consulted);
+      bubble('ai', data.reply, data.sources || []);
       history.push({ role: 'assistant', content: data.reply });
       // The first answer is what creates the conversation, so adopt its id.
       if (data.thread_id) threadId = data.thread_id;
@@ -852,6 +857,29 @@
      The drawer is a view of the server's record, not a second copy of it.
      Nothing here caches a thread body: reopening one fetches it, so a
      conversation continued on a phone reads correctly on a laptop. */
+
+  /* The same mapping the server uses, applied to a reopened conversation —
+     stored messages keep the internal names, so history reads the same as a
+     live answer without re-asking the server to translate them. */
+  var SOURCE_LABELS = {
+    get_event_attendance_summary: 'Official Exhibitor Data',
+    check_event_attendance: 'Official Exhibitor Data',
+    get_booth_occupant: 'Official Exhibitor Data',
+    find_available_booths: 'Booth Map',
+    list_companies_by_category: 'Booth Map',
+    search_companies: 'CRM', get_company_profile: 'CRM', get_company_contacts: 'CRM',
+    find_gaps: 'CRM', summarize_account_activity: 'CRM',
+    get_account_research: 'Account Research',
+    get_communication_history: 'Email Activity', get_latest_draft: 'Email Activity',
+  };
+  function sourcesFor(names) {
+    var out = [];
+    (names || []).forEach(function (n) {
+      var label = SOURCE_LABELS[n];
+      if (label && out.indexOf(label) === -1) out.push(label);
+    });
+    return out;
+  }
 
   function toggleDrawer(force) {
     var on = force == null ? el.drawer.getAttribute('data-open') !== 'true' : Boolean(force);
@@ -939,12 +967,12 @@
       var data = await res.json();
       threadId = data.thread.id;
       history = (data.messages || []).map(function (m) {
-        return { role: m.role, content: m.content, tools: m.tools_used || [] };
+        return { role: m.role, content: m.content, sources: sourcesFor(m.tools_used) };
       });
       el.log.textContent = '';
       if (!history.length) renderEmpty();
       history.forEach(function (m) {
-        bubble(m.role === 'user' ? 'user' : 'ai', m.content, m.tools);
+        bubble(m.role === 'user' ? 'user' : 'ai', m.content, m.sources);
       });
       el.log.scrollTop = el.log.scrollHeight;
       toggleDrawer(false);

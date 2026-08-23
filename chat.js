@@ -51,6 +51,15 @@ HOW TO WORK
 - If a tool returns an error, tell the user you could not read that data.
   Never invent a plausible answer in its place.
 
+COUNTING THE SHOW
+"How many companies are attending", "how many exhibitors", "多少家公司去展会" —
+call get_event_attendance_summary. It is the only correct source for a total.
+NEVER add up category lists to reach one. The categories overlap, a company can
+be in several, and every list is capped — so summing them is wrong twice over.
+A list that says truncated: true is a PAGE. Its "returned" is how many you were
+shown; its "total" is how many exist. Never report "returned" as a quantity of
+anything, and never sum "returned" across lists.
+
 ATTENDANCE IS NOT BOOTH PRESENCE
 - To answer "is X attending / exhibiting", use check_event_attendance. It is
   the only tool that knows. Attendance and booth assignment are separate facts
@@ -219,6 +228,86 @@ function trimHistory(messages) {
   return clean.slice(-MAX_HISTORY);
 }
 
+/* ── provenance ───────────────────────────────────────────────────────────
+   What the panel is allowed to say about where an answer came from.
+
+   "consulted: list_companies_by_category, list_companies_by_category, ..." is
+   an implementation detail repeated six times. A salesperson wants to know
+   whether the answer came from the official exhibitor list or from our own
+   CRM — which is a real distinction to them, and the one that decides how much
+   to trust it. Internal names stay in Analytics and the logs, where they are
+   what you actually need. */
+const TOOL_SOURCES = {
+  get_event_attendance_summary: 'Official Exhibitor Data',
+  check_event_attendance: 'Official Exhibitor Data',
+  get_booth_occupant: 'Official Exhibitor Data',
+  find_available_booths: 'Booth Map',
+  list_companies_by_category: 'Booth Map',
+  search_companies: 'CRM',
+  get_company_profile: 'CRM',
+  get_company_contacts: 'CRM',
+  find_gaps: 'CRM',
+  summarize_account_activity: 'CRM',
+  get_account_research: 'Account Research',
+  get_communication_history: 'Email Activity',
+  get_latest_draft: 'Email Activity',
+};
+
+/** Ordered, deduplicated, human-readable. Only tools that actually succeeded. */
+function provenance(toolCalls) {
+  const out = [];
+  for (const t of toolCalls || []) {
+    if (!t.ok) continue;                     // a failed lookup is not a source
+    const label = TOOL_SOURCES[t.name];
+    if (label && out.indexOf(label) === -1) out.push(label);
+  }
+  return out;
+}
+
+/* ── the protocol guard ────────────────────────────────────────────────────
+   Model output that is not an answer.
+
+   Every Qwen model in this chain will, when it wants a tool and has no
+   structured channel to ask through, write the tool call into prose instead:
+
+     <tool_call>{"name": "get_exhibitor_list", "args": {}}</tool_call>
+
+   Measured over five factual questions asked with no tools attached and no
+   prior tool results: flash 1/5, plus 3/5, max 1/5. It is a property of the
+   family, not of one model, so it cannot be routed around by choosing a
+   different one — and it will not be fixed by asking the prompt nicely.
+
+   This lives at the response boundary rather than in the route or the widget,
+   because it is a dialect fact, the same class as GPT refusing tools while
+   reasoning_effort is set. Anything past this point is an answer or an error;
+   it is never protocol.
+
+   The orchestration below removes the condition that triggers it. This stays
+   anyway: model behaviour changes without warning, and the cost of being
+   wrong is a customer reading angle brackets. */
+var PROTOCOL_SYNTAX = /<\/?tool_call>|<function\s*=|<\|tool[_▁]call|^\s*\{\s*"name"\s*:\s*"[a-z_]+"\s*,\s*"(arguments|args)"/im;
+
+function looksLikeProtocol(text) {
+  return PROTOCOL_SYNTAX.test(String(text || ''));
+}
+
+/**
+ * Does this answer name a tool the user should never have heard of?
+ *
+ * Both halves matter. An invented name means the model was reaching for a
+ * capability that does not exist — reported as an answer, that is a lie about
+ * our own system. A real internal name is a different problem: correct, and
+ * still not something to show a salesperson.
+ */
+function mentionsToolName(text, registered) {
+  var t = String(text || '');
+  if (/\b(get|list|find|check|search|summarize)_[a-z][a-z_]{3,}\b/.test(t)) return true;
+  for (var i = 0; i < registered.length; i++) {
+    if (t.indexOf(registered[i]) !== -1) return true;
+  }
+  return false;
+}
+
 /* ── grounding ─────────────────────────────────────────────────────────────
    A system prompt is guidance, not a guarantee.
 
@@ -287,6 +376,34 @@ function groundingRefusal(zh) {
       + 'a confident guess about a booth, a company or an email history is worse than no answer. '
       + 'Name the specific company, booth number or contact and I will look it up.';
 }
+
+/* ── designated sources ────────────────────────────────────────────────────
+   Grounding says an answer came from somewhere. It does not say it came from
+   the RIGHT somewhere.
+
+   Asked how many companies were at the show, the assistant called two category
+   lists — real tools, real results, genuinely grounded — and answered
+   "19 + 25 + 25 + 25 = 94". The categories overlap, most were capped, and the
+   true figure was 984. Every individual step was legitimate; the aggregation
+   was not.
+
+   This is deliberately not a question-to-tool routing table. It is a much
+   narrower claim: for a small number of facts this system has exactly ONE
+   authoritative source by construction, and an answer making that claim
+   without having consulted it is not grounded, however many other tools ran.
+   Global event counts are the only such fact today. */
+var GLOBAL_COUNT_QUESTION = new RegExp([
+  '\\bhow many\\b[^?]{0,40}\\b(compan|exhibitor|attend|booth holders)',
+  '\\b(total|number)\\s+(of\\s+)?(compan|exhibitor|attendee)',
+  '\\bhow big\\b[^?]{0,20}\\bshow\\b',
+  '\u591a\u5c11\u5bb6[^\uff1f]{0,10}(\u516c\u53f8|\u5c55\u5546|\u4f01\u4e1a)',
+  '(\u53c2\u5c55\u5546|\u5c55\u5546|\u516c\u53f8)[^\uff1f]{0,6}(\u603b\u6570|\u591a\u5c11|\u6570\u91cf)',
+  '\u6709\u591a\u5c11[^\uff1f]{0,10}(\u516c\u53f8|\u5c55\u5546|\u53c2\u5c55)',
+].join('|'), 'i');
+
+var CANONICAL_FOR_COUNTS = 'get_event_attendance_summary';
+
+function wantsGlobalCount(text) { return GLOBAL_COUNT_QUESTION.test(String(text || '')); }
 
 /** Rough on purpose: this only picks which refusal string to use. */
 function looksChinese(text) { return /[\u4e00-\u9fff]/.test(String(text || '')); }
@@ -421,16 +538,31 @@ async function runChat({ messages, pageContext, modelId, summary, needTitle } = 
      costed with its own card. */
   /* Set when the question is about SKQ data. The turn may not end with a
      factual answer while this is true and nothing has been consulted. */
-  const mustGround = needsGrounding(
-    (history.filter((m) => m.role === 'user').pop() || {}).content);
+  const question = (history.filter((m) => m.role === 'user').pop() || {}).content;
+  const mustGround = needsGrounding(question);
   let forceTools = false;
   let groundingRetried = false;
+
+  /* ── the turn ledger ──────────────────────────────────────────────────
+     Tool calls executed across the WHOLE turn, which is what the ceiling
+     bounds, plus the evidence they produced. The evidence is the part that
+     used to be thrown away: convo is rebuilt per attempt, so a fallback model
+     started with no results AND no budget — the emptiest state possible, and
+     precisely the input that makes these models write protocol into prose. */
+  const ledger = {
+    executed: 0,                 // counts against CHAT_TURN_TOOL_CEILING
+    seen: new Map(),             // name+args → result, for deduplication
+    evidence: [],                // {name, result} carried into a fallback
+  };
+
+  const toolNames = tools.map((t) => t.function.name);
+  const registered = new Set(toolNames);
 
   const attempts = [];
   const attemptFor = (cfg) => {
     let a = attempts.find((x) => x.id === cfg.id);
     if (!a) {
-      a = { id: cfg.id, model: cfg.model, provider: cfg.provider, calls: 0,
+      a = { id: cfg.id, model: cfg.model, provider: cfg.provider, calls: 0, tools_executed: 0,
         input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0,
         served: false };
       attempts.push(a);
@@ -450,6 +582,26 @@ async function runChat({ messages, pageContext, modelId, summary, needTitle } = 
        only ever tried the model that answered. It spent no tokens, but it did
        spend a timeout, and a fallback we cannot see is one we cannot cost. */
     const attempt = attemptFor(cfg);
+
+    /* ── per-attempt state ────────────────────────────────────────────────
+       Reset for every model, because grounding is a claim about the model
+       that produced the answer. A tool call made by an attempt that was then
+       discarded grounds nothing: that model's results never reached this
+       model's context, and "some tool ran earlier in the turn" is exactly the
+       reasoning that let an invented booth number through. */
+    const isFirst = id === requestedId;
+    const allowance = isFirst ? config.CHAT_MAX_TOOL_CALLS : config.CHAT_FALLBACK_TOOL_CALLS;
+    let usedHere = 0;            // executions by THIS model
+    let groundedHere = 0;        // successful results THIS model has seen
+    let protocolLeaks = 0;
+    let forcedAfterLeak = false;
+    let namedToolsRetried = false;
+    let unknownTools = 0;
+    let deduped = 0;
+    const needsCanonical = wantsGlobalCount(question);
+    let usedCanonical = false;
+    let canonicalRetried = false;
+
     var system = SYSTEM_PROMPT;
     if (needTitle) system += '\n' + TITLE_INSTRUCTION;
     const convo = [{ role: 'system', content: system }];
@@ -465,16 +617,45 @@ async function runChat({ messages, pageContext, modelId, summary, needTitle } = 
     if (ctx) convo.push(ctx);
     convo.push(...history);
 
+    /* What earlier attempts already retrieved. A fallback should not re-pay
+       for work the turn has already done, and — more importantly — should not
+       begin a factual question with nothing in hand. Facts only, no prose:
+       the previous model's ANSWER is not evidence, only its tool results are. */
+    if (!isFirst && ledger.evidence.length) {
+      convo.push({
+        role: 'system',
+        content: 'ALREADY RETRIEVED THIS TURN (real tool output, use it rather than '
+          + 'asking again):\n'
+          + ledger.evidence.map((e) => `${e.name} → ${e.json}`).join('\n').slice(0, 6000),
+      });
+      groundedHere += ledger.evidence.length;
+      if (ledger.evidence.some((e) => e.name === CANONICAL_FOR_COUNTS)) usedCanonical = true;
+    }
+
     let lastError = null;
 
     try {
-      for (let round = 0; round <= config.CHAT_MAX_TOOL_CALLS; round++) {
-        /* On the last permitted round the tools are withheld, which forces an
-           answer from what has already been gathered instead of a reply that
-           asks for an eleventh tool call and never arrives. */
-        const budgetLeft = config.CHAT_MAX_TOOL_CALLS - toolCalls.length;
+      /* One round more than the allowance, deliberately.
+         Every round can spend budget, so a loop bounded at `allowance` ends on
+         the round that runs out — and the "answer with what you have" message
+         is written into the transcript and never sent. The model then simply
+         stops, which reads as a failure and drops the turn to the next model
+         for no reason. The extra round is the one where it answers. */
+      for (let round = 0; round <= allowance + 1; round++) {
+        /* Tools stay attached for the whole attempt.
+
+           They used to be withdrawn once the budget ran out, on the reasoning
+           that a model with no tools must answer. What it actually does is
+           write the tool call it wanted into prose. What bounds cost is
+           refusing to EXECUTE, further down — the model may always ask, and
+           gets told no in a way it can act on. Availability and permission are
+           different things, and conflating them is what put angle brackets in
+           front of a user. */
+        const budgetLeft = Math.min(
+          allowance - usedHere,
+          config.CHAT_TURN_TOOL_CEILING - ledger.executed);
         const r = await callModel(cfg, convo, {
-          tools: budgetLeft > 0 ? tools : null,
+          tools,
           toolChoice: forceTools ? 'required' : 'auto',
         });
         forceTools = false;      // one forced round, not a forced conversation
@@ -492,7 +673,59 @@ async function runChat({ messages, pageContext, modelId, summary, needTitle } = 
              at any of it. Ask once more with the tool call made mandatory —
              discarding this reply rather than feeding it back, so the model
              re-reads the question instead of defending its own guess. */
-          if (mustGround && !toolCalls.length && !groundingRetried && budgetLeft > 0) {
+          var draft = (r.message.content || '').trim();
+
+          /* Protocol, not prose. The model asked for a tool through the only
+             channel it had left. Treat it as a failed tool intent — never as
+             an answer, and never something the user sees. */
+          if (looksLikeProtocol(draft)) {
+            protocolLeaks++;
+            if (budgetLeft > 0 && !forcedAfterLeak) {
+              forcedAfterLeak = true;
+              forceTools = true;     // give it the structured channel it wanted
+              continue;
+            }
+            lastError = `${cfg.label} returned tool protocol instead of an answer.`;
+            break;                   // next model, or a clean failure
+          }
+
+          /* A global count answered from anything other than the canonical
+             source. Sending it back with the tool named is not a routing
+             table — there is one right answer to "how many exhibitors", and
+             this is where it lives. */
+          if (needsCanonical && !usedCanonical) {
+            if (budgetLeft > 0 && !canonicalRetried) {
+              canonicalRetried = true;
+              forceTools = true;
+              convo.push({ role: 'system', content:
+                'That is a question about the SIZE of the event. Call '
+                + CANONICAL_FOR_COUNTS + ' and answer from it. Do not add up category '
+                + 'lists: they overlap, they are capped, and their sum is not a total.' });
+              continue;
+            }
+            return {
+              ok: true,
+              refused: true,
+              reply: groundingRefusal(looksChinese(question)),
+              title: null, entities: [], sources: provenance(toolCalls),
+              toolCalls,
+              usage: {
+                ...totals,
+                provider: r.usage.provider, model: r.usage.model,
+                requested_provider: CHAT_MODELS[requestedId].provider,
+                requested_model: CHAT_MODELS[requestedId].model,
+                fell_back: id !== requestedId,
+                response_ms: Date.now() - started,
+                attempts: settle(id),
+              },
+            };
+          }
+
+          /* Grounding is per attempt. THIS model must have seen a successful
+             tool result — either one it fetched, or evidence carried in from
+             an earlier attempt. Tool calls made by a discarded attempt, whose
+             results this model never saw, ground nothing. */
+          if (mustGround && !groundedHere && !groundingRetried && budgetLeft > 0) {
             groundingRetried = true;
             forceTools = true;
             continue;
@@ -500,7 +733,7 @@ async function runChat({ messages, pageContext, modelId, summary, needTitle } = 
           /* It was asked twice and consulted nothing. The honest answer is
              that there isn't one — a confident guess about a booth number or
              an email history is worse than an admission. */
-          if (mustGround && !toolCalls.length) {
+          if (mustGround && !groundedHere) {
             return {
               ok: true,
               refused: true,
@@ -521,14 +754,28 @@ async function runChat({ messages, pageContext, modelId, summary, needTitle } = 
             };
           }
 
-          var text = (r.message.content || '').trim();
+          var text = draft;
           if (!text) { lastError = `${cfg.label} returned an empty answer.`; break; }
+
+          /* An answer that names our internals — an invented tool it wishes we
+             had, or a real one it should not be quoting — is not an answer the
+             user should read. Rare enough to be worth a retry rather than a
+             refusal. */
+          if (mentionsToolName(text, toolNames) && !namedToolsRetried && budgetLeft > 0) {
+            namedToolsRetried = true;
+            convo.push({ role: 'system', content:
+              'Answer in plain business language. Never mention tool names, function '
+              + 'names or internal system identifiers — describe the SOURCE instead, '
+              + 'for example "the official exhibitor list" or "our CRM".' });
+            continue;
+          }
           var titled = needTitle ? extractTitle(text) : { reply: text, title: null };
           text = titled.reply || text;
           return {
             ok: true,
             reply: text,
             title: titled.title,
+            sources: provenance(toolCalls),
             entities: entities.map(function (e) { return { type: e.type, id: e.id, name: e.name }; }),
             toolCalls,
             usage: {
@@ -544,20 +791,67 @@ async function runChat({ messages, pageContext, modelId, summary, needTitle } = 
         }
 
         convo.push(r.message);
-        // Only as many as the budget allows; the rest are refused with a note
-        // the model can act on rather than silently dropped.
+
+        /* Execution, in four gates. Every one of them ANSWERS the model rather
+           than dropping the call silently — a model that gets no reply to a
+           tool call will either invent the result or ask again. */
         for (const call of calls) {
-          const name = call.function && call.function.name;
-          if (toolCalls.length >= config.CHAT_MAX_TOOL_CALLS) {
-            convo.push({ role: 'tool', tool_call_id: call.id, name,
-              content: JSON.stringify({ error: 'tool budget for this turn is spent — answer with what you have' }) });
+          const name = (call.function && call.function.name) || '';
+          const rawArgs = (call.function && call.function.arguments) || '';
+          const reply = (obj) => convo.push({
+            role: 'tool', tool_call_id: call.id, name, content: JSON.stringify(obj),
+          });
+
+          /* 1. Unknown tool. The name is deliberately NOT echoed back: it is
+                usually one the model has just invented, and repeating it in
+                the transcript is how "get_exhibitor_list" becomes something it
+                will happily explain to a user. */
+          if (!registered.has(name)) {
+            unknownTools++;
+            reply({ error: 'that capability does not exist. Use one of the tools provided '
+              + 'in this request, and do not invent tool names.' });
             continue;
           }
-          const result = await chatTools.runTool(name, call.function && call.function.arguments);
+
+          /* 2. Asked already, identically, this turn. Returns the SAME result
+                rather than a refusal — a model that repeats itself still gets
+                its answer, it just does not cost anything. Different arguments
+                are a different question, so pagination still works. */
+          const key = name + '|' + rawArgs;
+          if (ledger.seen.has(key)) {
+            deduped++;
+            reply(ledger.seen.get(key));
+            continue;
+          }
+
+          // 3. Budget: per attempt and per turn, whichever binds first.
+          if (usedHere >= allowance || ledger.executed >= config.CHAT_TURN_TOOL_CEILING) {
+            reply({ error: 'no further lookups are available on this turn — answer with '
+              + 'what you already have, and say plainly what you could not check' });
+            continue;
+          }
+
+          // 4. Run it.
+          const result = await chatTools.runTool(name, rawArgs);
+          usedHere += 1;
+          ledger.executed += 1;
+          attempt.tools_executed += 1;      // per-model, so the budget is auditable
           toolCalls.push({ name, ok: !result.error, ms: result._ms });
           delete result._ms;
-          if (!result.error) collectEntities(result, entities);
-          convo.push({ role: 'tool', tool_call_id: call.id, name, content: JSON.stringify(result) });
+
+          if (!result.error) {
+            groundedHere += 1;
+            if (name === CANONICAL_FOR_COUNTS) usedCanonical = true;
+            collectEntities(result, entities);
+            /* Carried into any later attempt, so a fallback begins a factual
+               question with facts instead of nothing. Bounded, and only what
+               this model was shown. */
+            if (ledger.evidence.length < 8) {
+              ledger.evidence.push({ name, json: JSON.stringify(result).slice(0, 700) });
+            }
+          }
+          ledger.seen.set(key, result);
+          reply(result);
         }
       }
       if (!lastError) lastError = 'The assistant could not finish that request.';
@@ -602,4 +896,5 @@ const SUGGESTIONS = [
 
 module.exports = { runChat, SYSTEM_PROMPT, SUGGESTIONS, contextMessage, trimHistory,
   MAX_HISTORY, MAX_MESSAGE_CHARS, extractTitle, fallbackTitle, digest, collectEntities,
-  needsGrounding, groundingRefusal };
+  needsGrounding, groundingRefusal, looksLikeProtocol, mentionsToolName,
+  provenance, TOOL_SOURCES, wantsGlobalCount, CANONICAL_FOR_COUNTS };

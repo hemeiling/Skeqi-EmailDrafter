@@ -864,7 +864,12 @@ app.post('/api/chat', async (req, res) => {
        to debug. Never the arguments or the rows: those are CRM content. */
     res.json({
       reply: result.reply,
-      consulted: (result.toolCalls || []).map((t) => t.name),
+      /* What the user is shown: sources, not function names. The raw names
+         stay on the usage event, where they are what you need to debug a
+         turn. `consulted` is kept, deduplicated, so nothing that reads it
+         breaks — but the panel renders `sources`. */
+      sources: result.sources || [],
+      consulted: [...new Set((result.toolCalls || []).map((t) => t.name))],
       fell_back: Boolean(u.fell_back),
       thread_id: thread ? thread.id : null,
       title: thread ? thread.title : null,

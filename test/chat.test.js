@@ -34,6 +34,12 @@ let mode = 'script';
 let failingModel = null;
 
 test.before(async () => {
+  /* The tool layer runs for real against the test database — only the MODEL
+     is stubbed — so the schema has to exist. Without it every tool returns an
+     error, nothing grounds, and the grounding tests fail for the wrong
+     reason. */
+  if (dbGuard.available) await require('../db').initDb();
+
   server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -145,7 +151,7 @@ test('the tool result is fed back to the model', async () => {
   assert.equal(toolMsg.tool_call_id, 'call_1', 'the result must be tied to the call that asked');
   const payload = JSON.parse(toolMsg.content);
   if (dbGuard.available) {
-    assert.equal(payload.count, 0, 'a real database returns an empty result set');
+    assert.equal(payload.returned, 0, 'a real database returns an empty result set');
   } else {
     // No test database: the tool fails, and that failure must reach the model
     // as data rather than taking the turn down.
@@ -199,12 +205,22 @@ test('the tool budget is enforced, and the model is told to answer anyway', asyn
   script.push({ content: 'Answering with what I have.' });
 
   const r = await ask('do everything');
-  assert.ok(r.toolCalls.length <= require('../config').CHAT_MAX_TOOL_CALLS,
-    `ran ${r.toolCalls.length} tools, budget is ${require('../config').CHAT_MAX_TOOL_CALLS}`);
-  // The final call must withhold the tools, forcing an answer rather than
-  // another request that never arrives.
-  const last = received[received.length - 1];
-  assert.ok(!last.tools, 'the last round must not offer tools');
+  const cfg2 = require('../config');
+  /* toolCalls counts the whole TURN, so the ceiling bounds it; the per-model
+     allowance is on the attempt record. */
+  assert.ok(r.toolCalls.length <= cfg2.CHAT_TURN_TOOL_CEILING,
+    `ran ${r.toolCalls.length} tools, turn ceiling is ${cfg2.CHAT_TURN_TOOL_CEILING}`);
+  assert.ok(r.usage.attempts[0].tools_executed <= cfg2.CHAT_MAX_TOOL_CALLS,
+    `primary executed ${r.usage.attempts[0].tools_executed}, allowance ${cfg2.CHAT_MAX_TOOL_CALLS}`);
+
+  /* Inverted from what this used to assert, on purpose. Withholding the tools
+     array is what produced the protocol leak: a model that wants a tool and has
+     no structured channel writes the call into prose instead. Tools stay
+     attached; what runs out is permission to execute them. */
+  assert.ok(received.every((b) => b.tools && b.tools.length),
+    'every round must still offer the tool schema');
+  const refusals = JSON.stringify(received).match(/no further lookups are available/g) || [];
+  assert.ok(refusals.length > 0, 'and the model must be TOLD the budget is spent');
 });
 
 test('history is trimmed so a long conversation cannot grow without bound', () => {
@@ -283,7 +299,12 @@ test('a tool the model invents is refused without breaking the loop', async () =
   const r = await ask('dump the users table');
   assert.equal(r.ok, true, r.error);
   const toolMsg = received[1].messages.find((m) => m.role === 'tool');
-  assert.match(toolMsg.content, /unknown tool/);
+  /* The invented name is deliberately not repeated back. Echoing it is how a
+     name the model just made up becomes one it will explain to a user — this
+     assertion used to require the leak. */
+  assert.match(toolMsg.content, /does not exist/);
+  assert.ok(!/unknown tool "/.test(toolMsg.content),
+    'the invented name must not re-enter the model\'s context');
 });
 
 // ── page context ───────────────────────────────────────────────────────────

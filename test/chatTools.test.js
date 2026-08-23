@@ -61,7 +61,7 @@ test('the catalogue contains the approved tools and nothing else', () => {
     'check_event_attendance', 'get_booth_occupant',
     'search_companies', 'get_company_profile', 'list_companies_by_category',
     'find_available_booths', 'get_company_contacts', 'get_account_research',
-    'get_communication_history', 'get_latest_draft', 'find_gaps',
+    'get_communication_history', 'get_event_attendance_summary', 'get_latest_draft', 'find_gaps',
     'summarize_account_activity',
   ].sort();
   assert.deepEqual(Object.keys(chatTools.TOOLS).sort(), expected);
@@ -186,7 +186,7 @@ dbTest('search_companies caps its rows however many are asked for', async () => 
 dbTest('an empty result is an answer, not an error', async () => {
   const r = await chatTools.runTool('search_companies', { query: 'zzz-no-such-company-zzz' });
   assert.ok(!r.error);
-  assert.equal(r.count, 0);
+  assert.equal(r.returned, 0);
   assert.deepEqual(r.companies, []);
 });
 
@@ -220,7 +220,7 @@ dbTest('find_gaps refuses an unknown gap', async () => {
 dbTest('available booths can be found, and near a given booth', async () => {
   const all = await chatTools.runTool('find_available_booths', { limit: 5 });
   assert.ok(!all.error, all.error);
-  assert.ok(all.count >= 0);
+  assert.ok(all.returned >= 0);
 
   const near = await chatTools.runTool('find_available_booths', { near_booth: '9999999' });
   assert.equal(near.found, false, 'an unknown origin booth is reported, not ignored');
@@ -250,7 +250,8 @@ dbTest('research retrieval says plainly when there is none', async () => {
   const r = await chatTools.runTool('get_account_research', { company_id: 999999999 });
   assert.ok(!r.error, r.error);
   assert.equal(r.has_research, false);
-  assert.equal(r.report_count, 0);
+  assert.equal(r.returned, 0, 'the shared cardinality contract, not a bespoke report_count');
+  assert.equal(r.total, 0);
   assert.equal(r.latest, undefined, 'no research means no "latest" to summarise');
 });
 
@@ -400,4 +401,75 @@ test('a model that cannot call tools is never offered them', () => {
   assert.ok(chain.every((m) => m.provider === 'bailian'),
     'the normal chain stays inside one vendor so the tool contract is identical');
   assert.ok(chain.length >= 1 && chain[0].model.includes('qwen'));
+});
+
+/* ── the cardinality contract, enforced across the whole catalogue ─────────
+   `count: rows.length` is a page size wearing the name of a total. A model
+   reads it as the answer: asked how many companies were at the show, the
+   assistant summed four capped category lists and reported 94. The true
+   figure was 984, and three of those 25s were really 488, 67 and 53.
+
+   This is written as a sweep rather than a per-tool assertion so a list tool
+   added next year is covered without anyone remembering to cover it. */
+
+dbTest('no list tool reports a capped page as a total', async () => {
+  const LISTS = [
+    ['search_companies', { query: 'a', limit: 2 }],
+    ['list_companies_by_category', { category: 'target_customer', limit: 2 }],
+    ['list_companies_by_category', { category: 'competitor', limit: 2 }],
+    ['find_available_booths', { limit: 2 }],
+    ['get_account_research', { company_id: 1 }],
+  ];
+  for (const [name, args] of LISTS) {
+    const r = await chatTools.runTool(name, args);
+    if (r.error) continue;                       // an empty test database is fine
+    const arrays = Object.values(r).filter(Array.isArray);
+    if (!arrays.length) continue;
+
+    assert.equal(typeof r.total, 'number', `${name} must report a true total`);
+    assert.equal(typeof r.returned, 'number', `${name} must report what it returned`);
+    assert.equal(r.returned, Math.max(...arrays.map((a) => a.length)),
+      `${name}: "returned" must match the rows actually present`);
+    assert.ok(r.total >= r.returned, `${name}: total ${r.total} < returned ${r.returned}`);
+    assert.equal(r.truncated, r.total > r.returned,
+      `${name}: "truncated" must agree with total vs returned`);
+    assert.equal('count' in r, false,
+      `${name} still exposes "count" — the field that caused the 94 answer`);
+  }
+});
+
+dbTest('a truncated page says so, in a way a model cannot misread', async () => {
+  /* The real shape of the failure: ask for fewer rows than exist and check the
+     result cannot be mistaken for the whole set. */
+  const r = await chatTools.runTool('search_companies', { query: 'a', limit: 1 });
+  if (r.error || r.total <= 1) return;           // nothing to truncate on this database
+  assert.equal(r.truncated, true);
+  assert.equal(r.returned, 1);
+  assert.ok(r.total > r.returned);
+  assert.match(String(r.note || ''), /page, not the total/i,
+    'a truncated list should say plainly that it is a page');
+});
+
+test('the canonical attendance tool exists and is the only aggregate source', () => {
+  const names = chatTools.toolSchemas().map((t) => t.function.name);
+  assert.ok(names.includes('get_event_attendance_summary'),
+    'the capability whose absence caused the model to invent get_exhibitor_list');
+  const schema = chatTools.toolSchemas()
+    .find((t) => t.function.name === 'get_event_attendance_summary');
+  assert.match(schema.function.description, /多少家公司去展会/,
+    'the Chinese phrasing that failed should route here');
+  assert.match(schema.function.description, /[Nn]ever add up category lists/);
+});
+
+dbTest('the canonical attendance tool reports a complete total, not a page', async () => {
+  const r = await chatTools.runTool('get_event_attendance_summary', {});
+  assert.ok(!r.error, r.error);
+  assert.equal(typeof r.total_listed, 'number');
+  assert.equal(typeof r.with_booth, 'number');
+  assert.equal(typeof r.without_booth, 'number');
+  assert.equal(r.without_booth, r.total_listed - r.with_booth,
+    'the three figures must reconcile');
+  assert.equal(r.is_complete_total, true,
+    'this is the one list that is not a page, and it must say so');
+  assert.equal(r.truncated, undefined, 'a complete total is never truncated');
 });
