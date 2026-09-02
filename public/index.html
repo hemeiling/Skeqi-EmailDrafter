@@ -110,6 +110,133 @@
     .app-brand-sub { font-size: 0.66rem; font-weight: 500; color: rgba(255,255,255,0.62); letter-spacing: 0.04em; }
 
     .app-sidebar-nav { flex: 1; padding: 12px 10px; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; }
+    /* ── Current Account Research (Qwen) workspace ────────────────────────
+       Native CRM styling: every colour, radius and font comes from the shell's
+       own variables, so this reads as another CRM surface rather than as an
+       embedded application. */
+    .qr-subtabs { display:flex; align-items:center; gap:4px; flex-wrap:wrap;
+      border-bottom:1px solid var(--color-border); margin:0 0 16px; padding-bottom:2px; }
+    .qr-subtab { background:none; border:0; border-bottom:2px solid transparent; font:inherit;
+      font-size:0.86rem; font-weight:600; color:var(--color-text-secondary); cursor:pointer;
+      padding:9px 13px; display:flex; flex-direction:column; align-items:flex-start; line-height:1.3; }
+    .qr-subtab .i18n-zh { font-size:0.74rem; font-weight:500; opacity:.8; }
+    .qr-subtab:hover { color:var(--color-text-primary); }
+    .qr-subtab.active { color:var(--color-primary); border-bottom-color:var(--color-primary); }
+    .qr-langwrap { margin-left:auto; display:flex; align-items:center; gap:8px; padding-bottom:6px; }
+    .qr-langlabel { font-size:0.72rem; color:var(--color-text-tertiary); font-weight:600; }
+    .qr-seg { display:inline-flex; border:1px solid var(--color-border); border-radius:7px;
+      overflow:hidden; background:var(--color-surface); }
+    .qr-seg button { background:none; border:0; border-right:1px solid var(--color-border);
+      font:inherit; font-size:0.78rem; font-weight:600; color:var(--color-text-secondary);
+      padding:5px 11px; cursor:pointer; }
+    .qr-seg button:last-child { border-right:0; }
+    .qr-seg button.active { background:var(--color-primary); color:#fff; }
+
+    .qr-notice { margin:0 0 14px; padding:11px 14px; border-radius:8px; font-size:0.84rem;
+      background:var(--color-warn-soft); border:1px solid var(--color-warn); color:#7a5600; }
+    .qr-notice .i18n-zh { display:block; opacity:.85; margin-top:2px; }
+
+    .qr-form { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px 18px; }
+    .qr-form label { display:flex; flex-direction:column; gap:5px; font-size:0.76rem;
+      font-weight:600; color:var(--color-text-secondary); }
+    .qr-form input, .qr-form select { font:inherit; font-size:0.86rem; padding:8px 10px;
+      border:1px solid var(--color-border); border-radius:7px; background:#fff; font-weight:400;
+      color:var(--color-text-primary); }
+    .qr-form input:focus, .qr-form select:focus { outline:0; border-color:var(--color-primary);
+      box-shadow:0 0 0 3px var(--color-primary-soft); }
+    .qr-opt { font-weight:500; color:var(--color-text-tertiary); }
+    .qr-formactions { display:flex; align-items:flex-end; justify-content:flex-end; }
+    .qr-msg { margin:12px 0 0; font-size:0.82rem; padding:9px 12px; border-radius:7px; }
+    .qr-msg.err { background:var(--color-danger-soft); border:1px solid var(--color-danger-border);
+      color:var(--color-danger-text); }
+    .qr-msg.info { background:var(--color-primary-soft); color:var(--color-primary-text); }
+
+    .qr-actionbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:16px;
+      padding-top:14px; border-top:1px solid var(--color-border); }
+    .qr-sep { width:1px; height:20px; background:var(--color-border); }
+    .qr-spacer { margin-left:auto; }
+    .qr-link { background:none; border:0; color:var(--color-primary); font:inherit;
+      font-size:0.82rem; font-weight:600; cursor:pointer; }
+    .qr-link:hover { text-decoration:underline; }
+
+    .qr-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px;
+      margin-bottom:14px; }
+    .qr-kpi { border:1px solid var(--color-border); border-radius:9px; padding:11px 13px;
+      background:var(--color-surface); }
+    .qr-kpi .k { font-size:0.7rem; font-weight:600; color:var(--color-text-tertiary); }
+    .qr-kpi .v { font-size:1.35rem; font-weight:700; margin-top:2px; }
+    .qr-metrics { display:flex; flex-wrap:wrap; gap:5px 20px; font-size:0.76rem;
+      color:var(--color-text-tertiary); margin-bottom:14px; }
+    .qr-metrics b { color:var(--color-text-secondary); margin-right:5px; }
+
+    .qr-table { width:100%; border-collapse:collapse; font-size:0.82rem; min-width:940px; }
+    .qr-table th { text-align:left; font-size:0.68rem; font-weight:700; letter-spacing:.03em;
+      color:var(--color-text-tertiary); padding:9px 11px; background:var(--color-surface);
+      border-bottom:1px solid var(--color-border); white-space:nowrap; }
+    .qr-table td { padding:9px 11px; border-bottom:1px solid var(--color-border-light,#eee);
+      vertical-align:top; }
+    .qr-table .num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .qr-empty { text-align:center; color:var(--color-text-tertiary); padding:30px 12px; }
+    .qr-badge { display:inline-block; padding:2px 9px; border-radius:20px; font-size:0.7rem;
+      font-weight:700; white-space:nowrap; background:#eef0f4; color:var(--color-text-secondary); }
+    .qr-b-Completed,.qr-b-ExistingReport { background:var(--color-success-soft); color:var(--color-success-text); }
+    .qr-b-Searching,.qr-b-Generating,.qr-b-PDFGenerating { background:var(--color-primary-soft); color:var(--color-primary-text); }
+    .qr-b-Failed,.qr-b-TimedOut { background:var(--color-danger-soft); color:var(--color-danger-text); }
+    .qr-rowacts { display:flex; gap:5px; flex-wrap:wrap; margin-top:6px; }
+    .qr-rowacts button, .qr-acts a, .qr-acts button { font:inherit; font-size:0.74rem; font-weight:600;
+      background:#fff; border:1px solid var(--color-border); border-radius:5px; padding:4px 8px;
+      cursor:pointer; color:var(--color-text-secondary); text-decoration:none; display:inline-block; }
+    .qr-rowacts button:hover, .qr-acts a:hover, .qr-acts button:hover {
+      background:var(--color-primary-soft); color:var(--color-primary-text); }
+    .qr-rowacts button.del, .qr-acts button.del { color:var(--color-danger); }
+    .qr-acts { display:flex; gap:5px; align-items:center; white-space:nowrap; }
+    .qr-rowedit { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
+    .qr-rowedit input { font:inherit; font-size:0.8rem; padding:5px 8px; min-width:180px; flex:1;
+      border:1px solid var(--color-border); border-radius:6px; }
+
+    .qr-librow { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:16px; align-items:start; }
+    @media (max-width:1000px){ .qr-librow{grid-template-columns:1fr;} }
+    .qr-search { width:100%; font:inherit; font-size:0.86rem; padding:8px 11px; margin-bottom:10px;
+      border:1px solid var(--color-border); border-radius:7px; }
+    .qr-liblist { list-style:none; margin:0; padding:0; max-height:540px; overflow:auto; }
+    .qr-liblist li { display:flex; align-items:center; gap:10px; padding:9px 2px;
+      border-bottom:1px solid var(--color-border-light,#eee); font-size:0.84rem; }
+    .qr-liblist .co { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .qr-liblist .mt { color:var(--color-text-tertiary); font-size:0.72rem; white-space:nowrap; }
+    .qr-liblist .sp { margin-left:auto; display:flex; gap:5px; }
+    .qr-count { font-size:0.74rem; color:var(--color-text-tertiary); font-weight:500; }
+    .qr-portfolio { display:flex; flex-direction:column; gap:9px; }
+
+    .qr-metagrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:1px;
+      background:var(--color-border); border:1px solid var(--color-border); border-radius:8px;
+      overflow:hidden; margin-bottom:16px; }
+    .qr-metagrid div { background:#fff; padding:9px 11px; font-size:0.85rem; font-weight:600; }
+    .qr-metagrid b { display:block; font-size:0.66rem; font-weight:700; letter-spacing:.04em;
+      color:var(--color-text-tertiary); text-transform:uppercase; margin-bottom:2px; }
+    .qr-report { font-size:0.87rem; line-height:1.62; color:var(--color-text-primary); overflow-wrap:anywhere; }
+    .qr-report h2 { font-size:0.95rem; margin:20px 0 7px; padding-bottom:4px;
+      border-bottom:1px solid var(--color-border); font-weight:700; }
+    .qr-report h3 { font-size:0.86rem; margin:14px 0 4px; font-weight:700; }
+    .qr-report ul { margin:6px 0; padding-left:20px; }
+    .qr-report table { width:100%; border-collapse:collapse; margin:10px 0; font-size:0.8rem; }
+    .qr-report th, .qr-report td { border:1px solid var(--color-border); padding:6px 8px;
+      text-align:left; vertical-align:top; }
+    .qr-report th { background:var(--color-surface); font-weight:700; }
+    .qr-cite { display:inline-block; min-width:16px; text-align:center; background:var(--color-primary-soft);
+      color:var(--color-primary-text); border-radius:9px; padding:0 6px; font-size:0.68rem;
+      font-weight:700; margin:0 2px; }
+    .qr-tagv { color:var(--color-success); font-weight:700; }
+    .qr-tagl { color:#9a6400; font-weight:700; }
+    .qr-srclist { list-style:none; margin:10px 0 0; padding:0; font-size:0.78rem; }
+    .qr-srclist li { padding:7px 0; border-bottom:1px solid var(--color-border-light,#eee); }
+    .qr-srclist .t { font-weight:600; }
+    .qr-srclist a { font-size:0.72rem; word-break:break-all; }
+
+    .qr-pdfbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:10px 14px;
+      background:var(--color-surface); border-bottom:1px solid var(--color-border); }
+    .qr-pdftitle { font-size:0.76rem; font-weight:700; color:var(--color-text-tertiary); }
+    .qr-pdftitle b { color:var(--color-text-primary); font-size:0.85rem; margin-left:8px; }
+
     /* Account Research sub-tabs. Shell chrome only: nothing inside either
        iframe is styled, sized or otherwise touched from here. */
     .ar-tab { display:flex; flex-direction:column; align-items:flex-start; gap:1px;
@@ -2871,22 +2998,147 @@
       </button>
     </div>
 
-    <!-- Current: standalone Qwen app. src is set at runtime from
-         CURRENT_ACCOUNT_RESEARCH_URL; it is never hardcoded. -->
+    <!-- Current: a NATIVE CRM workspace. The Qwen research engine stays a
+         separate service, but its UI lives here, in the CRM's own shell, cards,
+         buttons and typography. There is no nested application chrome. -->
     <div id="ar-pane-current">
-      <iframe id="ar-qwen-frame" title="Current Account Research (Qwen-based)"
-              style="display:block;width:100%;height:calc(100vh - 176px);border:0;background:transparent;"
-              referrerpolicy="no-referrer"></iframe>
-      <div id="ar-qwen-fallback" style="display:none;padding:26px;border:1px solid var(--color-border);
-           border-radius:10px;background:var(--color-surface);">
-        <div style="font-weight:600;margin-bottom:6px;">Current Account Research is not configured
-          <span class="i18n-zh" style="opacity:.75;font-weight:500;">当前账户研究未配置</span></div>
-        <div style="font-size:0.85rem;color:var(--color-text-tertiary);line-height:1.6;">
-          Set <code>CURRENT_ACCOUNT_RESEARCH_URL</code> to the standalone app's address.
-          <span class="i18n-zh">请设置 CURRENT_ACCOUNT_RESEARCH_URL 指向独立应用地址。</span>
+      <div class="qr-subtabs">
+        <button class="qr-subtab active" data-qr-tab="single">Single Company
+          <span class="i18n-zh">单个公司</span></button>
+        <button class="qr-subtab" data-qr-tab="batch">Batch Research
+          <span class="i18n-zh">批量研究</span></button>
+        <button class="qr-subtab" data-qr-tab="library">Reports
+          <span class="i18n-zh">报告库</span></button>
+        <div class="qr-langwrap">
+          <span class="qr-langlabel">Language / 语言</span>
+          <div class="qr-seg" id="qr-lang">
+            <button data-qr-lang="en">English</button>
+            <button data-qr-lang="zh">中文</button>
+            <button data-qr-lang="bilingual">Bilingual</button>
+          </div>
         </div>
-        <a id="ar-qwen-open" href="#" style="display:none;margin-top:14px;" class="btn-sm btn-primary">
-          Open Account Research <span class="i18n-zh" style="opacity:.8;">打开账户研究</span></a>
+      </div>
+
+      <div id="qr-model-notice" class="qr-notice" hidden></div>
+
+      <!-- ── Single Company ── -->
+      <section class="qr-view" data-qr-view="single">
+        <div class="card">
+          <div class="card-title">Research a Company <span class="i18n-zh">研究单个公司</span></div>
+          <div class="qr-form">
+            <label>Company Name / 公司名称
+              <input id="qr-company" type="text" placeholder="SKEQI" autocomplete="off"></label>
+            <label>Company Website / 公司官网 <span class="qr-opt">optional / 可选</span>
+              <input id="qr-website" type="url" placeholder="https://…" autocomplete="off"></label>
+            <label>Model / 模型 <select id="qr-model"></select></label>
+            <div class="qr-formactions">
+              <button id="qr-generate" class="btn-sm btn-primary">Generate Research
+                <span class="i18n-zh">生成研究报告</span></button>
+            </div>
+          </div>
+          <p id="qr-single-msg" class="qr-msg" hidden></p>
+        </div>
+
+        <div class="card" id="qr-report-card" style="display:none;">
+          <div class="card-title" style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+            <span id="qr-report-title">Report</span>
+            <span style="display:flex;gap:8px;">
+              <button class="btn-sm btn-ghost" id="qr-view-pdf">View PDF <span class="i18n-zh">查看PDF</span></button>
+              <button class="btn-sm btn-ghost" id="qr-dl-pdf">Download PDF <span class="i18n-zh">下载PDF</span></button>
+              <button class="btn-sm btn-ghost" id="qr-regen">Regenerate <span class="i18n-zh">重新生成</span></button>
+              <!-- No i18n-zh here: the CRM's own i18n already translates "Delete", and a
+                   manual span would render it twice. -->
+              <button class="btn-sm btn-danger" id="qr-delete">Delete</button>
+            </span>
+          </div>
+          <div id="qr-meta" class="qr-metagrid"></div>
+          <div id="qr-contacts"></div>
+          <div id="qr-report" class="qr-report"></div>
+          <div id="qr-sources"></div>
+        </div>
+      </section>
+
+      <!-- ── Batch Research ── -->
+      <section class="qr-view" data-qr-view="batch" hidden>
+        <div class="card">
+          <div class="card-title">Batch Research <span class="i18n-zh">批量研究</span></div>
+          <div class="qr-form">
+            <label>Company List / 公司列表 <span class="qr-opt">.xlsx / .csv</span>
+              <input id="qr-file" type="file" accept=".csv,.xlsx,.xlsm"></label>
+            <label>Model / 模型 <select id="qr-batchmodel"></select></label>
+            <label>Company Column / 公司名称列 <select id="qr-colname"></select></label>
+            <label>Website Column / 官网列 <select id="qr-colsite"></select></label>
+          </div>
+          <div class="qr-actionbar">
+            <button id="qr-run-selected" class="btn-sm btn-primary">Generate Selected
+              <span class="i18n-zh">生成选中公司</span></button>
+            <button id="qr-run-all" class="btn-sm">Generate All / 生成全部</button>
+            <button id="qr-retry" class="btn-sm">Retry Failed / 重试失败项</button>
+            <button id="qr-stop" class="btn-sm btn-danger" hidden>Stop / 停止</button>
+            <span class="qr-sep"></span>
+            <button id="qr-sel-all" class="qr-link">Select All / 全选</button>
+            <button id="qr-sel-none" class="qr-link">Clear Selection / 清除选择</button>
+            <span class="qr-spacer"></span>
+            <button id="qr-del-selected" class="btn-sm btn-danger">Delete Selected Reports
+              <span class="i18n-zh">删除选中报告</span></button>
+          </div>
+          <p id="qr-batch-msg" class="qr-msg" hidden></p>
+        </div>
+
+        <div class="card">
+          <div id="qr-kpis" class="qr-kpis" hidden></div>
+          <div class="table-wrap">
+            <table class="qr-table" id="qr-batchtable">
+              <thead><tr>
+                <th style="width:34px"></th><th>Company / 公司</th><th>Website / 官网</th>
+                <th>Status / 状态</th><th>Model / 模型</th>
+                <th class="num">Sources / 来源</th><th class="num">Tokens</th>
+                <th class="num">Time / 时间</th><th style="width:170px">Actions / 操作</th>
+              </tr></thead>
+              <tbody><tr><td colspan="9" class="qr-empty">Upload a company list to begin.
+                <span class="i18n-zh">上传公司列表后开始批量研究。</span></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Report Library ── -->
+      <section class="qr-view" data-qr-view="library" hidden>
+        <div class="qr-librow">
+          <div class="card">
+            <div class="card-title" style="display:flex;justify-content:space-between;gap:10px;">
+              <span>Report Library <span class="i18n-zh">报告库</span></span>
+              <span class="qr-count" id="qr-libcount"></span>
+            </div>
+            <input id="qr-libsearch" class="qr-search" type="search"
+                   placeholder="Search reports / 搜索报告…" autocomplete="off">
+            <ul id="qr-liblist" class="qr-liblist"><li class="qr-empty">Loading…</li></ul>
+          </div>
+          <div class="card">
+            <div class="card-title">Portfolio Actions <span class="i18n-zh">汇总操作</span></div>
+            <div class="qr-portfolio">
+              <button id="qr-compile-all" class="btn-sm btn-primary">Compile Completed Reports
+                <span class="i18n-zh">汇总已完成报告</span></button>
+              <button id="qr-zip" class="btn-sm">Download ZIP / 下载ZIP</button>
+              <p id="qr-portfolio-msg" class="qr-msg" hidden></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── PDF preview: a PDF in a frame, never an app in a frame ── -->
+      <div class="card" id="qr-pdfcard" style="display:none;padding:0;overflow:hidden;">
+        <div class="qr-pdfbar">
+          <span class="qr-pdftitle">Report Preview <span class="i18n-zh">报告预览</span>
+            <b id="qr-pdfname"></b></span>
+          <span style="display:flex;gap:8px;margin-left:auto;">
+            <a id="qr-pdfopen" class="btn-sm btn-ghost" target="_blank" rel="noopener">Open Full Screen / 全屏</a>
+            <a id="qr-pdfdl" class="btn-sm btn-ghost">Download / 下载</a>
+            <button id="qr-pdfclose" class="btn-sm">Close / 关闭</button>
+          </span>
+        </div>
+        <iframe id="qr-pdfframe" title="Report PDF" style="display:block;width:100%;
+                height:calc(100vh - 260px);min-height:480px;border:0;background:#fff;"></iframe>
       </div>
     </div>
 
@@ -3596,7 +3848,8 @@
   </div>
 </div>
 
-<script src="/app.js"></script>
+<script src="/qwen-research.js"></script>
+  <script src="/app.js"></script>
 <script src="/i18n.js"></script>
   <!-- The assistant. Mounted in the shell rather than in a view: Booth Map and
        Account Research are iframes, so anything inside them would vanish on

@@ -994,6 +994,34 @@ app.get('/api/aresearch/render', async (req, res) => {
   }
 });
 
+/* Combined portfolio PDF and ZIP, built from the records in Neon rather than
+   from the engine's disk. The engine renders; the database decides what is in
+   the export. No model is called. */
+async function streamExport(req, res, path, filename) {
+  const body = req.body || {};
+  try {
+    const records = await qr.recordsFor(body.companies);
+    if (!records.length) return res.status(400).json({ error: 'No saved reports to export.' });
+    const upstream = await qr.callEngine(path, {
+      method: 'POST', raw: true,
+      body: { records, lang: body.lang || 'bilingual', title: body.title },
+    });
+    if (!upstream.ok) return res.status(502).json({ error: 'Renderer unavailable' });
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/octet-stream');
+    const cd = upstream.headers.get('content-disposition') || '';
+    const m = cd.match(/filename=?"?([^";]+)/);
+    res.setHeader('Content-Disposition', `attachment; filename="${m ? m[1] : filename}"`);
+    res.send(Buffer.from(await upstream.arrayBuffer()));
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+}
+
+app.post('/api/aresearch/export/portfolio', (req, res) =>
+  streamExport(req, res, '/api/render-portfolio', 'portfolio.pdf'));
+app.post('/api/aresearch/export/zip', (req, res) =>
+  streamExport(req, res, '/api/render-zip', 'account_research.zip'));
+
 /* ── Proxy to the research engine ───────────────────────────────────────── */
 
 // Model availability, surfaced as an activation state rather than an error.
@@ -1051,6 +1079,26 @@ app.get('/api/aresearch/job/:id', async (req, res) => {
 });
 
 // Batch: proxied straight through, with completed companies persisted on poll.
+/* Company-list upload. Multipart is streamed straight through to the engine,
+   which already knows how to parse .csv / .xlsx. */
+app.post('/api/aresearch/batch/upload', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+  try {
+    const form = new FormData();
+    form.append('file', new Blob([req.file.buffer]), req.file.originalname || 'companies.csv');
+    const headers = {};
+    if (process.env.ACCOUNT_RESEARCH_SERVICE_KEY) {
+      headers['X-AR-Service-Key'] = process.env.ACCOUNT_RESEARCH_SERVICE_KEY;
+    }
+    const upstream = await fetch(`${qr.ENGINE}/api/batch/upload`, {
+      method: 'POST', body: form, headers,
+    });
+    res.status(upstream.status).json(await upstream.json());
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 app.post('/api/aresearch/batch/start', async (req, res) => {
   try {
     const out = await qr.callEngine('/api/batch/start', { method: 'POST', body: req.body || {} });

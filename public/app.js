@@ -35,7 +35,6 @@ function ensureFrameLoaded(id, src) {
    Nothing is shared between them but this tab strip. Each frame loads on first
    activation, so opening the default tab does not pull the other bundle. */
 const AR_TAB_KEY = "ar_active_tab";
-let _arCurrentUrl = null;                 // cached answer from the server
 
 function accountResearchTab() {
   try {
@@ -43,17 +42,6 @@ function accountResearchTab() {
     if (v === "current" || v === "previous") return v;
   } catch (e) { /* private browsing */ }
   return "current";                       // Current (Qwen-based) is the default
-}
-
-async function currentAccountResearchUrl() {
-  if (_arCurrentUrl !== null) return _arCurrentUrl;
-  try {
-    const r = await fetch("/api/account-research/config").then((x) => x.json());
-    _arCurrentUrl = (r && r.currentUrl) || "";
-  } catch (e) {
-    _arCurrentUrl = "";
-  }
-  return _arCurrentUrl;
 }
 
 async function showAccountResearchTab(tab) {
@@ -68,18 +56,9 @@ async function showAccountResearchTab(tab) {
 
   if (!current) { ensureFrameLoaded("ar-frame", "/account-research/"); return; }
 
-  const url = await currentAccountResearchUrl();
-  const frame = document.getElementById("ar-qwen-frame");
-  const fallback = document.getElementById("ar-qwen-fallback");
-  if (url) {
-    ensureFrameLoaded("ar-qwen-frame", url);
-    if (frame) frame.style.display = "block";
-    if (fallback) fallback.style.display = "none";
-  } else {
-    // Unconfigured: say so plainly rather than framing a blank page.
-    if (frame) frame.style.display = "none";
-    if (fallback) fallback.style.display = "block";
-  }
+  /* Current is a native CRM workspace, not an iframe. It initialises once and
+     then refreshes its own library each time the tab is opened. */
+  if (window.qwenResearchInit) window.qwenResearchInit();
 }
 
 function showView(name) {

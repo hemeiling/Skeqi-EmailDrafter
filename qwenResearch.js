@@ -114,9 +114,28 @@ async function renderStored(record, lang, format) {
   });
 }
 
+/** Canonical records for a set of companies, straight from Neon. Exports are
+ *  built from these, so a portfolio or ZIP never depends on what happens to be
+ *  on the engine's filesystem. */
+async function recordsFor(companies) {
+  const out = [];
+  if (Array.isArray(companies) && companies.length) {
+    for (const c of companies) {
+      const got = await db.getQwenReportForCompany(String(c));
+      if (got) out.push(got.report);
+    }
+    return out;
+  }
+  for (const row of await db.listQwenReports()) {
+    const got = await db.getQwenReport(row.id);
+    if (got) out.push(got.report);
+  }
+  return out;
+}
+
 module.exports = {
   ENGINE, MODEL_UNAVAILABLE,
   engineConfigured, callEngine, looksLikeModelAccessError,
   persistRun, listReports, getReport, getReportForCompany, reportsExist,
-  deleteReportForCompany, renderStored,
+  deleteReportForCompany, renderStored, recordsFor,
 };
