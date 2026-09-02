@@ -18,6 +18,15 @@ const APP_USERNAME = process.env.APP_USERNAME || '';
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const PORT = process.env.PORT || 3000;
 
+/* The standalone Account Research app (Qwen-based) runs as its OWN service with
+   its own models, retrieval, Apollo, credentials and storage. The CRM only
+   embeds it in an iframe — no database, API, session or report is shared. This
+   is the URL of that service and nothing else; it is not a secret, but it is
+   never hardcoded so local and production can differ.
+     local:      http://127.0.0.1:5057
+     production: https://<render-service>.onrender.com  */
+const CURRENT_ACCOUNT_RESEARCH_URL = (process.env.CURRENT_ACCOUNT_RESEARCH_URL || '').trim().replace(/\/+$/, '');
+
 /* ── Which model does which job ───────────────────────────────────────────
    Two workloads with different economics, so two independent settings.
    Neither default reads the other's variable, and nothing below is shared,
@@ -334,6 +343,7 @@ module.exports = {
   APP_USERNAME,
   APP_PASSWORD,
   PORT,
+  CURRENT_ACCOUNT_RESEARCH_URL,
   OPENAI_EMAIL_MODEL,
   OPENAI_CHAT_URL,
   OPENAI_EMAIL_MAX_TOKENS,

@@ -888,6 +888,14 @@ app.get('/api/chat/config', (req, res) => {
   res.json({ available: config.isChatConfigured(), suggestions: SUGGESTIONS });
 });
 
+/* Where the standalone Account Research app lives, for the iframe on the
+   Account Research page. A URL, not a credential — the standalone app holds its
+   own keys and gates its own access. Empty means "not configured", and the tab
+   then explains that instead of framing a blank page. */
+app.get('/api/account-research/config', (req, res) => {
+  res.json({ currentUrl: config.CURRENT_ACCOUNT_RESEARCH_URL });
+});
+
 /* GET /api/booth-map/unmatched — the booths that did NOT resolve to a company.
 
    The importer refuses to guess: where a booth's company name matches two CRM

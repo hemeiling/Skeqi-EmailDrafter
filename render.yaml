@@ -35,6 +35,10 @@ services:
       # discarded, so this grants no mailbox or read access.
       - key: REPLY_INGEST_TOKEN    # forwarding connector token
         sync: false
+      # Standalone Account Research app (separate Render service). A URL, not a
+      # secret, but it differs per environment so it is never hardcoded.
+      - key: CURRENT_ACCOUNT_RESEARCH_URL
+        sync: false
       - key: APP_USERNAME          # HTTP Basic Auth username for the app login gate
         sync: false
       - key: APP_PASSWORD          # HTTP Basic Auth password

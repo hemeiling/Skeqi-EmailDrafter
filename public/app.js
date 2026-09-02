@@ -28,6 +28,60 @@ function ensureFrameLoaded(id, src) {
   if (f && !f.getAttribute("src")) f.setAttribute("src", src);
 }
 
+/* ── Account Research: two independent apps behind one nav item ───────────
+   Current  = the standalone Qwen service, embedded cross-origin. Its URL comes
+              from the server (CURRENT_ACCOUNT_RESEARCH_URL), never hardcoded.
+   Previous = the existing Claude bundle at /account-research/, untouched.
+   Nothing is shared between them but this tab strip. Each frame loads on first
+   activation, so opening the default tab does not pull the other bundle. */
+const AR_TAB_KEY = "ar_active_tab";
+let _arCurrentUrl = null;                 // cached answer from the server
+
+function accountResearchTab() {
+  try {
+    const v = localStorage.getItem(AR_TAB_KEY);
+    if (v === "current" || v === "previous") return v;
+  } catch (e) { /* private browsing */ }
+  return "current";                       // Current (Qwen-based) is the default
+}
+
+async function currentAccountResearchUrl() {
+  if (_arCurrentUrl !== null) return _arCurrentUrl;
+  try {
+    const r = await fetch("/api/account-research/config").then((x) => x.json());
+    _arCurrentUrl = (r && r.currentUrl) || "";
+  } catch (e) {
+    _arCurrentUrl = "";
+  }
+  return _arCurrentUrl;
+}
+
+async function showAccountResearchTab(tab) {
+  const current = tab !== "previous";
+  document.querySelectorAll(".ar-tab").forEach((b) =>
+    b.classList.toggle("active", (b.dataset.arTab === "current") === current));
+  const cur = document.getElementById("ar-pane-current");
+  const prev = document.getElementById("ar-pane-previous");
+  if (cur) cur.style.display = current ? "" : "none";
+  if (prev) prev.style.display = current ? "none" : "";
+  try { localStorage.setItem(AR_TAB_KEY, current ? "current" : "previous"); } catch (e) { /* ignore */ }
+
+  if (!current) { ensureFrameLoaded("ar-frame", "/account-research/"); return; }
+
+  const url = await currentAccountResearchUrl();
+  const frame = document.getElementById("ar-qwen-frame");
+  const fallback = document.getElementById("ar-qwen-fallback");
+  if (url) {
+    ensureFrameLoaded("ar-qwen-frame", url);
+    if (frame) frame.style.display = "block";
+    if (fallback) fallback.style.display = "none";
+  } else {
+    // Unconfigured: say so plainly rather than framing a blank page.
+    if (frame) frame.style.display = "none";
+    if (fallback) fallback.style.display = "block";
+  }
+}
+
 function showView(name) {
   if (!APP_VIEW_LABELS[name]) return;
   document.querySelectorAll("[data-view]").forEach((el) => {
@@ -49,7 +103,7 @@ function showView(name) {
     ensureFrameLoaded("bm-frame", "/booth-map/");
     loadBoothMapStatus();          // last-verified comes from the audit trail
   }
-  if (name === "account-research") ensureFrameLoaded("ar-frame", "/account-research/");
+  if (name === "account-research") showAccountResearchTab(accountResearchTab());
   if (name === "home") loadDashboard();
   /* Fetching belongs to the view, not to one button that opens it. The
      dashboard was loaded only by the sidebar nav item's own click handler,
@@ -70,6 +124,10 @@ function showView(name) {
 function initAppShell() {
   document.querySelectorAll(".app-nav-item").forEach((item) => {
     item.addEventListener("click", () => showView(item.dataset.navView));
+  });
+
+  document.querySelectorAll(".ar-tab").forEach((b) => {
+    b.addEventListener("click", () => showAccountResearchTab(b.dataset.arTab));
   });
 
   /* The logo and product name are global Home controls, as in Salesforce,
