@@ -1,4 +1,5 @@
 const config = require('./config');
+const qr = require('./qwenResearch.js');
 
 const crypto = require('crypto');
 const express = require('express');
@@ -894,6 +895,188 @@ app.get('/api/chat/config', (req, res) => {
    then explains that instead of framing a blank page. */
 app.get('/api/account-research/config', (req, res) => {
   res.json({ currentUrl: config.CURRENT_ACCOUNT_RESEARCH_URL });
+});
+
+/* ── Account Research (Qwen-based) ────────────────────────────────────────
+   Neon is the system of record; the standalone Python engine still runs the
+   research and renders the PDFs. Reads never touch the engine, so the report
+   library and every saved report keep working when the engine is down or its
+   models are not activated.
+
+   A SECOND engine: nothing here reads or writes account_reports. */
+
+// Report library. Served from Neon, so it survives a restart of either app.
+app.get('/api/aresearch/reports', async (req, res) => {
+  try {
+    res.json(await qr.listReports(req.query.q));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// One stored report, canonical bilingual record included.
+app.get('/api/aresearch/reports/:id', async (req, res) => {
+  try {
+    const got = await qr.getReport(req.params.id);
+    if (!got) return res.status(404).json({ error: 'not found' });
+    res.json(got);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// The company's current report, or 404. This is also existing-report detection.
+app.get('/api/aresearch/company/:company', async (req, res) => {
+  try {
+    const got = await qr.getReportForCompany(req.params.company);
+    if (!got) return res.status(404).json({ error: 'no report for that company' });
+    res.json(got);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Existing Report vs Generate, for a batch list. Booleans, no versions.
+app.get('/api/aresearch/exists', async (req, res) => {
+  const names = String(req.query.companies || '').split('||').map((s) => s.trim()).filter(Boolean);
+  try {
+    res.json(await qr.reportsExist(names));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* Delete removes the company's current report. The company then reads as
+   having none, and the next run generates fresh research. */
+app.post('/api/aresearch/reports/delete', async (req, res) => {
+  const body = req.body || {};
+  let names = body.companies;
+  if (typeof names === 'string') names = [names];
+  if (!Array.isArray(names) || !names.length) {
+    return res.status(400).json({ error: 'companies is required' });
+  }
+  try {
+    const results = [];
+    for (const n of names.slice(0, 200)) {
+      results.push({ company: String(n), deleted: await qr.deleteReportForCompany(String(n)) });
+    }
+    res.json({ ok: true, deleted: results.reduce((a, r) => a + r.deleted, 0), results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* Language view of a STORED report. No model call — the engine is used purely
+   as the renderer that produced the record. */
+app.get('/api/aresearch/render', async (req, res) => {
+  const lang = req.query.lang || 'bilingual';
+  const format = req.query.format === 'pdf' ? 'pdf' : 'markdown';
+  try {
+    const got = req.query.id
+      ? await qr.getReport(req.query.id)
+      : await qr.getReportForCompany(req.query.company || '');
+    if (!got) return res.status(404).json({ error: 'no stored report' });
+    if (format === 'markdown') {
+      const out = await qr.renderStored(got.report, lang, 'markdown');
+      return res.status(out.status).json(out.data);
+    }
+    const upstream = await qr.renderStored(got.report, lang, 'pdf');
+    if (!upstream.ok) {
+      return res.status(502).json({ error: 'PDF renderer unavailable' });
+    }
+    res.setHeader('Content-Type', 'application/pdf');
+    const disp = req.query.inline === '1' ? 'inline' : 'attachment';
+    const name = (upstream.headers.get('content-disposition') || '').match(/filename=?"?([^";]+)/);
+    res.setHeader('Content-Disposition', `${disp}; filename="${name ? name[1] : 'report.pdf'}"`);
+    res.send(Buffer.from(await upstream.arrayBuffer()));
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+/* ── Proxy to the research engine ───────────────────────────────────────── */
+
+// Model availability, surfaced as an activation state rather than an error.
+app.get('/api/aresearch/models/health', async (req, res) => {
+  try {
+    const out = await qr.callEngine(`/api/models/health${req.query.probe === '1' ? '?probe=1' : ''}`);
+    const models = (out.data && out.data.models) || [];
+    res.status(out.status).json({
+      ...out.data,
+      modelsAvailable: models.some((m) => m.state === 'available'),
+      unavailableNotice: models.length && !models.some((m) => m.state === 'available')
+        ? qr.MODEL_UNAVAILABLE : null,
+    });
+  } catch (e) {
+    res.status(503).json({ error: e.message, engineConfigured: qr.engineConfigured() });
+  }
+});
+
+// Start a run. The engine does the research; polling persists the result.
+app.post('/api/aresearch/research', async (req, res) => {
+  try {
+    const out = await qr.callEngine('/api/research', { method: 'POST', body: req.body || {} });
+    res.status(out.status).json(out.data);
+  } catch (e) {
+    res.status(503).json({ error: e.message });
+  }
+});
+
+/* Poll a job and persist it the moment it completes.
+
+   Persistence is best-effort ON TOP of the engine's own result: if Neon is
+   unreachable the finished research is still returned to the browser and the
+   engine still holds it. Losing the save must not lose the report. */
+app.get('/api/aresearch/job/:id', async (req, res) => {
+  try {
+    const out = await qr.callEngine(`/api/job/${encodeURIComponent(req.params.id)}`);
+    const job = out.data || {};
+    if (out.status === 200 && job.status === 'done') {
+      for (const m of Object.values(job.models || {})) {
+        if (m && m.status === 'complete' && m.result) {
+          try {
+            const saved = await qr.persistRun(m.result, reqUser(req));
+            if (saved) m.persisted = { id: saved.id, version: saved.version };
+          } catch (e) {
+            m.persistError = String(e.message).slice(0, 200);
+          }
+        }
+      }
+    }
+    if (qr.looksLikeModelAccessError(job)) job.modelUnavailable = qr.MODEL_UNAVAILABLE;
+    res.status(out.status).json(job);
+  } catch (e) {
+    res.status(503).json({ error: e.message });
+  }
+});
+
+// Batch: proxied straight through, with completed companies persisted on poll.
+app.post('/api/aresearch/batch/start', async (req, res) => {
+  try {
+    const out = await qr.callEngine('/api/batch/start', { method: 'POST', body: req.body || {} });
+    res.status(out.status).json(out.data);
+  } catch (e) {
+    res.status(503).json({ error: e.message });
+  }
+});
+
+app.get('/api/aresearch/batch/:id', async (req, res) => {
+  try {
+    const out = await qr.callEngine(`/api/batch/${encodeURIComponent(req.params.id)}`);
+    res.status(out.status).json(out.data);
+  } catch (e) {
+    res.status(503).json({ error: e.message });
+  }
+});
+
+app.post('/api/aresearch/batch/:id/stop', async (req, res) => {
+  try {
+    const out = await qr.callEngine(`/api/batch/${encodeURIComponent(req.params.id)}/stop`,
+      { method: 'POST', body: {} });
+    res.status(out.status).json(out.data);
+  } catch (e) {
+    res.status(503).json({ error: e.message });
+  }
 });
 
 /* GET /api/booth-map/unmatched — the booths that did NOT resolve to a company.

@@ -39,6 +39,8 @@ services:
       # secret, but it differs per environment so it is never hardcoded.
       - key: CURRENT_ACCOUNT_RESEARCH_URL
         sync: false
+      - key: ACCOUNT_RESEARCH_SERVICE_KEY   # must match APP_SERVICE_KEY on that service
+        sync: false
       - key: APP_USERNAME          # HTTP Basic Auth username for the app login gate
         sync: false
       - key: APP_PASSWORD          # HTTP Basic Auth password
