@@ -1010,9 +1010,18 @@ async function initDb() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  /* ONE CURRENT REPORT PER COMPANY. There is no version history: researching a
+     company again REPLACES its report. company_key is the identity — a
+     normalised company name, always present, unlike company_id which is NULL
+     whenever the CRM does not yet know the company. The unique index is what
+     makes the upsert in saveQwenReport() safe under concurrency; enforcing it
+     only in application code would let two simultaneous runs both insert. */
+  await pool.query(`ALTER TABLE account_research_qwen_reports ADD COLUMN IF NOT EXISTS company_key TEXT`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_reports_key ON account_research_qwen_reports(report_key)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_reports_created ON account_research_qwen_reports(created_at DESC)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_reports_company ON account_research_qwen_reports(LOWER(company_name))`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_arq_reports_company_key
+                      ON account_research_qwen_reports(company_key)`);
 
   /* Batch runs. The engine keeps live job state in its own memory; this is the
      durable record of what a batch was and how it finished, so a restart loses
@@ -3987,37 +3996,39 @@ function arqSlug(text) {
     .replace(/^-+|-+$/g, '') || 'na';
 }
 
-/* The identity of a report is company + model. A rerun of the same pair is a
-   new VERSION of that report, not a new report, which is what makes an import
-   or a regenerate idempotent. */
+/* One current report per company. Researching a company again REPLACES its
+   report; there is no version history and no version selector. `version` is
+   kept as a regeneration counter — how many times this company has been
+   researched — not as a pointer to a retained older row. */
 function arqReportKey(company, model) {
   return `${arqSlug(company)}__${arqSlug(model)}`;
 }
 
-/* Deterministic id so re-importing the same file updates the same row rather
-   than inserting a duplicate. researchedAt is the engine's own timestamp. */
+/* Retained so the importer and older callers keep working. The id is no longer
+   what makes a save idempotent — company_key is. */
 function arqReportId(company, model, researchedAt) {
   const stamp = String(researchedAt || '').replace(/[^0-9]/g, '').slice(0, 14) || '0';
   return `${arqReportKey(company, model)}__${stamp}`;
 }
 
-/* Save one completed research record.
+/* Save one completed research record, replacing whatever that company had.
 
    `record` is the engine's canonical bilingual output, stored verbatim in
-   research_data. The scalar columns are projections of it for listing and
-   search only — the record itself is never rewritten to match them. */
+   research_data. The scalar columns beside it are projections for listing and
+   search only — the record itself is never rewritten to match them.
+
+   Safe by construction for regenerate: this is a single statement that either
+   installs the new report or leaves the old one untouched. Nothing is deleted
+   first, so a failed model call or a failed write cannot leave a company with
+   no report. */
 async function saveQwenReport(record, userId) {
   const company = String(record.company || '').trim();
   if (!company) throw new Error('saveQwenReport: company is required');
+  const companyKey = normalizeNameKey(company);
+  if (!companyKey) throw new Error(`saveQwenReport: cannot derive an identity for "${company}"`);
   const model = record.model || '';
-  const key = arqReportKey(company, model);
   const researchedAt = record.timestamp || new Date().toISOString();
   const id = arqReportId(company, model, researchedAt);
-
-  const vr = await q(
-    `SELECT COALESCE(MAX(version), 0) + 1 AS next FROM account_research_qwen_reports
-      WHERE report_key = $1 AND id <> $2`, [key, id]);
-  const version = Number(vr[0].next);
 
   const sources = record.sources || [];
   const contacts = {
@@ -4035,34 +4046,41 @@ async function saveQwenReport(record, userId) {
   };
 
   // Link to a CRM company when the name already matches one we know.
-  const cm = await q(`SELECT id FROM companies WHERE name_key = $1 LIMIT 1`,
-    [normalizeNameKey(company)]);
+  const cm = await q(`SELECT id FROM companies WHERE name_key = $1 LIMIT 1`, [companyKey]);
 
   const rows = await q(`
     INSERT INTO account_research_qwen_reports
-      (id, report_key, version, company_name, company_website, model, model_label,
-       report_version, research_data, sources, contacts, usage, source_count,
-       company_id, created_by, researched_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-    ON CONFLICT (id) DO UPDATE SET
-      research_data = EXCLUDED.research_data,
-      sources       = EXCLUDED.sources,
-      contacts      = EXCLUDED.contacts,
-      usage         = EXCLUDED.usage,
-      source_count  = EXCLUDED.source_count,
+      (id, report_key, company_key, version, company_name, company_website, model,
+       model_label, report_version, research_data, sources, contacts, usage,
+       source_count, company_id, created_by, researched_at)
+    VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+    ON CONFLICT (company_key) DO UPDATE SET
+      id             = EXCLUDED.id,
+      report_key     = EXCLUDED.report_key,
+      version        = account_research_qwen_reports.version + 1,
+      company_name   = EXCLUDED.company_name,
       company_website = EXCLUDED.company_website,
-      model_label   = EXCLUDED.model_label,
+      model          = EXCLUDED.model,
+      model_label    = EXCLUDED.model_label,
       report_version = EXCLUDED.report_version,
-      company_id    = COALESCE(account_research_qwen_reports.company_id, EXCLUDED.company_id),
-      updated_at    = NOW()
+      research_data  = EXCLUDED.research_data,
+      sources        = EXCLUDED.sources,
+      contacts       = EXCLUDED.contacts,
+      usage          = EXCLUDED.usage,
+      source_count   = EXCLUDED.source_count,
+      company_id     = COALESCE(EXCLUDED.company_id, account_research_qwen_reports.company_id),
+      researched_at  = EXCLUDED.researched_at,
+      updated_at     = NOW()
     RETURNING id, version, (xmax = 0) AS inserted
   `, [
-    id, key, version, company, record.website || '', model, record.model_label || '',
-    record.report_version ?? null, JSON.stringify(record), JSON.stringify(sources),
-    JSON.stringify(contacts), JSON.stringify(usage), sources.length,
-    cm.length ? cm[0].id : null, userId || null, researchedAt,
+    id, arqReportKey(company, model), companyKey, company, record.website || '', model,
+    record.model_label || '', record.report_version ?? null, JSON.stringify(record),
+    JSON.stringify(sources), JSON.stringify(contacts), JSON.stringify(usage),
+    sources.length, cm.length ? cm[0].id : null, userId || null, researchedAt,
   ]);
-  return { id, key, version: rows[0].version, inserted: rows[0].inserted };
+  return {
+    id: rows[0].id, key: companyKey, version: rows[0].version, inserted: rows[0].inserted,
+  };
 }
 
 /* Listing carries no research_data: the payloads are ~25 KB each and the
@@ -4097,17 +4115,23 @@ async function getQwenReport(id) {
 
 /* Latest report for a company, optionally for one model. This is what the
    library opens and what a PDF is rendered from. */
-async function getLatestQwenReport(company, model) {
-  const params = [String(company || '')];
-  let extra = '';
-  if (model) { params.push(model); extra = ' AND model = $2'; }
+/* The company's current report, or null. There is only ever one row, so this
+   is a lookup rather than a "pick the newest" query. */
+async function getQwenReportForCompany(company) {
   const rows = await q(`
     SELECT id, research_data, version FROM account_research_qwen_reports
-     WHERE LOWER(company_name) = LOWER($1)${extra}
-     ORDER BY researched_at DESC NULLS LAST, created_at DESC LIMIT 1
-  `, params);
+     WHERE company_key = $1 LIMIT 1
+  `, [normalizeNameKey(String(company || ''))]);
   if (!rows.length) return null;
   return { id: rows[0].id, report: rows[0].research_data, version: rows[0].version };
+}
+
+/* Existing-report detection is a boolean, not a version scan. */
+async function hasQwenReport(company) {
+  const rows = await q(
+    `SELECT 1 FROM account_research_qwen_reports WHERE company_key = $1 LIMIT 1`,
+    [normalizeNameKey(String(company || ''))]);
+  return rows.length > 0;
 }
 
 async function deleteQwenReport(id) {
@@ -4116,11 +4140,12 @@ async function deleteQwenReport(id) {
   return rows.length > 0;
 }
 
-/* Every version for one company, used by delete-report in the batch table. */
+/* Removes the company's report entirely. The company then reads as having no
+   report, and the next run generates fresh research. */
 async function deleteQwenReportsByCompany(company) {
   const rows = await q(
-    `DELETE FROM account_research_qwen_reports WHERE LOWER(company_name) = LOWER($1)
-      RETURNING id`, [company]);
+    `DELETE FROM account_research_qwen_reports WHERE company_key = $1 RETURNING id`,
+    [normalizeNameKey(String(company || ''))]);
   return rows.length;
 }
 
@@ -4623,8 +4648,8 @@ module.exports = {
   // account intelligence reports (Claude-based)
   saveAccountReport, listAccountReports, getAccountReport, deleteAccountReport,
   // account research (Qwen-based) — a separate engine, separate tables
-  saveQwenReport, listQwenReports, getQwenReport, getLatestQwenReport,
-  deleteQwenReport, deleteQwenReportsByCompany,
+  saveQwenReport, listQwenReports, getQwenReport, getQwenReportForCompany,
+  hasQwenReport, deleteQwenReport, deleteQwenReportsByCompany,
   saveQwenBatch, listQwenBatches,
   arqReportKey, arqReportId,
   getAccountResearchCache, setAccountResearchCache, clearAccountResearchCache,

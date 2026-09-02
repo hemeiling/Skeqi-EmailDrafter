@@ -29,14 +29,14 @@ function arg(name, fallback) {
 const DRY = process.argv.includes('--dry-run');
 const ROOT = arg('--dir', '');
 
-/* Two kinds of file matter, and research.json is neither — it is a copy of
-   whichever model ran last and would import as a duplicate.
+/* Only the CURRENT report per company is imported.
 
-     <Company>/research_<model>.json                    the CURRENT report
-     <Company>/history/research_<model>_<stamp>.json    superseded runs
+     <Company>/research_<model>.json   ← imported
+     <Company>/research.json           ← a copy of the above; would duplicate
+     <Company>/history/…               ← superseded runs; NOT imported
 
-   Both are imported. Nothing the standalone app saved is dropped; the archived
-   runs simply land as earlier versions of the same report_key. */
+   There is one current report per company and no version history, so the
+   archived runs have nowhere to go. They stay on disk as your backup. */
 function discover(root) {
   const found = [];
   let dirs = [];
@@ -54,21 +54,10 @@ function discover(root) {
         found.push({ company_dir: dir, file: path.join(abs, f), kind: 'current' });
       }
     }
-    const hist = path.join(abs, 'history');
-    if (fs.existsSync(hist)) {
-      for (const f of fs.readdirSync(hist)) {
-        if (/^research_.+\.json$/.test(f)) {
-          found.push({ company_dir: dir, file: path.join(hist, f), kind: 'archived' });
-        }
-      }
-    }
   }
   return found;
 }
 
-/* JSONB normalises key order, so a stored record round-trips with the same
-   values in a different order. Comparing JSON.stringify() output therefore
-   reports a difference where there is none — compare structurally instead. */
 function deepEqual(a, b) {
   if (a === b) return true;
   if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
@@ -99,20 +88,22 @@ function readRecord(file) {
 
   let files = discover(ROOT);
   const companies = new Set(files.map((f) => f.company_dir));
-  const nCurrent = files.filter((f) => f.kind === 'current').length;
-  const nArchived = files.filter((f) => f.kind === 'archived').length;
 
-  /* Oldest first, so `version` increments in the order the research actually
-     happened rather than in whatever order the filesystem returned. */
+  /* Newest first, so if a folder somehow holds two current files the freshest
+     one is the version that survives the upsert. */
   files = files.map((f) => {
     let ts = '';
     try { ts = JSON.parse(fs.readFileSync(f.file, 'utf8')).timestamp || ''; } catch (e) { /* handled below */ }
     return { ...f, ts };
-  }).sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  }).sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
 
-  console.log(`Local reports discovered : ${files.length} JSON files across ${companies.size} companies`);
-  console.log(`  current                : ${nCurrent}`);
-  console.log(`  archived (history/)    : ${nArchived}\n`);
+  const archived = [...companies].reduce((n, d) => {
+    const h = path.join(ROOT, d, 'history');
+    return n + (fs.existsSync(h) ? fs.readdirSync(h).filter((f) => /\.json$/.test(f)).length : 0);
+  }, 0);
+
+  console.log(`Local reports discovered : ${files.length} current reports across ${companies.size} companies`);
+  console.log(`  archived on disk       : ${archived} (kept as backup, not imported)\n`);
 
   const stats = { imported: 0, updated: 0, unchanged: 0, failed: 0 };
   const failures = [];
@@ -127,13 +118,12 @@ function readRecord(file) {
       continue;
     }
     if (DRY) {
-      const id = db.arqReportId(rec.company, rec.model, rec.timestamp);
-      const existing = await db.getQwenReport(id);
+      const existing = await db.getQwenReportForCompany(rec.company);
       if (existing) stats.unchanged++; else stats.imported++;
       continue;
     }
     try {
-      const before = await db.getQwenReport(db.arqReportId(rec.company, rec.model, rec.timestamp));
+      const before = await db.getQwenReportForCompany(rec.company);
       const res = await db.saveQwenReport(rec, 'import');
       if (res.inserted) stats.imported++;
       else if (before && deepEqual(before.report, rec)) stats.unchanged++;
@@ -169,11 +159,10 @@ function readRecord(file) {
      than one that fails loudly. */
   if (!DRY) {
     console.log('\n── Verification (read back from Neon) ─────────────');
-    const samples = files.filter((f) => f.kind === 'current').slice(0, 3);
+    const samples = files.slice(0, 3);
     for (const s of samples) {
       const disk = readRecord(s.file);
-      const id = db.arqReportId(disk.company, disk.model, disk.timestamp);
-      const got = await db.getQwenReport(id);
+      const got = await db.getQwenReportForCompany(disk.company);
       if (!got) { console.log(`  ✗ ${disk.company}: not found in database`); continue; }
       const r = got.report;
       const ok = deepEqual(r, disk);
