@@ -153,6 +153,84 @@ per-row ⋯ menu.
 
 ---
 
+## 2a. Model-health states and the Model field (2026-09-03)
+
+Presentation and state handling only. **Model routing is unchanged** — the engine
+still chooses and runs models exactly as before.
+
+### The bug: two states where there are three
+
+`checkModels()` did `modelsAvailable = Boolean(d.modelsAvailable)`. When the
+engine is unreachable or `CURRENT_ACCOUNT_RESEARCH_URL` is unset, the proxy
+answers **503 with `{error}`** and no `models` array. That parses fine, so nothing
+threw: `Boolean(undefined)` became `false`, the picker emptied, and the yellow
+**"Model unavailable — activation/payment required"** banner appeared. A
+connection failure was being reported to the user as a billing problem.
+
+The state is now explicit, and only one of the three is a payment condition:
+
+| State | Meaning | Banner |
+|---|---|---|
+| `available` | the response lists ≥1 usable model | **hidden**, `hidden` attribute, zero height |
+| `denied` | the response lists models and **every** one is `access_denied` | yellow activation/payment banner |
+| `unknown` | non-OK status, transport error, or a payload with no `models` array | **neutral grey** "Cannot reach the research service — model status unknown / 无法连接研究服务", plus the reason. Never mentions payment |
+
+`blockIfNoModel()` distinguishes the same three, so a blocked run says which
+problem it hit. The status card follows: model label (green) / *Activation
+required* (red) / *Service unreachable* (neutral).
+
+The banner sits above all three sub-views, so Single Company, Batch Research and
+Reports show the same state.
+
+### Health is re-read when the workspace is opened
+
+`qwenResearchInit()` short-circuited on re-entry and only reloaded the library, so
+the banner and picker were frozen at whatever the first page load saw — access
+being granted, or the engine returning, left a stale warning until a full browser
+refresh. It now calls `checkModels()` too. One small GET; **no model is called.**
+
+### The Model field hides when there is nothing to choose
+
+Shown only when **more than one** selectable (non-`access_denied`) model exists.
+Otherwise the whole field — label and control — is removed with
+`.qr-form label[hidden]{display:none}`, needed because `.qr-form label` sets
+`display:flex`, which outranks the plain `[hidden]` attribute. No empty control,
+no reserved gap. It reappears on its own as soon as health offers two or more.
+
+Both pickers stay **populated and valued** even while hidden, because the engine
+rejects an empty model with `400 Unknown model:` — the request still carries a
+valid id. That is selection, not routing.
+
+Reflow, via `.qr-nomodel` on the form:
+
+- **Single Company** — Company Name and Company Website keep row 1; Generate
+  Research moves to its own full-width row, right-aligned, and its label spacer is
+  dropped so no phantom gap remains.
+- **Batch Setup** — Company List spans row 1; Company Column and Website Column
+  share row 2.
+
+### Verified 2026-09-03 — health endpoint only, no research run
+
+Five health responses were injected and the UI measured after each. **No
+Generate, Refresh, Retry Failed or Generate All was run**; the test asserted that
+no request to `/research`, `/batch/start` or `/job/` was made at any point, and
+that assertion passed.
+
+| Health response | Banner | Model field |
+|---|---|---|
+| 3 usable | hidden, 0px | shown |
+| 1 usable + 1 denied | hidden, 0px | hidden, 0px |
+| all denied | activation/payment, warning style | hidden, 0px |
+| 503 `{error}` | connection, neutral style, no payment wording | hidden, 0px |
+| 200 with no `models` | connection, neutral style, no payment wording | hidden, 0px |
+
+Also verified: the activation banner appears identically on Single Company, Batch
+Research and Reports; going from denied back to available clears it **without a
+page reload**; against the real engine the banner is hidden, the Model field is
+shown, and `qwen3.6-flash` is selected; the reflow assertions hold in every state.
+
+---
+
 ## 3. Recent test results — live Neon, 2026-09-03
 
 **Live Neon verification — summary**
@@ -315,6 +393,10 @@ does not have to guess.
 - **Do not run Generate or Refresh to test.** They are live and cost tokens (§0),
   and Refresh replaces the saved report. Run them only when explicitly asked.
 - Do not describe model access as blocked. It is available; see §0.
+- Do not collapse the three model-health states back into a boolean. An
+  unreachable engine is not a billing problem; see §2a.
+- Do not remove `.qr-form label[hidden]{display:none}` — without it a hidden
+  field still occupies its row.
 
 ---
 

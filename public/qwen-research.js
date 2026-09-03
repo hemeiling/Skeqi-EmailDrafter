@@ -20,9 +20,15 @@
   const LANGS = ['en', 'zh', 'bilingual'];
   const MODEL_MSG = 'Model unavailable — activation/payment required.';
   const MODEL_MSG_ZH = '模型暂不可用 — 需要开通/付费。';
+  /* Deliberately says nothing about payment: this is a connection state. */
+  const CONN_MSG = 'Cannot reach the research service — model status unknown.';
+  const CONN_MSG_ZH = '无法连接研究服务 — 模型状态未知。';
 
   let modelsAvailable = null;          // null = unknown until health is fetched
+  let modelHealth = 'unknown';         // 'available' | 'denied' | 'unknown'
+  let modelUnknownReason = '';         // why health could not be read, when known
   let modelStates = [];                // [{ model, label, state }] from /models/health
+  let modelSelectable = [];            // the subset a user could actually pick
   let library = [];
   /* Companies ticked in the report library. Its own set: "Compile Selected"
      must never fall back to the batch table's selection, which the Reports tab
@@ -90,30 +96,102 @@
     return out;
   }
 
-  /* ── Model availability. A 403 is a billing state, not a research failure. ── */
+  /* ── Model availability ───────────────────────────────────────────────────
+     THREE states, never two. Collapsing them is what made an unreachable engine
+     report itself as a billing problem: /models/health answers 503 with
+     { error } when CURRENT_ACCOUNT_RESEARCH_URL is unset or the engine is down,
+     and Boolean(undefined) read that as "access denied".
+
+       'available' — the response lists at least one usable model
+       'denied'    — the response lists models and every one is access_denied
+       'unknown'   — no usable response: transport error, non-OK status, or a
+                     payload carrying no models array
+
+     Only 'denied' is an activation/payment condition. ── */
   async function checkModels() {
+    let d = null;
     try {
-      const d = await fetch(api('/models/health')).then((r) => r.json());
-      modelsAvailable = Boolean(d.modelsAvailable);
-      modelStates = d.models || [];
-      const sel = (d.models || []).map((m) =>
-        `<option value="${esc(m.model)}"${m.state === 'access_denied' ? ' disabled' : ''}>` +
-        `${esc(m.label)}${m.state === 'access_denied' ? ' — Unavailable / 未开通' : ''}</option>`).join('');
-      if ($('qr-model')) $('qr-model').innerHTML = sel;
-      if ($('qr-batchmodel')) $('qr-batchmodel').innerHTML = sel;
-      const n = $('qr-model-notice');
-      if (n) {
-        n.hidden = modelsAvailable;
-        n.innerHTML =
-          `<div>${esc(MODEL_MSG)}<span class="i18n-zh">${esc(MODEL_MSG_ZH)}</span></div>` +
-          '<div style="opacity:.85;margin-top:3px;">Saved reports, language views and PDFs are ' +
-          'unaffected.<span class="i18n-zh">已保存的报告、语言切换与 PDF 不受影响。</span></div>';
-      }
+      const res = await fetch(api('/models/health'));
+      const body = await res.json().catch(() => null);
+      if (res.ok && body && Array.isArray(body.models)) d = body;
+      else modelUnknownReason = (body && body.error) || `HTTP ${res.status}`;
     } catch (e) {
-      modelsAvailable = null;
-      modelStates = [];
+      modelUnknownReason = e.message;
     }
+
+    if (d) {
+      modelStates = d.models;
+      modelSelectable = d.models.filter((m) => m.state !== 'access_denied');
+      modelHealth = modelSelectable.length ? 'available' : (d.models.length ? 'denied' : 'unknown');
+      modelUnknownReason = '';
+    } else {
+      modelStates = [];
+      modelSelectable = [];
+      modelHealth = 'unknown';
+    }
+    modelsAvailable = modelHealth === 'available';
+
+    renderModelOptions();
+    renderModelNotice();
     renderStatusCards();
+  }
+
+  /* Keep both pickers populated so the backend always receives a model id it
+     recognises — the engine rejects an empty one. Routing itself is unchanged. */
+  function renderModelOptions() {
+    const html = modelStates.map((m) =>
+      `<option value="${esc(m.model)}"${m.state === 'access_denied' ? ' disabled' : ''}>` +
+      `${esc(m.label)}${m.state === 'access_denied' ? ' — Unavailable / 未开通' : ''}</option>`).join('');
+    ['qr-model', 'qr-batchmodel'].forEach((id) => {
+      const el = $(id);
+      if (!el) return;
+      const keep = el.value;
+      el.innerHTML = html;
+      const usable = modelSelectable.map((m) => m.model);
+      el.value = usable.includes(keep) ? keep : (usable[0] || (modelStates[0] || {}).model || '');
+    });
+    applyModelFieldVisibility();
+  }
+
+  /* A picker with nothing to choose between is noise. Hide the field entirely —
+     no label, no control, no gap — and reflow the row it sat in. It reappears by
+     itself as soon as the health response offers more than one usable model. */
+  function applyModelFieldVisibility() {
+    const show = modelSelectable.length > 1;
+    document.querySelectorAll('#ar-pane-current .qr-modelfield').forEach((f) => {
+      f.hidden = !show;
+      const form = f.closest('.qr-form');
+      if (form) form.classList.toggle('qr-nomodel', !show);
+    });
+  }
+
+  /* The banner is a function of the live response and nothing else. It is
+     removed from the layout when models are usable, and it never claims a
+     payment condition for a connection failure. */
+  function renderModelNotice() {
+    const n = $('qr-model-notice');
+    if (!n) return;
+    if (modelHealth === 'available') {
+      n.hidden = true;
+      n.innerHTML = '';
+      n.classList.remove('is-neutral');
+      return;
+    }
+    n.hidden = false;
+    if (modelHealth === 'denied') {
+      n.classList.remove('is-neutral');
+      n.innerHTML =
+        `<div>${esc(MODEL_MSG)}<span class="i18n-zh">${esc(MODEL_MSG_ZH)}</span></div>` +
+        '<div style="opacity:.85;margin-top:3px;">Saved reports, language views and PDFs are ' +
+        'unaffected.<span class="i18n-zh">已保存的报告、语言切换与 PDF 不受影响。</span></div>';
+    } else {
+      n.classList.add('is-neutral');
+      n.innerHTML =
+        `<div>${esc(CONN_MSG)}<span class="i18n-zh">${esc(CONN_MSG_ZH)}</span></div>` +
+        '<div style="opacity:.85;margin-top:3px;">Saved reports, language views and PDFs are ' +
+        'unaffected.<span class="i18n-zh">已保存的报告、语言切换与 PDF 不受影响。</span></div>' +
+        (modelUnknownReason ? `<div style="opacity:.7;margin-top:3px;font-size:.94em;">${esc(modelUnknownReason)}</div>` : '');
+    }
   }
 
   /* ── Workspace status strip. Values come from the health and library
@@ -123,17 +201,18 @@
     const mv = $('qr-stat-model');
     if (mv) {
       const chosen = $('qr-model') && $('qr-model').value;
-      const hit = modelStates.find((m) => m.model === chosen) || modelStates[0];
-      if (modelsAvailable === false) {
+      const hit = modelSelectable.find((m) => m.model === chosen)
+               || modelSelectable[0] || modelStates[0];
+      if (modelHealth === 'available' && hit) {
+        mv.textContent = hit.label;
+      } else if (modelHealth === 'denied') {
         mv.textContent = 'Activation required / 需开通付费';
-      } else if (hit) {
-        mv.textContent = hit.label + (hit.state === 'access_denied' ? ' — unavailable / 未开通' : '');
       } else {
-        mv.textContent = modelsAvailable === null ? 'Unavailable / 无法连接' : 'Checking… 检测中…';
+        mv.textContent = 'Service unreachable / 无法连接';
       }
       if (icon) {
         icon.className = 'qr-stat-icon' +
-          (modelsAvailable === true ? ' is-green' : modelsAvailable === false ? ' is-red' : '');
+          (modelHealth === 'available' ? ' is-green' : modelHealth === 'denied' ? ' is-red' : '');
       }
     }
     if ($('qr-stat-reports')) $('qr-stat-reports').textContent = String(library.length);
@@ -146,9 +225,16 @@
     }
   }
 
+  /* Blocks a run that cannot succeed, and says WHY accurately: a billing state
+     and an unreachable service are different problems. */
   function blockIfNoModel(target) {
-    if (modelsAvailable === false) {
+    if (modelHealth === 'denied') {
       msg(target, `<strong>${esc(MODEL_MSG)}</strong><br><span>${esc(MODEL_MSG_ZH)}</span>`, 'err');
+      return true;
+    }
+    if (modelHealth === 'unknown') {
+      msg(target, `<strong>${esc(CONN_MSG)}</strong><br><span>${esc(CONN_MSG_ZH)}</span>`
+                  + (modelUnknownReason ? `<br><span style="opacity:.7">${esc(modelUnknownReason)}</span>` : ''), 'err');
       return true;
     }
     return false;
@@ -382,7 +468,11 @@
   }
 
   window.qwenResearchInit = async function init() {
-    if (window.__qrReady) { loadLibrary(); return; }
+    /* Re-opening the tab re-reads health as well as the library. Without this the
+       banner and the Model field were frozen at whatever the first page load saw,
+       so access being granted — or the engine coming back — left a stale warning
+       on screen until a full refresh. One small GET; no model is called. */
+    if (window.__qrReady) { checkModels(); loadLibrary(); return; }
     window.__qrReady = true;
 
     document.querySelectorAll('.qr-subtab').forEach((b) =>

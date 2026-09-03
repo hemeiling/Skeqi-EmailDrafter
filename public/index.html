@@ -175,6 +175,10 @@
 
     .qr-notice { margin:0 0 14px; padding:11px 14px; border-radius:8px; font-size:0.84rem;
       background:var(--color-warn-soft); border:1px solid var(--color-warn); color:#7a5600; }
+    /* Reserved for "we could not reach the service", which is not a billing state
+       and must not be dressed as one. */
+    .qr-notice.is-neutral { background:var(--color-surface-alt,#F7F7F9);
+      border-color:var(--color-border); color:var(--color-text-secondary); }
     .qr-notice .i18n-zh { display:block; opacity:.85; margin-top:2px; }
 
     /* ── Aligned form. Input metrics copied from the Previous (Claude) page:
@@ -202,6 +206,15 @@
     .qr-formactions .btn-primary { height:var(--qr-ctl-h); padding:0 22px; font-size:14px;
       font-weight:600; border-radius:6px; }
     .qr-fieldwide { grid-column:1/-1; }
+    /* A hidden field must take no space at all — .qr-form label sets display:flex,
+       which would otherwise beat the [hidden] attribute. */
+    .qr-form label[hidden] { display:none !important; }
+    /* No selectable model, so the Model field is gone. Single Company: Generate
+       moves to its own full-width row, right-aligned. Batch Setup: Company List
+       takes row 1 and the two column pickers share row 2. */
+    .qr-form.qr-nomodel .qr-formactions { grid-column:1/-1; align-items:flex-end; margin-top:2px; }
+    .qr-form.qr-nomodel .qr-formactions .qr-labspacer { display:none; }
+    .qr-form.qr-nomodel .qr-filefield { grid-column:1/-1; }
 
     /* ── Grouped areas: Setup / Generation / Selection & Management. ── */
     .qr-group { margin-top:18px; padding-top:15px; border-top:1px solid var(--color-border); }
@@ -3152,7 +3165,8 @@
             <label><span class="qr-lab">Company Website / 公司官网
                 <span class="qr-opt">optional / 可选</span></span>
               <input id="qr-website" type="url" placeholder="https://…" autocomplete="off"></label>
-            <label><span class="qr-lab">Model / 模型</span><select id="qr-model"></select></label>
+            <label class="qr-modelfield"><span class="qr-lab">Model / 模型</span>
+              <select id="qr-model"></select></label>
             <!-- Empty label row so the button's top edge meets the inputs. -->
             <div class="qr-formactions">
               <span class="qr-labspacer" aria-hidden="true"></span>
@@ -3191,10 +3205,11 @@
           <div class="qr-group">
             <div class="qr-grouphd">Setup <span class="i18n-zh">设置</span></div>
             <div class="qr-form">
-              <label><span class="qr-lab">Company List / 公司列表
+              <label class="qr-filefield"><span class="qr-lab">Company List / 公司列表
                   <span class="qr-opt">.xlsx / .csv</span></span>
                 <input id="qr-file" type="file" accept=".csv,.xlsx,.xlsm"></label>
-              <label><span class="qr-lab">Model / 模型</span><select id="qr-batchmodel"></select></label>
+              <label class="qr-modelfield"><span class="qr-lab">Model / 模型</span>
+                <select id="qr-batchmodel"></select></label>
               <label><span class="qr-lab">Company Column / 公司名称列</span><select id="qr-colname"></select></label>
               <label><span class="qr-lab">Website Column / 官网列</span><select id="qr-colsite"></select></label>
             </div>
