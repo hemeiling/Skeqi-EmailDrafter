@@ -113,17 +113,39 @@
     /* ── Current Account Research (Qwen) workspace ────────────────────────
        Native CRM styling: every colour, radius and font comes from the shell's
        own variables, so this reads as another CRM surface rather than as an
-       embedded application. */
-    .qr-subtabs { display:flex; align-items:center; gap:4px; flex-wrap:wrap;
-      border-bottom:1px solid var(--color-border); margin:0 0 16px; padding-bottom:2px; }
-    .qr-subtab { background:none; border:0; border-bottom:2px solid transparent; font:inherit;
-      font-size:0.86rem; font-weight:600; color:var(--color-text-secondary); cursor:pointer;
-      padding:9px 13px; display:flex; flex-direction:column; align-items:flex-start; line-height:1.3; }
+       embedded application. Card radius, input metrics and the status strip are
+       matched to the Previous (Claude) page so the two engines feel like one
+       product. The override is scoped to this pane — the CRM's shared .card is
+       unchanged everywhere else. */
+    #ar-pane-current { --qr-ctl-h:38px; }
+    #ar-pane-current .card { border-radius:var(--radius-lg); box-shadow:var(--shadow-xs); }
+    .qr-subtabs { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+      border-bottom:1px solid var(--color-border); margin:0 0 16px; padding-bottom:8px; }
+    /* Selected sub-tab is filled brand purple. The old underline was too quiet
+       next to the Current/Previous strip above it. */
+    .qr-subtab { background:none; border:1px solid transparent; border-radius:var(--radius-md);
+      font:inherit; font-size:0.86rem; font-weight:600; color:var(--color-text-secondary);
+      cursor:pointer; padding:8px 14px; display:flex; flex-direction:column;
+      align-items:flex-start; line-height:1.3; }
     .qr-subtab .i18n-zh { font-size:0.74rem; font-weight:500; opacity:.8; }
-    .qr-subtab:hover { color:var(--color-text-primary); }
-    .qr-subtab.active { color:var(--color-primary); border-bottom-color:var(--color-primary); }
-    .qr-langwrap { margin-left:auto; display:flex; align-items:center; gap:8px; padding-bottom:6px; }
-    .qr-langlabel { font-size:0.72rem; color:var(--color-text-tertiary); font-weight:600; }
+    .qr-subtab:hover { color:var(--color-primary-hover); background:var(--color-primary-soft); }
+    .qr-subtab.active { color:#fff; background:var(--color-primary); border-color:var(--color-primary);
+      box-shadow:var(--shadow-xs); }
+    .qr-subtab.active .i18n-zh { color:#E3D9F3; opacity:1; }
+    .qr-subtab.active:hover { background:var(--color-primary-hover); color:#fff; }
+
+    /* The ONE report-language control for this workspace. Label, helper line and
+       the segmented buttons are grouped so they read as a single setting. */
+    .qr-langpick { margin-left:auto; display:flex; align-items:center; gap:10px;
+      padding:6px 10px; background:var(--color-surface); border:1px solid var(--color-border);
+      border-radius:var(--radius-md); }
+    .qr-langtext { display:flex; flex-direction:column; gap:1px; min-width:0; }
+    .qr-langlabel { font-size:0.74rem; color:var(--color-text-secondary); font-weight:700;
+      white-space:nowrap; }
+    .qr-langhelp { font-size:0.68rem; color:var(--color-text-tertiary); line-height:1.3;
+      white-space:nowrap; }
+    @media (max-width:1180px){ .qr-langhelp { display:none; } }
+    @media (max-width:900px){ .qr-langtext { display:none; } }
     .qr-seg { display:inline-flex; border:1px solid var(--color-border); border-radius:7px;
       overflow:hidden; background:var(--color-surface); }
     .qr-seg button { background:none; border:0; border-right:1px solid var(--color-border);
@@ -132,27 +154,68 @@
     .qr-seg button:last-child { border-right:0; }
     .qr-seg button.active { background:var(--color-primary); color:#fff; }
 
+    /* ── Status strip. Same shape as the Previous (Claude) page's .ar-stat so
+       the two research surfaces read as one product. Every value comes from a
+       response the workspace already makes: /models/health and /reports. ── */
+    .qr-statrow { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+      gap:12px; margin-bottom:20px; }
+    .qr-stat { display:flex; align-items:center; gap:11px; background:var(--color-surface);
+      border:1px solid var(--color-border); border-radius:var(--radius-lg); padding:13px 15px;
+      box-shadow:var(--shadow-xs); min-width:0; }
+    .qr-stat-icon { width:34px; height:34px; border-radius:9px; flex-shrink:0; display:flex;
+      align-items:center; justify-content:center; font-size:0.95rem;
+      background:var(--color-primary-soft); color:var(--color-primary); }
+    .qr-stat-icon.is-green { background:var(--color-success-soft); color:var(--color-success); }
+    .qr-stat-icon.is-blue { background:#E4F0FA; color:#0F6CBD; }
+    .qr-stat-icon.is-red { background:var(--color-danger-soft); color:var(--color-danger); }
+    .qr-stat-body { min-width:0; }
+    .qr-stat-label { display:block; font-size:0.7rem; color:var(--color-text-tertiary); font-weight:500; }
+    .qr-stat-value { display:block; font-size:0.92rem; font-weight:700; color:var(--color-text-primary);
+      margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
     .qr-notice { margin:0 0 14px; padding:11px 14px; border-radius:8px; font-size:0.84rem;
       background:var(--color-warn-soft); border:1px solid var(--color-warn); color:#7a5600; }
     .qr-notice .i18n-zh { display:block; opacity:.85; margin-top:2px; }
 
-    .qr-form { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px 18px; }
-    .qr-form label { display:flex; flex-direction:column; gap:5px; font-size:0.76rem;
-      font-weight:600; color:var(--color-text-secondary); }
-    .qr-form input, .qr-form select { font:inherit; font-size:0.86rem; padding:8px 10px;
-      border:1px solid var(--color-border); border-radius:7px; background:#fff; font-weight:400;
-      color:var(--color-text-primary); }
+    /* ── Aligned form. Input metrics copied from the Previous (Claude) page:
+       8px/12px padding, 14px text, 6px radius, #d1d5db border. A fixed label
+       row above a fixed control height is what puts every control on one
+       baseline, including the action cell, which has no label of its own. ── */
+    .qr-form { display:grid; grid-template-columns:1fr 1fr; gap:14px 18px; align-items:start; }
+    @media (max-width:760px){ .qr-form { grid-template-columns:1fr; } }
+    .qr-form label { display:flex; flex-direction:column; gap:5px; font-size:0.78rem;
+      font-weight:600; color:var(--color-text-secondary); min-width:0; }
+    .qr-form label > .qr-lab { display:flex; align-items:center; gap:6px; height:18px;
+      line-height:18px; white-space:nowrap; }
+    .qr-form input, .qr-form select { width:100%; font-family:inherit; font-size:14px;
+      height:var(--qr-ctl-h); padding:0 12px; border:1px solid #d1d5db; border-radius:6px;
+      background:#fff; font-weight:400; color:var(--color-text-primary); }
+    .qr-form input[type=file] { padding:7px 12px; }
     .qr-form input:focus, .qr-form select:focus { outline:0; border-color:var(--color-primary);
-      box-shadow:0 0 0 3px var(--color-primary-soft); }
-    .qr-opt { font-weight:500; color:var(--color-text-tertiary); }
-    .qr-formactions { display:flex; align-items:flex-end; justify-content:flex-end; }
+      box-shadow:0 0 0 3px rgba(78,42,132,.1); }
+    /* Muted pill, matching the Previous page's .opt-tag, so the label stays one line. */
+    .qr-opt { font-weight:600; font-size:0.64rem; background:#F7F7F7;
+      color:var(--color-text-tertiary); padding:2px 7px; border-radius:999px;
+      white-space:nowrap; flex:none; }
+    .qr-formactions { display:flex; flex-direction:column; align-items:flex-end; gap:5px; }
+    .qr-formactions .qr-labspacer { display:block; height:18px; width:100%; }
+    .qr-formactions .btn-primary { height:var(--qr-ctl-h); padding:0 22px; font-size:14px;
+      font-weight:600; border-radius:6px; }
+    .qr-fieldwide { grid-column:1/-1; }
+
+    /* ── Grouped areas: Setup / Generation / Selection & Management. ── */
+    .qr-group { margin-top:18px; padding-top:15px; border-top:1px solid var(--color-border); }
+    .qr-group:first-child { margin-top:0; padding-top:0; border-top:0; }
+    .qr-grouphd { font-size:0.68rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+      color:var(--color-text-tertiary); margin:0 0 11px; }
+    .qr-grouphd .i18n-zh { font-size:0.72rem; letter-spacing:0; text-transform:none; margin-left:5px; }
+    .qr-selcount { font-size:0.76rem; color:var(--color-text-tertiary); font-weight:600; }
     .qr-msg { margin:12px 0 0; font-size:0.82rem; padding:9px 12px; border-radius:7px; }
     .qr-msg.err { background:var(--color-danger-soft); border:1px solid var(--color-danger-border);
       color:var(--color-danger-text); }
     .qr-msg.info { background:var(--color-primary-soft); color:var(--color-primary-text); }
 
-    .qr-actionbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:16px;
-      padding-top:14px; border-top:1px solid var(--color-border); }
+    .qr-actionbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
     .qr-sep { width:1px; height:20px; background:var(--color-border); }
     .qr-spacer { margin-left:auto; }
     .qr-link { background:none; border:0; color:var(--color-primary); font:inherit;
@@ -198,12 +261,36 @@
     @media (max-width:1000px){ .qr-librow{grid-template-columns:1fr;} }
     .qr-search { width:100%; font:inherit; font-size:0.86rem; padding:8px 11px; margin-bottom:10px;
       border:1px solid var(--color-border); border-radius:7px; }
-    .qr-liblist { list-style:none; margin:0; padding:0; max-height:540px; overflow:auto; }
+    /* No scroll container: it would clip the per-row ⋯ menu. */
+    .qr-liblist { list-style:none; margin:0; padding:0; }
     .qr-liblist li { display:flex; align-items:center; gap:10px; padding:9px 2px;
       border-bottom:1px solid var(--color-border-light,#eee); font-size:0.84rem; }
+    .qr-liblist li.sel { background:var(--color-primary-soft); border-radius:6px; }
+    .qr-liblist .qr-libcb { flex:none; margin:0; accent-color:var(--color-primary); }
     .qr-liblist .co { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .qr-liblist .mt { color:var(--color-text-tertiary); font-size:0.72rem; white-space:nowrap; }
-    .qr-liblist .sp { margin-left:auto; display:flex; gap:5px; }
+    .qr-liblist .sp { margin-left:auto; display:flex; gap:5px; align-items:center; }
+
+    /* Row overflow menu, same grammar as the batch table's row actions. */
+    .qr-menu { position:relative; display:inline-block; }
+    .qr-menu summary { list-style:none; cursor:pointer; border:1px solid var(--color-border);
+      border-radius:5px; padding:4px 9px; font-size:0.74rem; font-weight:600;
+      color:var(--color-text-secondary); background:#fff; }
+    .qr-menu summary::-webkit-details-marker { display:none; }
+    .qr-menu summary:hover { background:var(--color-primary-soft); color:var(--color-primary-text); }
+    .qr-menu[open] summary { background:var(--color-primary-soft); color:var(--color-primary-text); }
+    .qr-menu .qr-menubox { position:absolute; right:0; top:calc(100% + 4px); z-index:30;
+      background:#fff; border:1px solid var(--color-border); border-radius:var(--radius-md);
+      box-shadow:var(--shadow-md); padding:5px; min-width:190px; }
+    .qr-menu .qr-menubox button, .qr-menu .qr-menubox a { display:block; width:100%; text-align:left;
+      background:none; border:0; font:inherit; font-size:0.78rem; font-weight:600;
+      color:var(--color-text-secondary); padding:7px 9px; border-radius:5px; cursor:pointer;
+      text-decoration:none; white-space:nowrap; }
+    .qr-menu .qr-menubox button:hover, .qr-menu .qr-menubox a:hover {
+      background:var(--color-primary-soft); color:var(--color-primary-text); }
+    .qr-menu .qr-menubox button.del { color:var(--color-danger); }
+    .qr-menu .qr-menubox button.del:hover { background:var(--color-danger-soft); color:var(--color-danger-text); }
+    .qr-menu .qr-menusep { height:1px; background:var(--color-border); margin:4px 0; }
     .qr-count { font-size:0.74rem; color:var(--color-text-tertiary); font-weight:500; }
     .qr-portfolio { display:flex; flex-direction:column; gap:9px; }
 
@@ -245,8 +332,12 @@
       font-weight:600; cursor:pointer; line-height:1.3; text-align:left; }
     .ar-tab .i18n-zh { font-size:0.76rem; font-weight:500; }
     .ar-tab:hover { color:var(--color-text-primary); background:var(--color-surface-hover, rgba(0,0,0,.03)); }
-    .ar-tab.active { color:var(--color-primary-hover); background:var(--color-primary-soft);
-      border-color:var(--color-border); }
+    /* Filled brand purple: which of the two research engines is open must never
+       be ambiguous. Only the tab styling changes; neither pane is touched. */
+    .ar-tab.active { color:#fff; background:var(--color-primary);
+      border-color:var(--color-primary); box-shadow:var(--shadow-xs); }
+    .ar-tab.active .i18n-zh { color:#E3D9F3; opacity:1; }
+    .ar-tab.active:hover { background:var(--color-primary-hover); color:#fff; }
     .app-nav-item {
       display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: var(--radius-md);
       color: rgba(255,255,255,0.76); font-size: 0.86rem; font-weight: 500; cursor: pointer; white-space: nowrap;
@@ -3009,8 +3100,12 @@
           <span class="i18n-zh">批量研究</span></button>
         <button class="qr-subtab" data-qr-tab="library">Reports
           <span class="i18n-zh">报告库</span></button>
-        <div class="qr-langwrap">
-          <span class="qr-langlabel">Language / 语言</span>
+        <div class="qr-langpick">
+          <span class="qr-langtext">
+            <span class="qr-langlabel">Report Language / 报告语言</span>
+            <span class="qr-langhelp">Controls report display and PDF export
+              / 控制报告显示及 PDF 导出语言</span>
+          </span>
           <div class="qr-seg" id="qr-lang">
             <button data-qr-lang="en">English</button>
             <button data-qr-lang="zh">中文</button>
@@ -3023,16 +3118,45 @@
 
       <!-- ── Single Company ── -->
       <section class="qr-view" data-qr-view="single">
+        <!-- Workspace status. Built from /models/health and /reports, which this
+             pane already calls; no new endpoint and no model is consulted. -->
+        <div class="qr-statrow">
+          <div class="qr-stat">
+            <span class="qr-stat-icon" id="qr-stat-icon">🔌</span>
+            <span class="qr-stat-body">
+              <span class="qr-stat-label">Model / Connection · 模型 / 连接</span>
+              <span class="qr-stat-value" id="qr-stat-model">Checking… 检测中…</span>
+            </span>
+          </div>
+          <div class="qr-stat">
+            <span class="qr-stat-icon">📚</span>
+            <span class="qr-stat-body">
+              <span class="qr-stat-label">Saved Reports · 已保存报告</span>
+              <span class="qr-stat-value" id="qr-stat-reports">—</span>
+            </span>
+          </div>
+          <div class="qr-stat">
+            <span class="qr-stat-icon is-blue">🕓</span>
+            <span class="qr-stat-body">
+              <span class="qr-stat-label">Last Generated · 最近生成</span>
+              <span class="qr-stat-value" id="qr-stat-last">—</span>
+            </span>
+          </div>
+        </div>
+
         <div class="card">
           <div class="card-title">Research a Company <span class="i18n-zh">研究单个公司</span></div>
           <div class="qr-form">
-            <label>Company Name / 公司名称
+            <label><span class="qr-lab">Company Name / 公司名称</span>
               <input id="qr-company" type="text" placeholder="SKEQI" autocomplete="off"></label>
-            <label>Company Website / 公司官网 <span class="qr-opt">optional / 可选</span>
+            <label><span class="qr-lab">Company Website / 公司官网
+                <span class="qr-opt">optional / 可选</span></span>
               <input id="qr-website" type="url" placeholder="https://…" autocomplete="off"></label>
-            <label>Model / 模型 <select id="qr-model"></select></label>
+            <label><span class="qr-lab">Model / 模型</span><select id="qr-model"></select></label>
+            <!-- Empty label row so the button's top edge meets the inputs. -->
             <div class="qr-formactions">
-              <button id="qr-generate" class="btn-sm btn-primary">Generate Research
+              <span class="qr-labspacer" aria-hidden="true"></span>
+              <button id="qr-generate" class="btn-primary">Generate Research
                 <span class="i18n-zh">生成研究报告</span></button>
             </div>
           </div>
@@ -3062,25 +3186,39 @@
       <section class="qr-view" data-qr-view="batch" hidden>
         <div class="card">
           <div class="card-title">Batch Research <span class="i18n-zh">批量研究</span></div>
-          <div class="qr-form">
-            <label>Company List / 公司列表 <span class="qr-opt">.xlsx / .csv</span>
-              <input id="qr-file" type="file" accept=".csv,.xlsx,.xlsm"></label>
-            <label>Model / 模型 <select id="qr-batchmodel"></select></label>
-            <label>Company Column / 公司名称列 <select id="qr-colname"></select></label>
-            <label>Website Column / 官网列 <select id="qr-colsite"></select></label>
+          <!-- Three explicit areas: what to run on, how to run it, what to do
+               with the results. The destructive action stays alone on the right. -->
+          <div class="qr-group">
+            <div class="qr-grouphd">Setup <span class="i18n-zh">设置</span></div>
+            <div class="qr-form">
+              <label><span class="qr-lab">Company List / 公司列表
+                  <span class="qr-opt">.xlsx / .csv</span></span>
+                <input id="qr-file" type="file" accept=".csv,.xlsx,.xlsm"></label>
+              <label><span class="qr-lab">Model / 模型</span><select id="qr-batchmodel"></select></label>
+              <label><span class="qr-lab">Company Column / 公司名称列</span><select id="qr-colname"></select></label>
+              <label><span class="qr-lab">Website Column / 官网列</span><select id="qr-colsite"></select></label>
+            </div>
           </div>
-          <div class="qr-actionbar">
-            <button id="qr-run-selected" class="btn-sm btn-primary">Generate Selected
-              <span class="i18n-zh">生成选中公司</span></button>
-            <button id="qr-run-all" class="btn-sm">Generate All / 生成全部</button>
-            <button id="qr-retry" class="btn-sm">Retry Failed / 重试失败项</button>
-            <button id="qr-stop" class="btn-sm btn-danger" hidden>Stop / 停止</button>
-            <span class="qr-sep"></span>
-            <button id="qr-sel-all" class="qr-link">Select All / 全选</button>
-            <button id="qr-sel-none" class="qr-link">Clear Selection / 清除选择</button>
-            <span class="qr-spacer"></span>
-            <button id="qr-del-selected" class="btn-sm btn-danger">Delete Selected Reports
-              <span class="i18n-zh">删除选中报告</span></button>
+          <div class="qr-group">
+            <div class="qr-grouphd">Generation <span class="i18n-zh">生成</span></div>
+            <div class="qr-actionbar">
+              <button id="qr-run-selected" class="btn-sm btn-primary">Generate Selected
+                <span class="i18n-zh">生成选中公司</span></button>
+              <button id="qr-run-all" class="btn-sm">Generate All / 生成全部</button>
+              <button id="qr-retry" class="btn-sm">Retry Failed / 重试失败项</button>
+              <button id="qr-stop" class="btn-sm btn-danger" hidden>Stop / 停止</button>
+            </div>
+          </div>
+          <div class="qr-group">
+            <div class="qr-grouphd">Selection &amp; Management <span class="i18n-zh">选择与管理</span></div>
+            <div class="qr-actionbar">
+              <button id="qr-sel-all" class="btn-sm">Select All / 全选</button>
+              <button id="qr-sel-none" class="btn-sm">Clear Selection / 清除选择</button>
+              <span class="qr-selcount" id="qr-batch-selcount"></span>
+              <span class="qr-spacer"></span>
+              <button id="qr-del-selected" class="btn-sm btn-danger">Delete Selected Reports
+                <span class="i18n-zh">删除选中报告</span></button>
+            </div>
           </div>
           <p id="qr-batch-msg" class="qr-msg" hidden></p>
         </div>
@@ -3112,6 +3250,19 @@
             </div>
             <input id="qr-libsearch" class="qr-search" type="search"
                    placeholder="Search reports / 搜索报告…" autocomplete="off">
+            <!-- Same grammar as Batch Research: select, act, destructive right. -->
+            <div class="qr-group">
+              <div class="qr-grouphd">Selection &amp; Management <span class="i18n-zh">选择与管理</span></div>
+              <div class="qr-actionbar">
+                <button id="qr-lib-selall" class="btn-sm">Select All / 全选</button>
+                <button id="qr-lib-selnone" class="btn-sm">Clear Selection / 清除选择</button>
+                <span class="qr-selcount" id="qr-lib-selcount"></span>
+                <span class="qr-spacer"></span>
+                <button id="qr-compile-sel" class="btn-sm">Compile Selected / 汇总选中报告</button>
+                <button id="qr-lib-delsel" class="btn-sm btn-danger">Delete Selected / 删除选中报告</button>
+              </div>
+              <p id="qr-lib-msg" class="qr-msg" hidden></p>
+            </div>
             <ul id="qr-liblist" class="qr-liblist"><li class="qr-empty">Loading…</li></ul>
           </div>
           <div class="card">
@@ -3121,6 +3272,9 @@
                 <span class="i18n-zh">汇总已完成报告</span></button>
               <button id="qr-zip" class="btn-sm">Download ZIP / 下载ZIP</button>
               <p id="qr-portfolio-msg" class="qr-msg" hidden></p>
+              <p style="font-size:0.74rem;color:var(--color-text-tertiary);margin:2px 0 0;">
+                Exports use the Report Language chosen above.
+                <span class="i18n-zh">导出语言由上方的报告语言决定。</span></p>
             </div>
           </div>
         </div>

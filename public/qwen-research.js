@@ -22,7 +22,12 @@
   const MODEL_MSG_ZH = '模型暂不可用 — 需要开通/付费。';
 
   let modelsAvailable = null;          // null = unknown until health is fetched
+  let modelStates = [];                // [{ model, label, state }] from /models/health
   let library = [];
+  /* Companies ticked in the report library. Its own set: "Compile Selected"
+     must never fall back to the batch table's selection, which the Reports tab
+     does not show. */
+  const librarySelection = new Set();
   let current = null;                  // { company, report }
   let batchItems = [];
   let batchRows = [];
@@ -90,6 +95,7 @@
     try {
       const d = await fetch(api('/models/health')).then((r) => r.json());
       modelsAvailable = Boolean(d.modelsAvailable);
+      modelStates = d.models || [];
       const sel = (d.models || []).map((m) =>
         `<option value="${esc(m.model)}"${m.state === 'access_denied' ? ' disabled' : ''}>` +
         `${esc(m.label)}${m.state === 'access_denied' ? ' — Unavailable / 未开通' : ''}</option>`).join('');
@@ -105,6 +111,38 @@
       }
     } catch (e) {
       modelsAvailable = null;
+      modelStates = [];
+    }
+    renderStatusCards();
+  }
+
+  /* ── Workspace status strip. Values come from the health and library
+     responses this workspace already makes. No extra request, no model call. ── */
+  function renderStatusCards() {
+    const icon = $('qr-stat-icon');
+    const mv = $('qr-stat-model');
+    if (mv) {
+      const chosen = $('qr-model') && $('qr-model').value;
+      const hit = modelStates.find((m) => m.model === chosen) || modelStates[0];
+      if (modelsAvailable === false) {
+        mv.textContent = 'Activation required / 需开通付费';
+      } else if (hit) {
+        mv.textContent = hit.label + (hit.state === 'access_denied' ? ' — unavailable / 未开通' : '');
+      } else {
+        mv.textContent = modelsAvailable === null ? 'Unavailable / 无法连接' : 'Checking… 检测中…';
+      }
+      if (icon) {
+        icon.className = 'qr-stat-icon' +
+          (modelsAvailable === true ? ' is-green' : modelsAvailable === false ? ' is-red' : '');
+      }
+    }
+    if ($('qr-stat-reports')) $('qr-stat-reports').textContent = String(library.length);
+    const lv = $('qr-stat-last');
+    if (lv) {
+      const latest = library.find((r) => r.researchedAt) || library[0];
+      lv.textContent = latest
+        ? `${reportDate(latest.researchedAt) || '—'} · ${latest.companyName}`
+        : 'No reports yet / 暂无报告';
     }
   }
 
@@ -121,31 +159,66 @@
     try {
       library = await fetch(api('/reports')).then((r) => r.json());
     } catch (e) { library = []; }
+    const live = new Set(library.map((r) => r.companyName));
+    [...librarySelection].forEach((c) => { if (!live.has(c)) librarySelection.delete(c); });
     renderLibrary();
+    renderStatusCards();
   }
 
   function reportDate(v) { return v ? String(v).slice(0, 10) : ''; }
 
-  function renderLibrary() {
+  function visibleLibraryRows() {
     const q = ($('qr-libsearch') ? $('qr-libsearch').value : '').trim().toLowerCase();
-    const rows = library.filter((r) => !q
+    return library.filter((r) => !q
       || (r.companyName || '').toLowerCase().includes(q)
       || (r.modelLabel || '').toLowerCase().includes(q));
+  }
+
+  function librarySelected() {
+    return library.filter((r) => librarySelection.has(r.companyName)).map((r) => r.companyName);
+  }
+
+  /* Reflect the selection onto rows already on screen. Re-rendering the whole
+     list on every tick would throw away the DOM the user is clicking. */
+  function syncLibrarySelectionUI() {
+    document.querySelectorAll('#qr-liblist .qr-libcb').forEach((cb) => {
+      const on = librarySelection.has(cb.dataset.qrCo);
+      if (cb.checked !== on) cb.checked = on;
+      cb.closest('li').classList.toggle('sel', on);
+    });
+    const n = librarySelected().length;
+    if ($('qr-lib-selcount')) {
+      $('qr-lib-selcount').textContent = n ? `${n} selected / 已选 ${n} 份` : '';
+    }
+  }
+
+  function renderLibrary() {
+    const rows = visibleLibraryRows();
     if ($('qr-libcount')) {
       $('qr-libcount').textContent = library.length
         ? `${rows.length} / ${library.length} reports · 共 ${library.length} 份`
         : '';
     }
-    $('qr-liblist').innerHTML = rows.length ? rows.map((r) => `
+    $('qr-liblist').innerHTML = rows.length ? rows.map((r) => {
+      const co = esc(r.companyName);
+      return `
       <li>
-        <span class="co">${esc(r.companyName)}</span>
+        <input type="checkbox" class="qr-libcb" data-qr-co="${co}" aria-label="Select ${co}">
+        <span class="co">${co}</span>
         <span class="mt">${esc(r.modelLabel || '')} · ${esc(reportDate(r.researchedAt))} · ${r.sourceCount ?? '—'} src</span>
         <span class="sp">
-          <button data-qr-open="${esc(r.companyName)}">View / 查看</button>
-          <button data-qr-pdf="${esc(r.companyName)}">PDF</button>
+          <button data-qr-open="${co}">View / 查看</button>
+          <button data-qr-pdf="${co}">PDF</button>
+          <details class="qr-menu"><summary>⋯</summary><div class="qr-menubox">
+            <button data-qr-dl="${co}">Download PDF / 下载PDF</button>
+            <button data-qr-refresh="${co}">Refresh / 刷新</button>
+            <div class="qr-menusep"></div>
+            <button class="del" data-qr-del="${co}">Delete Report / 删除报告</button>
+          </div></details>
         </span>
-      </li>`).join('')
+      </li>`; }).join('')
       : `<li class="qr-empty">${library.length ? 'No reports match. 未找到匹配报告。' : 'No reports yet. 暂无报告。'}</li>`;
+    syncLibrarySelectionUI();
   }
 
   /* ── Single report ── */
@@ -240,8 +313,64 @@
       closePdf();
       await loadLibrary();
       await refreshExisting();
-      msg('qr-single-msg', 'Report deleted. 报告已删除。', 'info');
+      const onLibrary = !document.querySelector('[data-qr-view="library"]').hidden;
+      msg(onLibrary ? 'qr-lib-msg' : 'qr-single-msg', 'Report deleted. 报告已删除。', 'info');
     }
+  }
+
+  /* ── Report library: selection, compile and bulk delete ──
+     Compile Selected reads THIS set, never the batch table's. The server already
+     accepts a `companies` filter on /export/portfolio, so no backend change. ── */
+  function initLibraryActions() {
+    $('qr-lib-selall').addEventListener('click', () => {
+      visibleLibraryRows().forEach((r) => librarySelection.add(r.companyName));
+      syncLibrarySelectionUI();
+    });
+    $('qr-lib-selnone').addEventListener('click', () => {
+      librarySelection.clear();
+      syncLibrarySelectionUI();
+    });
+
+    $('qr-compile-sel').addEventListener('click', async () => {
+      const companies = librarySelected();
+      if (!companies.length) {
+        return msg('qr-lib-msg', 'Select at least one report. 请至少选择一份报告。', 'err');
+      }
+      msg('qr-lib-msg', `Compiling ${companies.length}… 汇总中…`, 'info');
+      try {
+        const res = await fetch(api('/export/portfolio'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ companies, lang: getLang() }),
+        });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Export failed.');
+        const blob = await res.blob();
+        const cd = res.headers.get('content-disposition') || '';
+        const m = cd.match(/filename=?"?([^";]+)/);
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = m ? m[1] : 'account_research_selected.pdf';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        msg('qr-lib-msg', `Compiled ${companies.length} report(s). 已汇总 ${companies.length} 份。`, 'info');
+      } catch (e) { msg('qr-lib-msg', esc(e.message), 'err'); }
+    });
+
+    $('qr-lib-delsel').addEventListener('click', async () => {
+      const companies = librarySelected();
+      if (!companies.length) {
+        return msg('qr-lib-msg', 'Select at least one report. 请至少选择一份报告。', 'err');
+      }
+      if (!confirm(`Delete ${companies.length} saved report(s)?\n`
+                 + `删除 ${companies.length} 份已保存报告？`)) return;
+      await fetch(api('/reports/delete'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companies }),
+      });
+      librarySelection.clear();
+      await loadLibrary();
+      await refreshExisting();
+      msg('qr-lib-msg', `Deleted ${companies.length} report(s). 已删除 ${companies.length} 份报告。`, 'info');
+    });
   }
 
   /* ── Sub-tabs ── */
@@ -269,12 +398,41 @@
     });
 
     $('qr-libsearch').addEventListener('input', renderLibrary);
+    $('qr-liblist').addEventListener('change', (e) => {
+      const cb = e.target.closest('.qr-libcb');
+      if (!cb) return;
+      if (cb.checked) librarySelection.add(cb.dataset.qrCo);
+      else librarySelection.delete(cb.dataset.qrCo);
+      syncLibrarySelectionUI();
+    });
     $('qr-liblist').addEventListener('click', (e) => {
       const open = e.target.closest('[data-qr-open]');
       if (open) return openReport(open.dataset.qrOpen);
       const pdf = e.target.closest('[data-qr-pdf]');
       if (pdf) return openPdf(pdf.dataset.qrPdf);
+      const menu = e.target.closest('.qr-menu button');
+      if (!menu) return;
+      const box = menu.closest('.qr-menu');
+      if (box) box.open = false;
+      if (menu.dataset.qrDl) { window.location = pdfUrl(menu.dataset.qrDl, false); return; }
+      if (menu.dataset.qrDel) return deleteReport(menu.dataset.qrDel);
+      if (menu.dataset.qrRefresh) {
+        const co = menu.dataset.qrRefresh;
+        if (!confirm(`Refresh research for ${co}?\n\nThis makes a new AI research call `
+                   + `and consumes tokens.\n这将发起新的 AI 研究请求并消耗 tokens。`)) return;
+        showSub('single');
+        $('qr-company').value = co;
+        $('qr-website').value = '';
+        return startResearch(true);
+      }
     });
+    /* One open ⋯ menu at a time, closed by a click anywhere else. */
+    document.addEventListener('click', (e) => {
+      document.querySelectorAll('#qr-liblist .qr-menu[open]').forEach((d) => {
+        if (!d.contains(e.target)) d.open = false;
+      });
+    });
+    initLibraryActions();
     $('qr-pdfclose').addEventListener('click', closePdf);
     $('qr-view-pdf').addEventListener('click', () => current && openPdf(current.company));
     $('qr-dl-pdf').addEventListener('click', () => {
@@ -282,6 +440,7 @@
     });
     $('qr-delete').addEventListener('click', () => current && deleteReport(current.company));
     $('qr-generate').addEventListener('click', () => startResearch(false));
+    $('qr-model').addEventListener('change', renderStatusCards);
     $('qr-regen').addEventListener('click', () => {
       if (!current) return;
       $('qr-company').value = current.company;
@@ -378,8 +537,16 @@
       <button data-qr-act="del" data-co="${co}" class="del">Delete</button></div>`;
   }
 
+  function renderBatchSelCount() {
+    const el = $('qr-batch-selcount');
+    if (!el) return;
+    const n = batchItems.filter((i) => i.selected).length;
+    el.textContent = n ? `${n} of ${batchItems.length} selected / 已选 ${n} 家` : '';
+  }
+
   function renderBatch() {
     const tb = document.querySelector('#qr-batchtable tbody');
+    renderBatchSelCount();
     if (!batchItems.length) {
       rowEls.clear();
       tb.innerHTML = `<tr><td colspan="9" class="qr-empty">Upload a company list to begin.
@@ -438,6 +605,7 @@
       if (!box) return;
       const i = idx(box.dataset.co);
       if (i >= 0) batchItems[i].selected = box.checked;
+      renderBatchSelCount();
     });
   }
 
