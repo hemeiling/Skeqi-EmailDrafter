@@ -4,10 +4,42 @@
 > Updated by: Claude
 > Scope of this document: **Current Account Research (Qwen-based)** inside the CRM.
 > Branch: `account-research-qwen`
-> Current phase: UI parity pass ported from the standalone engine, **verified against live Neon**
+> Current phase: **PRODUCTION BASELINE** — UI parity pass committed (`1feeed9`) and
+> verified against live Neon
 
 `HANDOFF.md` remains the week-of-2026-08-23 handoff for the wider CRM (Booth Map
 re-key, chat, exhibitor sync). It is untracked and was not touched.
+
+---
+
+## 0. MODEL STATUS — verified live 2026-09-03
+
+| Model | State |
+|---|---|
+| `qwen3.6-flash` | **available** |
+| `deepseek-v4-pro` | **available** |
+| `deepseek-v4-flash-0731` | **available** |
+
+Confirmed by a forced probe: `GET /api/aresearch/models/health?probe=1` returned
+`modelsAvailable: true` with `state: "available"` for all three.
+
+> ### ⚠ Generate and Refresh are LIVE actions
+>
+> They call the model for real and **may consume paid tokens**. Refresh also
+> **replaces** the saved report for that company — the store keeps one current
+> report per company, and the upsert bumps `version` and rewrites
+> `researched_at`. There is no history to roll back to.
+>
+> **Do not run Generate or Refresh merely to test.** Run them only when the user
+> explicitly asks. A deliberate single-company paid end-to-end run is planned and
+> will be requested when wanted.
+
+Model access is **no longer blocked**. Any earlier note in this repository or in
+the engine's own `STATUS.md` describing a 403 `AccessDenied`, "no model
+entitlement", or "activation/payment required" as the *current* state is stale and
+superseded by this section. The bilingual *Model unavailable — activation/payment
+required.* string still exists in the UI as the **guard** shown if access is ever
+withdrawn again; its presence in the code is not a statement about today.
 
 ---
 
@@ -123,6 +155,17 @@ per-row ⋯ menu.
 
 ## 3. Recent test results — live Neon, 2026-09-03
 
+**Live Neon verification — summary**
+
+| | |
+|---|---|
+| Current reports | **29** |
+| Compile Selected | **verified** — 2 selected, PDF contained exactly those 2 |
+| Chinese compile | **verified** — same 2, English half dropped |
+| Delete | **verified** using a disposable fixture, library back to 29 |
+| Previous Claude pane | **unchanged** — still one untouched iframe |
+| Console errors | **none** |
+
 Run against the real CRM server on a local port with the production
 `DATABASE_URL` from `.env` (Neon, `ep-wild-bar-atl4yxm9-pooler`, `neondb`) and the
 research engine on `127.0.0.1:5062`. Driven through the browser as a user: sidebar
@@ -157,7 +200,7 @@ selection survived the language change.
 |---|---|
 | Menu contents | ✓ Download PDF / Refresh / Delete Report |
 | **Download** | ✓ returned a real PDF (55 KB, `%PDF` header) |
-| **Refresh** — blocked state | ✓ shows *Model unavailable — activation/payment required.* and *模型暂不可用 — 需要开通/付费。*, sends **no** research request, and the banner repeats the condition |
+| **Refresh** — guard only, state forced | ✓ with the unavailable state simulated, it shows *Model unavailable — activation/payment required.* and *模型暂不可用 — 需要开通/付费。*, sends **no** research request, and the banner repeats it. **The live models are available (§0); this was the guard being exercised, not the current state.** |
 | **Delete** | ✓ 30 → 29, row gone, count label back to "29 / 29" |
 
 ### Previous Account Research
@@ -185,27 +228,78 @@ No console or page errors in any of the three live runs.
   parentheses. **That was a bad fixture, not a UI defect** — with the correct key
   the delete worked first time.
 - **Refresh** was verified with the model-unavailable state forced at the health
-  endpoint. See Known issues 1: the live models are now *available*, so a real
-  click would have spent tokens and replaced a production report.
+  endpoint. Per §0 the live models are **available**, so a real click would have
+  spent tokens and replaced a production report. It was not clicked for real.
 - **Post-run integrity:** the 29 rows were compared row for row against a snapshot
   taken before any test — id, company key, name, version and `researched_at` all
   **identical**, 0 added, 0 removed, no fixture rows left behind.
 
 ## 4. Known issues / uncertain
 
-1. **The models are now AVAILABLE, which contradicts the older 403 note.**
-   A live probe on 2026-09-03 returned `available` for all three:
-   `qwen3.6-flash`, `deepseek-v4-pro`, `deepseek-v4-flash-0731`. The engine's own
-   STATUS.md still describes a 403 `AccessDenied`. **Consequence: Refresh and
-   Generate now really run**, spend tokens and replace the saved report for that
-   company. Treat them as live actions, not as no-ops.
-2. **Refresh was not exercised end to end** for that reason. Its guard, its
-   confirm step and its wiring were verified; a real regeneration was not run.
-3. `CURRENT_ACCOUNT_RESEARCH_URL` and `ACCOUNT_RESEARCH_SERVICE_KEY` are absent
-   from `.env`. The engine URL has to be supplied to run the workspace locally;
-   without it, compile, render and research all fail.
-4. Batch Research was not re-run against live Neon in this pass. Its layout was
-   verified; its generation path is unchanged by this port.
+1. **Refresh and Generate have not been run end to end.** Their guard, confirm
+   step and wiring are verified; no real regeneration was performed, deliberately,
+   because they now spend tokens (§0). A single-company paid run is planned.
+2. **Batch Research generation was not re-run** against live Neon. Its layout was
+   verified; its generation path is untouched by the UI pass.
+3. **The live Render configuration is unconfirmed from here.** See §4a.
+4. Deletion is a hard `DELETE` with no history. There is nothing to restore from
+   if a real report is removed.
+
+### 4a. Environment — local vs Render
+
+These are two separate places and they do **not** share values.
+
+**Local `.env`** (this machine, git-ignored). Verified by reading the key names
+only:
+
+| Variable | Local `.env` |
+|---|---|
+| `DATABASE_URL` | ✅ present — real Neon (`ep-wild-bar-atl4yxm9-pooler`, `neondb`) |
+| `CURRENT_ACCOUNT_RESEARCH_URL` | ❌ **absent** |
+| `ACCOUNT_RESEARCH_SERVICE_KEY` | ❌ **absent** |
+
+The engine URL therefore has to be supplied on the command line to run the
+workspace locally; that is how the live verification above was performed. This
+says **nothing** about Render.
+
+**Render** (`render.yaml`, service `skeqi-emaildrafter`). Both variables **are
+declared** in the blueprint, each with `sync: false`:
+
+```
+- key: CURRENT_ACCOUNT_RESEARCH_URL
+  sync: false
+- key: ACCOUNT_RESEARCH_SERVICE_KEY   # must match APP_SERVICE_KEY on that service
+  sync: false
+```
+
+`sync: false` means Render expects the value to be entered in the **dashboard**
+and never committed. **The blueprint declaring a variable is not evidence that it
+holds a value.**
+
+**Not confirmed, and not confirmable from this machine.** Dashboard state is not
+in the repository, and a probe of `https://skeqi-emaildrafter.onrender.com/healthz`
+returned `404` with `x-render-routing: no-server`, meaning no Render service is
+bound to that hostname. Either the CRM is deployed under a different name or it is
+not deployed. `DEPLOY.md` uses placeholders (`<crm-service>`, `<this-service>`), so
+the real hostnames are not recorded anywhere in either repository.
+
+**To confirm, in the Render dashboard:**
+
+1. Open the CRM service → **Environment**. Check that both keys exist and are
+   non-empty. Do not paste the key anywhere.
+2. `CURRENT_ACCOUNT_RESEARCH_URL` must be the **engine** service's public URL,
+   `https://…onrender.com`, no trailing slash.
+3. `ACCOUNT_RESEARCH_SERVICE_KEY` must equal `APP_SERVICE_KEY` on the **engine**
+   service. If they differ the proxy returns 401 and every research, render and
+   export call fails.
+4. Quick live check once signed in: open Account Research → Reports. If the
+   library lists reports but Compile Selected fails, the URL or the key is wrong.
+
+**If both are already set correctly in the dashboard, no code change is needed.**
+Nothing in this repository has to change for that case.
+
+Also record the engine hostnames in `DEPLOY.md` once known, so the next session
+does not have to guess.
 
 ## 5. Do not accidentally change
 
@@ -218,36 +312,44 @@ No console or page errors in any of the three live runs.
 - Do not translate status VALUES; they drive `.qr-b-*` classes.
 - Do not touch research logic, prompts, model routing, Neon persistence, Apollo
   or Yahoo Finance from a UI pass.
+- **Do not run Generate or Refresh to test.** They are live and cost tokens (§0),
+  and Refresh replaces the saved report. Run them only when explicitly asked.
+- Do not describe model access as blocked. It is available; see §0.
 
 ---
 
 ## 6. NEXT ACTIONS
 
-1. Run the workspace once against live Neon and confirm the library, Compile
-   Selected, Delete Selected and the ⋯ actions behave on real records.
-2. Commit `public/index.html` and `public/qwen-research.js` on
-   `account-research-qwen`, then open a PR.
-3. Set `CURRENT_ACCOUNT_RESEARCH_URL` and `ACCOUNT_RESEARCH_SERVICE_KEY` for
-   local development and on Render.
-4. When DashScope access is activated, run one company end-to-end: research →
-   Neon upsert → report → PDF.
-5. Fold the standalone engine's own UI pass into the repo it lives in, or retire
-   that UI as a reference once the CRM is the only surface users see.
+1. **Confirm the Render environment** for the CRM service: both
+   `CURRENT_ACCOUNT_RESEARCH_URL` and `ACCOUNT_RESEARCH_SERVICE_KEY` present and
+   non-empty, the key matching `APP_SERVICE_KEY` on the engine (§4a). No code
+   change is needed if they are already set.
+2. Record the real Render hostnames in `DEPLOY.md`, replacing the placeholders.
+3. Open a PR for `account-research-qwen` and merge to `main`.
+4. **When you choose:** one deliberate paid end-to-end run on a single company —
+   Generate → Neon upsert → report → PDF. Not before; it costs tokens (§0).
+5. Optionally add `CURRENT_ACCOUNT_RESEARCH_URL` to the local `.env` so the
+   workspace runs locally without a command-line override.
 
 ---
 
 ## 7. Session handoff
 
-**Last successful operation:** the verification run in section 3, all checks
-passing, against the real frontend with a stubbed API.
+**Current state:** this is the **production baseline**. Commit `1feeed9` on
+`account-research-qwen`, pushed to `origin`. Working tree clean apart from
+pre-existing untracked files (`HANDOFF.md`, `researchConfidence.js`,
+`researchSections.js`, `skqCapabilities.js`), none of which were touched.
 
-**Current stopping point:** the port is complete and **uncommitted** on
-`account-research-qwen`. `public/index.html` and `public/qwen-research.js` are the
-only modified tracked files; `HANDOFF.md`, `researchConfidence.js`,
-`researchSections.js` and `skqCapabilities.js` were already untracked and were not
-touched.
+**Last successful operation:** live Neon verification, §3 — 29 reports, Compile
+Selected in two languages with contents checked, Download, the Refresh guard, and
+Delete on a disposable fixture. The 29 rows were compared row for row against a
+pre-test snapshot and are identical.
 
-**Recommended next action:** verify once against live Neon, then commit.
+**Open item:** the Render dashboard values in §4a. Everything else is done.
 
-**Runnable locally?** The frontend, yes. The server, no — it needs a reachable
-`DATABASE_URL`.
+**Do not:** run Generate or Refresh to test. They are live (§0).
+
+**Running locally:** `PORT=<port> CURRENT_ACCOUNT_RESEARCH_URL=http://127.0.0.1:5062 node server.js`
+with the engine started from its own repository. `DATABASE_URL` in `.env` already
+points at live Neon, so local runs read and write **production data** — take care
+with delete and regenerate.
