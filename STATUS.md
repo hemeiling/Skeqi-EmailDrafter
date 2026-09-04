@@ -850,14 +850,68 @@ and the library row's bare `PDF` is now bilingual too.
 | Tab switch does not restart anything | ✓ no new POST |
 | Column detection across 8 header shapes | ✓ incl. 公司名称/官方网站, Domain, unlabelled URLs, junk column |
 
+### Bulk generation is durable too (2026-09-04)
+
+`startBatch()` and `pollBatch()` are **deleted**. They drove the engine's
+in-memory batch, which no browser-independent record ever saw. Generate Selected,
+Generate All and Retry Failed now queue the **same durable per-company job** as
+Single Company and row Regenerate — one job per company, started one at a time.
+
+```
+Generate All
+  → for each company, in order:
+       start-or-attach a durable job   (startOrAttachJob)
+       follow it, painting that row    (followRowJob)
+       persist via the engine callback (independent of the browser)
+```
+
+- **Sequential on purpose**: it bounds cost and load, and it makes Stop mean
+  something.
+- **Each company persists independently.** One failure does not take the batch
+  down, and completed companies are already in Neon before the next one starts.
+- **Stop ends the QUEUE, not the run in flight.** The company already being
+  researched finishes and is saved — the alternative is paying for a run and
+  discarding it. The message says exactly that.
+- **Retry Failed** re-runs only companies whose job failed, was interrupted or
+  cancelled, or that never produced a report. A completed company is never
+  re-run.
+- **Reopening the tab rebuilds the table from Neon.** `/active-jobs` supplies any
+  company still running, rows are recreated even with nothing uploaded, and each
+  reattaches. No session storage anywhere.
+- **Duplicate protection** is the same partial unique index: a company already
+  running is attached to, never started twice.
+
+Row states: `Queued / 排队中`, `Researching / 研究中` with the stage and a
+percentage, `Completed / 已完成`, `Failed / 失败` with the reason,
+`Interrupted / 中断`, `Cancelled / 已取消`.
+
+### Verified 2026-09-04 — fixtures and stubs, NO paid batch run
+
+| Check | Result |
+|---|---|
+| Generate All → one research call per company | ✓ 3 of 3 |
+| Started sequentially, not in parallel | ✓ in order |
+| Zero calls to the old `/batch/start` | ✓ |
+| Every row ends Completed | ✓ |
+| Generate Selected runs only ticked rows | ✓ 1 of 3 |
+| A mid-batch failure does not stop the rest | ✓ 2 completed, 1 failed |
+| Failed row shows the real reason | ✓ "upstream 500" |
+| Summary counts completions and failures | ✓ |
+| Retry Failed re-runs only the failure | ✓ 1 company |
+| Retry Failed with nothing failed does nothing | ✓ no calls |
+| Reopen with no upload rebuilds rows from Neon | ✓ row recreated, reconnected |
+| Reopen does not start a new run | ✓ no research call |
+
 ### Remaining limitations
 
-- **Bulk batch generation is unchanged.** Generate Selected / Generate All /
-  Retry Failed still use the engine's in-memory batch, which is **not** durable:
-  an engine restart loses an in-flight batch, and its per-company reports still
-  reach Neon through polling. Only the per-row Regenerate is on the durable job.
-- **No paid batch run has been made.** Everything above is fixtures and stubs.
+- **No paid batch run has been made.** All of the above is fixtures and stubs.
+- **The queue lives in the browser tab.** Each company's job is durable and its
+  report is safe, but if the tab closes mid-batch the *remaining* companies are
+  never started. Reopening shows what is running and what finished; the rest need
+  Generate again. A server-side queue would fix this and is not built.
 - The in-flight model call still does not survive an engine restart (§2g).
+- The engine's own `/api/batch/*` endpoints still exist and are unused by this
+  UI.
 
 ---
 

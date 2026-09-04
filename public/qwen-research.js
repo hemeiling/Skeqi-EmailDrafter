@@ -37,8 +37,6 @@
   let current = null;                  // { company, report }
   let batchItems = [];
   let batchRows = [];
-  let batchId = null;
-  let batchPolling = false;
 
   function getLang() {
     try { const v = localStorage.getItem(LANG_KEY); if (LANGS.includes(v)) return v; }
@@ -1096,6 +1094,7 @@
     quality: ['Building evidence', '整理证据'], synthesis: ['Generating', '生成中'],
     model: ['Generating', '生成中'], pdf: ['Generating PDF', '生成PDF'],
     save: ['Saving', '保存中'], done: ['Completed', '已完成'],
+    cancelled: ['Cancelled', '已取消'],
     completed: ['Completed', '已完成'], interrupted: ['Interrupted', '已中断'],
     failed: ['Failed', '失败'],
   };
@@ -1104,6 +1103,12 @@
     /* A row being regenerated shows the RUN, not the stale report status: the
        point of the button is to see that something is happening. */
     const job = rowJobs.get(it.company);
+    if (job && job.status === 'running' && job.stage === 'queued' && !job.jobId) {
+      return '<span class="qr-badge qr-b-Pending">Queued / 排队中</span>';
+    }
+    if (job && job.status === 'cancelled') {
+      return '<span class="qr-badge qr-b-Pending">Cancelled / 已取消</span>';
+    }
     if (job && job.status === 'running') {
       const [en, zh] = ROW_STAGE[job.stage] || ['Researching', '研究中'];
       const pct = Math.max(0, Math.min(100, job.pct || 0));
@@ -1111,6 +1116,10 @@
         + `<div class="qr-rowprog"><span class="bar"><i style="width:${pct}%"></i></span>`
         + `<span class="pct">${pct}%</span></div>`
         + `<div class="qr-rowstage">${esc(en)} / ${esc(zh)}</div>`;
+    }
+    if (job && job.status === 'completed') {
+      // The run's own outcome, not whatever the report lookup last said.
+      return '<span class="qr-badge qr-b-Completed">Completed / 已完成</span>';
     }
     if (job && (job.status === 'interrupted' || job.status === 'failed')) {
       const [en, zh] = ROW_STAGE[job.status];
@@ -1275,31 +1284,31 @@
     renderBatch();
   }
 
+  /** Start research for one company, or attach to the run already going.
+   *  The single source of "begin research" for every entry point. */
+  async function startOrAttachJob(company, website) {
+    const running = await findRunningJob(company);
+    if (running) return { jobId: running.id, attached: true };
+    const start = await fetch(api('/research'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ company, website: website || '',
+                             model: $('qr-batchmodel').value }),
+    }).then((r) => r.json());
+    if (start.error) throw new Error(start.error);
+    if (!start.job_id) throw new Error('The research service did not return a job id.');
+    return { jobId: start.job_id, attached: !!start.attached };
+  }
+
   async function regenerateRow(it) {
     const company = it.company;
     if ((rowJobs.get(company) || {}).status === 'running') return;   // already shown
     setRowJob(company, { status: 'running', stage: 'queued', pct: 0 });
     msg('qr-batch-msg', '');
     try {
-      const running = await findRunningJob(company);
-      let jobId;
-      if (running) {
-        jobId = running.id;
+      const { jobId, attached } = await startOrAttachJob(company, it.website);
+      if (attached) {
         msg('qr-batch-msg',
             `${esc(company)}: attached to the run already in progress. 已接入正在进行的研究。`, 'info');
-      } else {
-        const start = await fetch(api('/research'), {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ company, website: it.website || '',
-                                 model: $('qr-batchmodel').value }),
-        }).then((r) => r.json());
-        if (start.error) throw new Error(start.error);
-        if (!start.job_id) throw new Error('The research service did not return a job id.');
-        jobId = start.job_id;
-        if (start.attached) {
-          msg('qr-batch-msg',
-              `${esc(company)}: attached to the run already in progress. 已接入正在进行的研究。`, 'info');
-        }
       }
       await followRowJob(company, jobId);
     } catch (e) {
@@ -1308,9 +1317,77 @@
     }
   }
 
+  /* ── Bulk generation, on the same durable job ───────────────────────────
+     One durable job per company, started one at a time. There is no separate
+     batch research implementation any more: Generate Selected, Generate All and
+     Retry Failed all queue the same per-company job that Single Company and row
+     Regenerate use, so each company persists independently through the engine
+     callback and a closed browser cannot lose any of them.
+
+     Sequential on purpose: it bounds cost and load, and it means stopping the
+     queue actually stops something. */
+  let queueRunning = false;
+  let queueCancelled = false;
+
+  /** Rows worth retrying: the run failed, was interrupted, or never produced a
+   *  report. A completed company is never re-run by Retry Failed. */
+  function needsRetry(it) {
+    const job = rowJobs.get(it.company) || {};
+    if (['failed', 'interrupted', 'cancelled'].includes(job.status)) return true;
+    if (job.status === 'completed' || job.status === 'running') return false;
+    return ['Failed', 'Timed Out'].includes(it.status);
+  }
+
+  async function runBatchQueue(items) {
+    if (!items.length) {
+      return msg('qr-batch-msg', 'No companies selected. 未选择公司。', 'err');
+    }
+    if (queueRunning) {
+      return msg('qr-batch-msg', 'A batch is already running. 批量任务已在进行中。', 'err');
+    }
+    await checkModels();
+    if (blockIfNoModel('qr-batch-msg')) return;
+
+    queueRunning = true;
+    queueCancelled = false;
+    $('qr-stop').hidden = false;
+    // Everything waiting says so, so the table reads as a queue, not a freeze.
+    items.forEach((it) => setRowJob(it.company, { status: 'running', stage: 'queued', pct: 0 }));
+    let done = 0;
+    let failed = 0;
+    try {
+      for (const it of items) {
+        if (queueCancelled) {
+          setRowJob(it.company, { status: 'cancelled', stage: 'cancelled', pct: 0 });
+          continue;
+        }
+        msg('qr-batch-msg',
+            `Researching ${esc(it.company)} — ${done + 1} of ${items.length}. `
+            + `正在研究第 ${done + 1} / ${items.length} 家。`, 'info');
+        try {
+          const { jobId } = await startOrAttachJob(it.company, it.website);
+          await followRowJob(it.company, jobId, { keep: true });
+          const st = (rowJobs.get(it.company) || {}).status;
+          if (st === 'completed') done += 1; else failed += 1;
+        } catch (e) {
+          failed += 1;
+          setRowJob(it.company, { status: 'failed', stage: 'failed', error: e.message });
+        }
+      }
+      msg('qr-batch-msg',
+          `Batch finished — ${done} completed, ${failed} not completed. `
+          + `批量完成 — ${done} 家成功，${failed} 家未完成。`, 'info');
+    } finally {
+      queueRunning = false;
+      $('qr-stop').hidden = true;
+      await refreshExisting();
+      await loadLibrary();
+    }
+  }
+
   /** Poll one job and paint the row. Leaves the existing report alone unless
    *  and until the run actually completes. */
-  async function followRowJob(company, jobId) {
+  async function followRowJob(company, jobId, opts) {
     setRowJob(company, { jobId, status: 'running' });
     while (true) {
       const snap = await fetch(api(`/job/${encodeURIComponent(jobId)}`))
@@ -1351,23 +1428,40 @@
       // The previous report is untouched: refreshExisting re-reads Neon.
       await refreshExisting();
     }
-    setTimeout(() => { rowJobs.delete(company); renderBatch(); }, 8000);
+    // A queued run keeps its final state on the row; a one-off regenerate fades
+    // back to the plain report status once the user has seen it.
+    if (!(opts && opts.keep)) {
+      setTimeout(() => { rowJobs.delete(company); renderBatch(); }, 8000);
+    }
   }
 
   /* On tab open or refresh, pick any row back up from Neon. No session storage. */
   async function reconnectBatchRows() {
-    if (!batchItems.length) return;
     let active = [];
     try { active = await fetch(api('/active-jobs')).then((r) => r.json()); }
     catch (e) { return; }
-    (active || []).forEach((job) => {
-      const i = idx(job.company_name);
-      if (i < 0) return;
+    if (!Array.isArray(active) || !active.length) return;
+
+    /* Rebuild the table from Neon when the browser was closed and reopened:
+       without this the runs are still going server-side but the user comes back
+       to an empty Batch tab and cannot see them. */
+    active.forEach((job) => {
+      if (idx(job.company_name) < 0) {
+        batchItems.push({ company: job.company_name, website: job.website || '',
+                          status: 'Pending', selected: true, _restored: true });
+      }
+    });
+    renderBatch();
+
+    active.forEach((job) => {
       if ((rowJobs.get(job.company_name) || {}).jobId === job.job_id) return;
       setRowJob(job.company_name, { jobId: job.job_id, status: 'running',
                                     stage: job.stage, pct: job.progress_percent });
-      followRowJob(job.company_name, job.job_id);
+      followRowJob(job.company_name, job.job_id, { keep: true });
     });
+    msg('qr-batch-msg',
+        `Reconnected to ${active.length} run(s) still in progress. `
+        + `已重新连接 ${active.length} 项进行中的研究。`, 'info');
   }
 
   /** Existing Report vs Generate, straight from Neon. */
@@ -1403,53 +1497,10 @@
         <span><b>Est. remaining</b>${mins(s.eta_seconds)}</span></div>`;
   }
 
-  async function startBatch(items, useExisting) {
-    if (!items.length) return msg('qr-batch-msg', 'No companies selected. 未选择公司。', 'err');
-    await checkModels();
-    if (blockIfNoModel('qr-batch-msg')) return;
-    msg('qr-batch-msg', '');
-    try {
-      const r = await fetch(api('/batch/start'), {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items, model: $('qr-batchmodel').value, use_existing: useExisting !== false }),
-      }).then((x) => x.json());
-      if (r.error) throw new Error(r.error);
-      batchId = r.batch_id;
-      pollBatch(batchId);
-    } catch (e) { msg('qr-batch-msg', esc(e.message), 'err'); }
-  }
-
-  async function pollBatch(id) {
-    if (batchPolling) return;
-    batchPolling = true;
-    $('qr-stop').hidden = false;
-    try {
-      while (true) {
-        const s = await fetch(api(`/batch/${id}`)).then((r) => r.json());
-        if (s.error) throw new Error(s.error);
-        (s.items || []).forEach((row) => {
-          const i = idx(row.company);
-          if (i >= 0) {
-            const local = batchItems[i];
-            batchItems[i] = { ...local, ...row, selected: local.selected,
-              _editUrl: local._editUrl, _editCompany: local._editCompany,
-              ...(local._editUrl || local._editCompany ? { company: local.company, website: local.website } : {}) };
-          }
-        });
-        renderBatch();
-        renderKpis(s);
-        if (s.status !== 'running' && s.status !== 'queued') break;
-        await new Promise((r) => setTimeout(r, 1500));
-      }
-      await refreshExisting();
-      await loadLibrary();
-    } catch (e) {
-      msg('qr-batch-msg', esc(e.message), 'err');
-    } finally {
-      batchPolling = false;
-      $('qr-stop').hidden = true;
-    }
-  }
+  /* startBatch()/pollBatch() are gone. They drove the engine's in-memory batch,
+     which no browser-independent record ever saw: an engine restart lost the
+     run, and each company's report reached Neon only if someone kept polling.
+     Every entry point now queues the same durable per-company job. */
 
   function initBatch() {
     $('qr-file').addEventListener('change', async (e) => {
@@ -1528,11 +1579,21 @@
     $('qr-colsite').addEventListener('change', remap);
     $('qr-sel-all').addEventListener('click', () => { batchItems.forEach((i) => i.selected = true); renderBatch(); });
     $('qr-sel-none').addEventListener('click', () => { batchItems.forEach((i) => i.selected = false); renderBatch(); });
-    $('qr-run-selected').addEventListener('click', () => startBatch(batchItems.filter((i) => i.selected)));
-    $('qr-run-all').addEventListener('click', () => startBatch(batchItems.map((i) => ({ ...i, selected: true }))));
-    $('qr-retry').addEventListener('click', () => startBatch(
-      batchItems.filter((i) => ['Failed', 'Timed Out'].includes(i.status)).map((i) => ({ ...i, selected: true }))));
-    $('qr-stop').addEventListener('click', () => batchId && fetch(api(`/batch/${batchId}/stop`), { method: 'POST' }));
+    /* All three go through the same durable per-company queue. There is no
+       separate in-memory batch research any more. */
+    $('qr-run-selected').addEventListener('click',
+      () => runBatchQueue(batchItems.filter((i) => i.selected)));
+    $('qr-run-all').addEventListener('click', () => runBatchQueue(batchItems.slice()));
+    $('qr-retry').addEventListener('click', () => runBatchQueue(batchItems.filter(needsRetry)));
+    /* Stop ends the QUEUE. Whatever company is mid-run keeps going server-side
+       and still persists through the callback — the alternative is paying for a
+       run and then throwing the result away. */
+    $('qr-stop').addEventListener('click', () => {
+      queueCancelled = true;
+      msg('qr-batch-msg',
+          'Queue stopped. The company already being researched will finish and be saved. '
+          + '队列已停止，正在研究的公司将完成并保存。', 'info');
+    });
     $('qr-del-selected').addEventListener('click', async () => {
       const targets = batchItems.filter((i) => i.selected && i._hasReport).map((i) => i.company);
       if (!targets.length) return msg('qr-batch-msg', 'Select companies that have a saved report. 请选择已有报告的公司。', 'err');
