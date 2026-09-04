@@ -1016,6 +1016,45 @@ async function initDb() {
      whenever the CRM does not yet know the company. The unique index is what
      makes the upsert in saveQwenReport() safe under concurrency; enforcing it
      only in application code would let two simultaneous runs both insert. */
+  /* ── Durable job state ────────────────────────────────────────────────
+     Research used to live only in the engine's memory and the browser's
+     sessionStorage. Both are wrong places for something the user pays for: an
+     engine restart erased in-flight work, and a closed browser meant a finished
+     report was never written, because persistence hung off the poll.
+
+     This table is the record of a run. The engine reports into it through the
+     CRM callback, so it is accurate whether or not anyone is watching. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS account_research_qwen_jobs (
+      job_id           TEXT PRIMARY KEY,
+      company_key      TEXT NOT NULL,
+      company_id       INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+      company_name     TEXT NOT NULL,
+      website          TEXT,
+      model            TEXT,
+      job_type         TEXT NOT NULL DEFAULT 'single',
+      status           TEXT NOT NULL DEFAULT 'queued',
+      stage            TEXT,
+      progress_percent INTEGER NOT NULL DEFAULT 0,
+      warnings         JSONB NOT NULL DEFAULT '[]'::jsonb,
+      error            TEXT,
+      report_id        TEXT,
+      created_by       TEXT,
+      started_at       TIMESTAMPTZ DEFAULT NOW(),
+      updated_at       TIMESTAMPTZ DEFAULT NOW(),
+      completed_at     TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_jobs_company
+                      ON account_research_qwen_jobs(company_key)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_jobs_updated
+                      ON account_research_qwen_jobs(updated_at DESC)`);
+  /* At most ONE live job per company. This is the duplicate guard, enforced by
+     the database rather than by whoever happens to click first — a browser-side
+     check cannot survive a refresh, and two tabs would both pass it. */
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_arq_jobs_active
+                      ON account_research_qwen_jobs(company_key)
+                      WHERE status IN ('queued','running')`);
   await pool.query(`ALTER TABLE account_research_qwen_reports ADD COLUMN IF NOT EXISTS company_key TEXT`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_reports_key ON account_research_qwen_reports(report_key)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_reports_created ON account_research_qwen_reports(created_at DESC)`);
@@ -4140,6 +4179,126 @@ async function deleteQwenReport(id) {
   return rows.length > 0;
 }
 
+/* ── Research job lifecycle ──────────────────────────────────────────────
+   Every state change a run goes through, recorded where it outlives both the
+   engine process and the browser. */
+
+const JOB_LIVE = "('queued','running')";
+/* A run with no heartbeat for this long is not running any more: the engine
+   restarted, was redeployed, or spun down. Nothing else can tell us, because
+   the worker that died cannot report its own death. */
+const JOB_STALE_MINUTES = 25;
+
+async function claimQwenJob({ jobId, companyName, companyKey, website, model,
+                             jobType = 'single', createdBy = null }) {
+  const key = normalizeNameKey(companyName || '') || String(companyKey || '');
+  const co = await q(`SELECT id FROM companies WHERE name_key = $1 LIMIT 1`, [key]);
+  const rows = await q(`
+    INSERT INTO account_research_qwen_jobs
+      (job_id, company_key, company_id, company_name, website, model, job_type,
+       status, stage, progress_percent, created_by)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,'queued','queued',0,$8)
+    ON CONFLICT DO NOTHING
+    RETURNING *
+  `, [jobId, key, co.length ? co[0].id : null, companyName, website || null,
+      model || null, jobType, createdBy]);
+  return rows[0] || null;          // null = the unique index refused it
+}
+
+/** The live job for a company, if one is genuinely still alive. */
+async function activeQwenJob(companyName) {
+  const key = normalizeNameKey(companyName || '');
+  if (!key) return null;
+  const rows = await q(`
+    SELECT *, (updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale
+    FROM account_research_qwen_jobs
+    WHERE company_key = $1 AND status IN ${JOB_LIVE}
+    ORDER BY started_at DESC LIMIT 1
+  `, [key]);
+  if (!rows.length) return null;
+  if (rows[0].stale) {
+    // Its worker is gone. Say so rather than letting it block new runs forever.
+    await failQwenJob(rows[0].job_id,
+      'Interrupted: the research service restarted or stopped responding.', 'interrupted');
+    return null;
+  }
+  return rows[0];
+}
+
+async function getQwenJob(jobId) {
+  const rows = await q(`SELECT * FROM account_research_qwen_jobs WHERE job_id = $1`, [jobId]);
+  return rows[0] || null;
+}
+
+/** Latest job for a company whatever its state — used to restore the UI. */
+async function latestQwenJob(companyName) {
+  const key = normalizeNameKey(companyName || '');
+  if (!key) return null;
+  const rows = await q(`
+    SELECT * FROM account_research_qwen_jobs WHERE company_key = $1
+    ORDER BY started_at DESC LIMIT 1
+  `, [key]);
+  return rows[0] || null;
+}
+
+async function updateQwenJob(jobId, { status, stage, progress, warning }) {
+  const rows = await q(`
+    UPDATE account_research_qwen_jobs SET
+      status           = COALESCE($2, status),
+      stage            = COALESCE($3, stage),
+      progress_percent = COALESCE($4, progress_percent),
+      warnings         = CASE WHEN $5::text IS NULL THEN warnings
+                              ELSE warnings || to_jsonb($5::text) END,
+      updated_at       = NOW()
+    WHERE job_id = $1
+    RETURNING *
+  `, [jobId, status || null, stage || null,
+      progress == null ? null : Math.max(0, Math.min(100, Math.round(progress))),
+      warning || null]);
+  return rows[0] || null;
+}
+
+async function completeQwenJob(jobId, reportId) {
+  const rows = await q(`
+    UPDATE account_research_qwen_jobs
+    SET status='completed', stage='completed', progress_percent=100,
+        report_id=$2, error=NULL, completed_at=NOW(), updated_at=NOW()
+    WHERE job_id=$1 RETURNING *
+  `, [jobId, reportId || null]);
+  return rows[0] || null;
+}
+
+async function failQwenJob(jobId, error, status = 'failed') {
+  const rows = await q(`
+    UPDATE account_research_qwen_jobs
+    SET status=$3, error=$2, completed_at=NOW(), updated_at=NOW()
+    WHERE job_id=$1 RETURNING *
+  `, [jobId, String(error || '').slice(0, 500), status]);
+  return rows[0] || null;
+}
+
+/** Every job still marked live but long past its last heartbeat. */
+async function sweepStaleQwenJobs() {
+  const rows = await q(`
+    UPDATE account_research_qwen_jobs
+    SET status='interrupted', completed_at=NOW(), updated_at=NOW(),
+        error=COALESCE(error, 'Interrupted: the research service restarted while this run was in progress.')
+    WHERE status IN ${JOB_LIVE}
+      AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes'
+    RETURNING job_id, company_name
+  `);
+  return rows;
+}
+
+async function listActiveQwenJobs() {
+  return await q(`
+    SELECT job_id, company_name, status, stage, progress_percent, started_at, updated_at
+    FROM account_research_qwen_jobs
+    WHERE status IN ${JOB_LIVE}
+    ORDER BY started_at DESC LIMIT 50
+  `);
+}
+
 /* Contacts the CRM already holds for a company, for reuse before paying Apollo.
 
    company_id is the reliable link (1088 of 1089 contacts carry one); the name
@@ -4663,6 +4822,8 @@ async function setSetting(key, value) {
 
 module.exports = {
   contactsForResearch,
+  claimQwenJob, activeQwenJob, getQwenJob, latestQwenJob, updateQwenJob,
+  completeQwenJob, failQwenJob, sweepStaleQwenJobs, listActiveQwenJobs,
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
   logCompanyActivity, listCompanyActivity,
   logCrmActivity, listCrmActivity, activeUsers,

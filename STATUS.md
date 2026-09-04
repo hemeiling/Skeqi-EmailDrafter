@@ -652,6 +652,128 @@ was not part of this change.
 
 ---
 
+## 2g. Durable research jobs — the CRM owns persistence (2026-09-04)
+
+### What was wrong
+
+Two failure modes, both able to lose research the user paid for.
+
+1. **A finished report reached Neon only if a browser was polling.** `persistRun`
+   was called from exactly one place: the CRM's job-poll handler. Close the tab
+   before a run finished and the report existed only on the engine's disk —
+   which on Render is ephemeral.
+2. **Job state was a Python dict and a `sessionStorage` entry.** An engine
+   restart erased in-flight work with no record anywhere, and the browser's copy
+   could not answer "is anything running for this company" after a refresh.
+
+### The model now
+
+```
+user clicks Generate
+  → CRM checks Neon for an active job for that company
+       ├─ found → returns that job_id, attaches, NO paid run
+       └─ none  → claims a job row, proxies to the engine with callback_url
+  → engine runs the research on its own
+  → engine POSTs progress heartbeats to the CRM
+  → engine POSTs the finished record to the CRM callback
+  → CRM validates the service key, upserts the report, marks the job completed
+```
+
+**The browser is no longer in the persistence path.** Polling is read-only.
+
+### The callback
+
+`POST /api/qwen-research/callback`, server-to-server only.
+
+- Authenticated with the shared secret: `APP_SERVICE_KEY` on the engine,
+  `ACCOUNT_RESEARCH_SERVICE_KEY` on the CRM. Compared in constant time; a missing
+  key on the CRM means **closed**, not open.
+- Exempted from the human Basic-auth gate, because the caller is a server. That
+  exemption is the only reason a browser-less completion can be stored, and the
+  service key is the sole guard in front of it.
+- Events: `progress` (stage, percent, warning), `completed` (the record),
+  `failed` (reason).
+- **Only a completed successful run is persisted.** `persistRun` rejects anything
+  else, and the callback now answers **422 and marks the job failed** rather than
+  reporting success with nothing stored — that silent success was found in
+  testing.
+- The engine never touches Neon. It has no database driver and no schema
+  knowledge, so there is nothing to drift.
+
+**New engine environment variable: `CRM_CALLBACK_URL`.** The CRM also passes its
+own callback URL per request, so a correctly configured CRM works even if the
+engine variable is unset. Set it on Render anyway, so the engine can report a run
+that outlives the request that started it.
+
+### The job table
+
+`account_research_qwen_jobs`: job_id, company_key, company_id, company_name,
+website, model, job_type, status, stage, progress_percent, warnings, error,
+report_id, created_by, started_at, updated_at, completed_at.
+
+**Duplicate protection is a partial unique index**, not a JavaScript check:
+
+```sql
+CREATE UNIQUE INDEX uq_arq_jobs_active ON account_research_qwen_jobs(company_key)
+  WHERE status IN ('queued','running')
+```
+
+A second tab, a refresh, or a reopened browser all pass a client-side guard. The
+database does not. A refused claim returns the existing `job_id` to attach to.
+
+### Resume
+
+`GET /api/aresearch/job-for-company?company=` returns the active and latest job.
+The Single Company lookup calls it, and if a run is under way it restores the
+progress panel and reattaches — **no session storage involved**. If the engine has
+forgotten the job but the row says running, the panel is drawn from the row, so
+the user sees state rather than a blank screen.
+
+### Restart behaviour — stated plainly
+
+**The in-flight model call does NOT survive an engine restart.** The worker is
+still `threading.Thread(daemon=True)` inside the Flask process. A Render deploy,
+crash or free-plan spin-down kills it, and there is no queue to resume from.
+Claiming otherwise would need a real external worker, which is not built.
+
+What *is* handled: a job with no heartbeat for **25 minutes** is swept to
+`interrupted` — on CRM boot and every 5 minutes thereafter — with the reason
+recorded. So an interrupted run is visible, it stops blocking the next attempt
+for that company, and **the previous report is left untouched**.
+
+### Regeneration safety
+
+Enforced in three places, verified: the engine saves only on success, `persistRun`
+accepts only a completed run, and a `failed` callback writes nothing. A failed
+regeneration leaves the previous report at its existing version.
+
+### Verified 2026-09-04 — real Neon, stubbed engine, no paid run
+
+| Check | Result |
+|---|---|
+| Job table and indexes created | ✓ incl. the partial unique index |
+| Second claim for a live company | ✓ refused by the database |
+| Stage / progress / warnings persist | ✓ warning does not fail the job |
+| Completion records report_id and 100% | ✓ |
+| Completed and failed jobs stop blocking | ✓ |
+| Stale job auto-marked interrupted with a reason | ✓ |
+| Callback rejects missing / wrong / wrong-length key | ✓ 401 |
+| Valid key accepted, written to Neon | ✓ |
+| Bad record → 422, job failed, nothing stored | ✓ |
+| Good record → report upserted, job completed | ✓ 32 → 33 |
+| Failed regen leaves the old report | ✓ v1 stays v1 |
+| Successful regen replaces it | ✓ v1 → v2 |
+| Entering a company reconnects to a running job | ✓ 75%, no POST |
+| Fresh browser context reconnects | ✓ no POST |
+| Generate while running attaches | ✓ no duplicate POST |
+
+All test rows removed; reports back to 32, jobs 0.
+
+**Still to do:** Batch Research does not use any of this — it keeps its own
+in-memory batch state and its Regenerate row action is unfixed.
+
+---
+
 ## 3. Recent test results — live Neon, 2026-09-03
 
 **Live Neon verification — summary**

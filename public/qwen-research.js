@@ -667,8 +667,59 @@
              : entries.length === 1 ? !!entries[0][1] : false;
     } catch (e) { /* lookup is advisory; never block the user on it */ }
     if (seq !== lookupSeq) return;                       // a newer keystroke won
+
+    /* Before deciding "existing" or "new", ask whether a run is under way. The
+       answer comes from Neon, so it is the same whether the user refreshed,
+       switched tabs, or closed the browser an hour ago. */
+    const { active } = await jobForCompany(name);
+    if (seq !== lookupSeq) return;
+    if (active) {
+      renderLookup('none');
+      msg('qr-single-msg',
+          `Research already in progress for ${esc(name)} — reconnected. `
+          + '已有研究进行中，已重新连接。', 'info');
+      resumeJob(name, active);
+      return;
+    }
+
     lookupHit = exists ? (libRowFor(name) || { companyName: name }) : null;
     renderLookup(exists ? 'existing' : 'new', lookupHit, name);
+  }
+
+  /* Reattach to a run that is already going, without starting anything. */
+  let resuming = null;
+  async function resumeJob(company, row) {
+    if (resuming === row.job_id) return;
+    resuming = row.job_id;
+    const startedAt = new Date(row.started_at || Date.now()).getTime();
+    if ($('qr-lookup')) $('qr-lookup').hidden = true;
+    renderProgress(jobRowToSnapshot(row), startedAt);
+    try {
+      while (true) {
+        const snap = await fetch(api(`/job/${encodeURIComponent(row.job_id)}`))
+          .then((r) => r.json()).catch(() => null);
+        if (snap && snap.status) {
+          renderProgress(snap, startedAt);
+          if (snap.status !== 'running') break;
+        } else {
+          // The engine forgot it. The durable row is the remaining truth.
+          const { active, latest } = await jobForCompany(company);
+          const row2 = active || latest;
+          renderProgress(jobRowToSnapshot(row2 || row), startedAt);
+          if (!active) break;
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      const { latest } = await jobForCompany(company);
+      if (latest && latest.status === 'completed') {
+        msg('qr-single-msg', 'Research complete. 研究完成。', 'info');
+        await loadLibrary();
+        await openReport(company, true);
+      } else if (latest) {
+        msg('qr-single-msg', `<strong>Research did not complete.</strong> `
+            + `<br><span>${esc(latest.error || latest.status)}</span>`, 'err');
+      }
+    } finally { resuming = null; }
   }
 
   function scheduleLookup() {
@@ -884,32 +935,41 @@
   }
 
   /* ── Research (blocked while models need activation) ── */
-  /* In-flight jobs, keyed by company. Survives a reload so a refresh mid-run
-     re-attaches instead of orphaning the job and paying for it twice. */
-  const IN_FLIGHT_KEY = 'qrInFlightJobs';
-
-  function inFlightJobs() {
-    try { return JSON.parse(sessionStorage.getItem(IN_FLIGHT_KEY) || '{}'); }
-    catch (e) { return {}; }
-  }
-  function rememberJob(company, jobId) {
+  /* Where a run lives is NEON, not this tab. sessionStorage could not answer
+     "is anything running for this company" after a browser restart, and two
+     tabs disagreed with each other. The server owns the answer now. */
+  async function jobForCompany(company) {
+    if (!company) return { active: null, latest: null };
     try {
-      const all = inFlightJobs();
-      if (jobId) all[company] = jobId; else delete all[company];
-      sessionStorage.setItem(IN_FLIGHT_KEY, JSON.stringify(all));
-    } catch (e) { /* private browsing: attaching is a nicety, not a requirement */ }
+      return await fetch(api(`/job-for-company?company=${encodeURIComponent(company)}`))
+        .then((r) => r.json());
+    } catch (e) { return { active: null, latest: null }; }
   }
 
-  /** A job id for this company that the engine still reports as running. */
+  /** The durable record for a company that is still being researched. */
   async function findRunningJob(company) {
-    const id = inFlightJobs()[company];
-    if (!id) return null;
+    const { active } = await jobForCompany(company);
+    if (!active) return null;
+    let snap = null;
     try {
-      const snap = await fetch(api(`/job/${encodeURIComponent(id)}`)).then((r) => r.json());
-      if (snap && snap.status === 'running') return { id, snap };
-    } catch (e) { /* fall through and treat it as gone */ }
-    rememberJob(company, null);
-    return null;
+      snap = await fetch(api(`/job/${encodeURIComponent(active.job_id)}`)).then((r) => r.json());
+    } catch (e) { /* the engine may have restarted; the durable row still stands */ }
+    return { id: active.job_id, snap: snap && snap.status ? snap : jobRowToSnapshot(active) };
+  }
+
+  /* When the engine no longer knows the job — it restarted — the durable row is
+     still enough to draw the panel, so the user sees state rather than nothing. */
+  function jobRowToSnapshot(row) {
+    return {
+      status: row.status === 'completed' ? 'done'
+            : (row.status === 'failed' || row.status === 'interrupted') ? 'error' : 'running',
+      phase: row.stage || 'retrieval',
+      message: row.error || '',
+      stages: (row.warnings || []).map((w, i) => ({ at: i, stage: 'contacts', message: w })),
+      sources: [], search_queries: [],
+      models: { [row.model || 'model']: { label: row.model || 'Model', status: 'generating' } },
+      _durable: row,
+    };
   }
 
   function reviewReasons(job) {
@@ -953,18 +1013,16 @@
         if (start.error) throw new Error(start.error);
         if (!start.job_id) throw new Error('The research service did not return a job id.');
         jobId = start.job_id;
-        rememberJob(company, jobId);
       }
 
       while (true) {
         const snap = await fetch(api(`/job/${jobId}`)).then((r) => r.json());
         last = snap;
         renderProgress(snap, startedAt);
-        if (snap.modelUnavailable) { rememberJob(company, null); blockIfNoModel('qr-single-msg'); return; }
+        if (snap.modelUnavailable) { blockIfNoModel('qr-single-msg'); return; }
         if (snap.status !== 'running') break;
         await new Promise((r) => setTimeout(r, 1500));
       }
-      rememberJob(company, null);
 
       // ---- Terminal states, each said in its own words -------------------
       if (last.status === 'error') {
@@ -990,7 +1048,6 @@
       await loadLibrary();
       await openReport(company, true);
     } catch (e) {
-      rememberJob(company, null);
       if (last) renderProgress({ ...last, status: 'error' }, startedAt);
       // The real failure, never a lookup message standing in for one.
       msg('qr-single-msg', `<strong>Research failed.</strong> 研究失败。<br><span>${esc(e.message)}</span>`

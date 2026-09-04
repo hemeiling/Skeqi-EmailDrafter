@@ -86,6 +86,9 @@ const {
   listSkqModules, listSkqSystems, listSkqEquipment
 } = require('./db');
 const { researchCompanyTags } = require('./research');
+/* Namespace import for the research-job helpers: server.js otherwise
+   destructures db, and the job lifecycle is easier to read qualified. */
+const jobsDb = require('./db.js');
 const chat = require('./chat');
 const { runChat, SUGGESTIONS } = chat;
 const { parsePageContext } = require('./chatContext');
@@ -165,6 +168,13 @@ app.use((req, res, next) => {
 
   // Health check must stay public so Render's probe can reach it without creds.
   if (req.path === '/healthz') return next();
+
+  /* The research engine is a server, not a signed-in human, so it cannot present
+     Basic credentials. Its callback carries the shared service key instead and
+     verifies it itself — see the route, which rejects anything that does not
+     match in constant time. Skipping the human gate here is what lets a finished
+     report reach Neon with no browser involved. */
+  if (req.path === '/api/qwen-research/callback') return next();
 
   const header = req.headers.authorization || '';
   let user = '';
@@ -1041,6 +1051,66 @@ app.get('/api/aresearch/models/health', async (req, res) => {
 });
 
 // Start a run. The engine does the research; polling persists the result.
+/* ── Engine → CRM callback ────────────────────────────────────────────────
+   Server-to-server only, authenticated with the shared service key. This is how
+   a finished report reaches Neon: the engine posts it here when the run ends,
+   whether or not a browser is open. The browser is no longer part of the
+   persistence path at all.
+
+   Mounted OUTSIDE the session-auth wall on purpose — the caller is the engine,
+   not a signed-in human — so the service key is the only thing standing in
+   front of it and is checked before the body is read for anything else. */
+function callbackAuthorised(req) {
+  const expected = String(process.env.ACCOUNT_RESEARCH_SERVICE_KEY || '').trim();
+  if (!expected) return false;                 // unset means closed, not open
+  const got = String(req.get('X-AR-Service-Key') || '').trim();
+  if (!got || got.length !== expected.length) return false;
+  try {
+    return require('crypto').timingSafeEqual(Buffer.from(got), Buffer.from(expected));
+  } catch (e) { return false; }
+}
+
+app.post('/api/qwen-research/callback', express.json({ limit: '25mb' }), async (req, res) => {
+  if (!callbackAuthorised(req)) return res.status(401).json({ error: 'Invalid service key' });
+  const b = req.body || {};
+  const jobId = String(b.job_id || '').trim();
+  if (!jobId) return res.status(400).json({ error: 'job_id is required' });
+  try {
+    if (b.event === 'progress') {
+      // A heartbeat. Also what keeps the job from being swept as stale.
+      await jobsDb.updateQwenJob(jobId, { status: 'running', stage: b.stage,
+                                      progress: b.progress_percent, warning: b.warning });
+      return res.json({ ok: true });
+    }
+    if (b.event === 'failed') {
+      await jobsDb.failQwenJob(jobId, b.error || 'Research failed.');
+      return res.json({ ok: true });           // the previous report is untouched
+    }
+    if (b.event === 'completed') {
+      // ONLY a successful run is persisted, and only here.
+      if (!b.record) return res.status(400).json({ error: 'record is required' });
+      const saved = await qr.persistRun(b.record, b.created_by || 'engine');
+      if (!saved) {
+        /* persistRun refuses anything that is not a complete success. Reporting
+           ok here would tell the engine the report is safe when nothing was
+           written, and the job would read "completed" with no report behind it.
+           Fail loudly instead — the engine logs this and the old report stands. */
+        const why = 'Report rejected: the record was not a completed successful run '
+                  + '(needs company, status 200 and research_result).';
+        await jobsDb.failQwenJob(jobId, why);
+        return res.status(422).json({ ok: false, error: why });
+      }
+      await jobsDb.completeQwenJob(jobId, saved.id);
+      return res.json({ ok: true, report_id: saved.id, version: saved.version });
+    }
+    return res.status(400).json({ error: `Unknown event: ${b.event}` });
+  } catch (e) {
+    // Never lose the reason: the engine logs whatever we say here.
+    try { await jobsDb.failQwenJob(jobId, `Callback failed: ${e.message}`); } catch (_) { /* noop */ }
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/aresearch/research', async (req, res) => {
   try {
     const body = { ...(req.body || {}) };
@@ -1054,10 +1124,60 @@ app.post('/api/aresearch/research', async (req, res) => {
     } catch (e) {
       body.known_contacts = [];
     }
+    /* Duplicate protection lives HERE, in the database, not in the browser.
+       A refresh, a second tab or a closed-and-reopened session all pass a
+       client-side check; a partial unique index does not. */
+    const live = await jobsDb.activeQwenJob(body.company);
+    if (live) {
+      return res.json({ job_id: live.job_id, attached: true,
+                        status: live.status, stage: live.stage,
+                        progress_percent: live.progress_percent });
+    }
+
+    // Tell the engine where to report back to, and who it is.
+    body.callback_url = process.env.CRM_CALLBACK_URL
+      || `${req.protocol}://${req.get('host')}/api/qwen-research/callback`;
     const out = await qr.callEngine('/api/research', { method: 'POST', body });
+    if (out.status === 200 && out.data && out.data.job_id) {
+      try {
+        await jobsDb.claimQwenJob({
+          jobId: out.data.job_id, companyName: body.company,
+          website: body.website, model: body.model,
+          jobType: 'single', createdBy: reqUser(req),
+        });
+      } catch (e) {
+        /* The run is already underway; losing the row would only cost us the
+           resume view, so never fail the request over it. */
+      }
+    }
     res.status(out.status).json(out.data);
   } catch (e) {
     res.status(503).json({ error: e.message });
+  }
+});
+
+/* What the UI asks on load, instead of trusting sessionStorage: is anything
+   running for this company, and what happened to the last run? */
+app.get('/api/aresearch/job-for-company', async (req, res) => {
+  try {
+    const company = String(req.query.company || '').trim();
+    if (!company) return res.json({ active: null, latest: null });
+    const [active, latest] = await Promise.all([
+      jobsDb.activeQwenJob(company),
+      jobsDb.latestQwenJob(company),
+    ]);
+    res.json({ active: active || null, latest: latest || null });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* Everything currently running, for the Reports tab. */
+app.get('/api/aresearch/active-jobs', async (req, res) => {
+  try {
+    res.json(await jobsDb.listActiveQwenJobs());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -4736,6 +4856,23 @@ initDb()
        as confirmed after the table already said otherwise. */
     setPricingLoader(listActivePricing);
     try { setPricingTable(await listActivePricing()); } catch (e) { console.error('pricing load failed:', e.message); }
+
+    /* A research job whose worker died cannot report its own death. Sweep on
+       boot, then periodically, so an interrupted run is marked as such instead
+       of sitting "running" forever and blocking the next attempt for that
+       company. This is also what makes an engine restart visible to the user. */
+    const sweepJobs = async () => {
+      try {
+        const gone = await jobsDb.sweepStaleQwenJobs();
+        if (gone.length) {
+          console.log(`account research: marked ${gone.length} stalled job(s) interrupted `
+                    + `(${gone.map((g) => g.company_name).join(', ')})`);
+        }
+      } catch (e) { console.error('job sweep failed:', e.message); }
+    };
+    await sweepJobs();
+    setInterval(sweepJobs, 5 * 60 * 1000).unref();
+
     initOcrWorker();
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Lead Finder (+ card scanner) running at http://0.0.0.0:${PORT}`);
