@@ -549,6 +549,109 @@ So:
 
 ---
 
+## 2f. Contact enrichment — two real bugs, and CRM-first reuse (2026-09-04)
+
+### Diagnosis of the Ford contact step
+
+Answering the five questions asked, in order:
+
+| Question | Answer |
+|---|---|
+| Was Apollo configured on the live engine? | **Yes.** `apollo_usage.configured: true` on both recent live runs. `load_config()` runs **per request**, so the long-lived engine picked up the key added at 19:18 |
+| Was the company/domain resolved? | **Yes.** A live search resolved *Ford Motor Company → ford.com*. American Li-ion also resolved by domain. Resolution was never the problem |
+| Does the CRM already hold Ford contacts? | **Yes — 40**, including Manufacturing VP, Plant Manager, Battery Cell Engineers; 12 carry an email |
+| Can they be reused? | **Yes**, and they now are. See below |
+| Did 0 candidates come from search, ranking, or mismatch? | **From the search call, which never reached Apollo.** Not ranking, not a mismatch |
+
+**Bug 1 — `UnboundLocalError`, every POST.** `apollo_service._request` had
+`import urllib.parse` *inside* the function while `urllib.request` was imported
+at module level. That makes `urllib` a **local** name for the whole function
+body, so every call path that skips the `params` branch — i.e. **every POST:
+people search and bulk enrichment** — raised `UnboundLocalError` at
+`urllib.request.Request` before a request was ever sent. The generic handler
+turned it into "0 candidates".
+
+Proof from the two live reports:
+`"errors": ["UnboundLocalError: cannot access local variable 'urllib' ..."]`
+on **both**, with `calls: 1` and `people_returned: 0`. Organization lookup worked
+throughout, because it is a **GET with params** and so ran the local import.
+
+This also explains why my 2026-09-03 connectivity check (§0a) passed: it exercised
+only `resolve_organization`, the one path that worked. **That check was not
+evidence that people search worked, and I should not have implied it was.**
+
+**Bug 2 — the endpoint is retired.** With bug 1 fixed, Apollo answered **422**:
+*"This endpoint is deprecated for API callers. Please use the new
+mixed_people/api_search endpoint."* `search_people` now tries
+`/mixed_people/api_search` first and falls back to the two older paths, treating
+404 **and** 422 as "not on this tenant".
+
+**Result after both fixes**, one live search, **0 credits** (search is free):
+
+```
+status: ok · people_returned: 100 · after SKEQI ranking: 94
+```
+
+### Apollo never blocked the report — the progress bar did
+
+The pipeline was already non-blocking: `search_people` "never raises", and both
+live runs **completed and persisted** despite Apollo erroring. What stalled was
+the **progress panel** — a failed step was not counted as settled, so the bar
+stopped at the step that failed. That is the "stuck at 67%".
+
+Optional stages (`financial`, `contacts`) are now marked `optional: true`:
+
+- a failure renders **⚠ amber**, not a red ✕
+- the note reads *unavailable, continuing with available data / 不可用，使用现有数据继续*
+- **it counts as settled**, so the bar keeps advancing to 100%
+
+Critical stages keep the red ✕ and still stop the run: identity, no usable
+evidence, synthesis, persistence.
+
+### CRM contacts are used before Apollo
+
+Contact source priority is now **CRM → official/web → Apollo**, with Apollo as a
+gap-filler.
+
+- `db.contactsForResearch()` matches on `company_id` (1,088 of 1,089 contacts
+  carry one) and falls back to a normalised name compare. Ordered by real email,
+  then LinkedIn, then seniority.
+- `qwenResearch.crmContactsFor()` shapes them: name, title, department, seniority,
+  company, location, email, email verification status, LinkedIn, CRM id.
+- **The CRM proxy attaches them server-side** to `POST /api/aresearch/research`.
+  Contact PII does not round-trip through the browser.
+- The engine ranks them with the existing SKEQI ruleset via
+  `people_service.from_crm()`, and **skips Apollo entirely** when the CRM already
+  yields at least `enrich_limit` relevant contacts
+  (`apollo_usage.status = "skipped_crm_sufficient"`).
+- `merge()` dedupes on normalised name and gives CRM precedence: **a CRM email is
+  never overwritten by Apollo**, and a CRM title beats an Apollo one.
+- **No email is invented.** A contact with no email keeps an empty address; its
+  status stays the CRM's own `not_checked` / `not_available`.
+
+Note the existing relevance ruleset is unchanged: it targets manufacturing,
+operations and plant leadership, and scores CFO and individual engineers **0**, so
+those rows are dropped from the roster exactly as Apollo rows are. Re-tuning that
+was not part of this change.
+
+### Verified 2026-09-04
+
+| Check | Result |
+|---|---|
+| Both Apollo call shapes reach the network | ✓ GET and POST, no `UnboundLocalError` |
+| Live people search after the endpoint fix | ✓ 100 returned, 94 ranked, **0 credits** |
+| CRM lookup for Ford Motor Company | ✓ 40 contacts, correct fields |
+| Unknown company | ✓ 0 contacts, no error |
+| Emails never invented | ✓ email-less rows keep `not_checked` / `not_available` |
+| merge: CRM email and title win over Apollo | ✓ |
+| Optional stage failure → ⚠, run completes | ✓ 50% → 75% → 100%, no ✕ |
+| Critical failure still stops with ✕ | ✓ synthesis case unchanged |
+| Progress, failure and state suites | ✓ 20 / 9 / 28 passing |
+
+**No paid research run was made for any of this.**
+
+---
+
 ## 3. Recent test results — live Neon, 2026-09-03
 
 **Live Neon verification — summary**
@@ -734,6 +837,10 @@ does not have to guess.
 - Do not let a lookup result ("no saved report") stand in for a run outcome.
 - Do not extend the state model or the progress panel to Batch Research yet.
   Single Company is being held stable first.
+- Do not re-add a function-local `import urllib.parse` to `apollo_service._request`;
+  it shadows the module-level `urllib` and breaks every POST (§2f).
+- Do not call Apollo before checking the CRM's own contacts (§2f).
+- Do not let an optional enrichment stage stall the progress bar or show a red ✕.
 - Do not collapse the three model-health states back into a boolean. An
   unreachable engine is not a billing problem; see §2a.
 - Do not remove `.qr-form label[hidden]{display:none}` — without it a hidden

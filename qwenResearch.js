@@ -117,6 +117,37 @@ async function renderStored(record, lang, format) {
 /** Canonical records for a set of companies, straight from Neon. Exports are
  *  built from these, so a portfolio or ZIP never depends on what happens to be
  *  on the engine's filesystem. */
+/* Contacts this CRM already holds for a company, shaped for the research
+   engine. Reusing what we know beats paying Apollo to tell us again, and the
+   CRM's own records carry verified emails that Apollo would charge for.
+
+   Matching is by company_id where the CRM knows the company, falling back to a
+   normalised name compare. The rows never reach the browser: the proxy attaches
+   them to the research request server-side. */
+async function crmContactsFor(company) {
+  const name = String(company || '').trim();
+  if (!name) return [];
+  try {
+    const rows = await db.contactsForResearch(name);
+    return rows.map((r) => ({
+      name: r.full_name || [r.first_name, r.last_name].filter(Boolean).join(' '),
+      title: r.job_title || '',
+      department: r.department || r.department_category || '',
+      seniority: r.seniority || r.seniority_level || '',
+      company: r.company || name,
+      location: r.country || r.address || '',
+      email: r.email || '',
+      // Never invent a status: absent means absent.
+      email_status: r.email || r.email_lookup_status
+        ? (r.email_lookup_status || 'From CRM') : '',
+      linkedin_url: r.linkedin_url || '',
+      crm_contact_id: r.id,
+    })).filter((p) => p.name && p.title);
+  } catch (e) {
+    return [];                       // enrichment reuse is best-effort, never fatal
+  }
+}
+
 async function recordsFor(companies) {
   const out = [];
   if (Array.isArray(companies) && companies.length) {
@@ -137,5 +168,5 @@ module.exports = {
   ENGINE, MODEL_UNAVAILABLE,
   engineConfigured, callEngine, looksLikeModelAccessError,
   persistRun, listReports, getReport, getReportForCompany, reportsExist,
-  deleteReportForCompany, renderStored, recordsFor,
+  deleteReportForCompany, renderStored, recordsFor, crmContactsFor,
 };

@@ -692,8 +692,11 @@
     { k: 'queries',   en: 'Planning search areas',         zh: '规划检索范围' },
     { k: 'site',      en: 'Reading the official site',     zh: '读取官网页面' },
     { k: 'search',    en: 'Searching across research areas', zh: '跨领域联网检索' },
-    { k: 'financial', en: 'Financial sourcing',            zh: '财务信息来源' },
-    { k: 'apollo',    en: 'Decision-maker contacts',       zh: '关键决策人' },
+    // optional:true — enrichment. It may fail without stopping the report, and a
+    // failure must not stall the bar at the step where it happened.
+    { k: 'financial', en: 'Financial sourcing',            zh: '财务信息来源', optional: true },
+    { k: 'contacts',  en: 'Contact enrichment',            zh: '关键决策人',   optional: true,
+      also: ['apollo'] },
     { k: 'dedupe',    en: 'Deduplicating evidence',        zh: '证据去重' },
     { k: 'evidence',  en: 'Building evidence set',         zh: '整理证据' },
     { k: 'synthesis', en: 'Generating research',           zh: '生成研究报告' },
@@ -713,8 +716,9 @@
     return job.models[active || ids[0]] || null;
   }
 
-  function progLastFor(job, key) {
-    const hits = (job.stages || []).filter((s) => s.stage === key);
+  function progLastFor(job, key, also) {
+    const keys = [key].concat(also || []);
+    const hits = (job.stages || []).filter((s) => keys.includes(s.stage));
     return hits.length ? hits[hits.length - 1] : null;
   }
 
@@ -755,10 +759,14 @@
       return { st: 'todo' };
     }
 
-    const hit = progLastFor(job, step.k);
+    const hit = progLastFor(job, step.k, step.also);
     if (hit) {
       const text = hit.message || '';
-      if (PROG_FAIL.test(text) && !PROG_SKIP.test(text)) return { st: 'failed', note: text };
+      if (PROG_FAIL.test(text) && !PROG_SKIP.test(text)) {
+        // An optional stage that failed is a WARNING: the run carries on with
+        // what it has, and the bar carries on with it.
+        return { st: step.optional ? 'warned' : 'failed', note: text };
+      }
       if (PROG_SKIP.test(text)) return { st: 'skipped', note: text };
       return { st: 'done', note: text };
     }
@@ -766,7 +774,7 @@
     return { st: 'todo' };
   }
 
-  const PROG_MARK = { done: '✓', active: '→', failed: '✕', skipped: '○', todo: '○' };
+  const PROG_MARK = { done: '✓', active: '→', failed: '✕', warned: '⚠', skipped: '○', todo: '○' };
 
   function fmtElapsed(sec) {
     if (sec == null) return null;
@@ -779,7 +787,8 @@
     if (!box) return;
     box.hidden = false;
     const states = PROG_STEPS.map((step) => ({ step, ...progState(job, step) }));
-    const settled = states.filter((x) => x.st === 'done' || x.st === 'skipped').length;
+    const settled = states.filter(
+      (x) => x.st === 'done' || x.st === 'skipped' || x.st === 'warned').length;
     const pct = Math.round((settled / PROG_STEPS.length) * 100);
     const running = job.status === 'running' || job.status === undefined;
     // The engine reports a stage as it FINISHES, so between two reports nothing
@@ -822,8 +831,10 @@
 
     $('qr-prog-steps').innerHTML = states.map((x) => {
       const cls = x.st === 'done' ? 'is-done' : x.st === 'active' ? 'is-active'
-                : x.st === 'failed' ? 'is-failed' : '';
-      const note = x.st === 'failed' ? ` — ${esc(String(x.note || '').slice(0, 120))}`
+                : x.st === 'failed' ? 'is-failed' : x.st === 'warned' ? 'is-warned' : '';
+      const note = x.st === 'warned'
+                 ? ' — unavailable, continuing with available data / 不可用，使用现有数据继续'
+                 : x.st === 'failed' ? ` — ${esc(String(x.note || '').slice(0, 120))}`
                  : x.st === 'skipped' && x.note ? ` — ${esc(String(x.note).slice(0, 90))}` : '';
       return `<li class="${cls}"><span class="qr-mark">${PROG_MARK[x.st]}</span>`
            + `<span>${esc(x.step.en)} / ${esc(x.step.zh)}`

@@ -1043,7 +1043,18 @@ app.get('/api/aresearch/models/health', async (req, res) => {
 // Start a run. The engine does the research; polling persists the result.
 app.post('/api/aresearch/research', async (req, res) => {
   try {
-    const out = await qr.callEngine('/api/research', { method: 'POST', body: req.body || {} });
+    const body = { ...(req.body || {}) };
+    /* Contacts this CRM already holds go WITH the request, so the engine reuses
+       them before paying Apollo for people we already know. Attached here rather
+       than in the browser: the rows are contact PII and have no business making
+       a round trip through the client. Best-effort — a lookup failure must not
+       stop research. */
+    try {
+      body.known_contacts = await qr.crmContactsFor(body.company);
+    } catch (e) {
+      body.known_contacts = [];
+    }
+    const out = await qr.callEngine('/api/research', { method: 'POST', body });
     res.status(out.status).json(out.data);
   } catch (e) {
     res.status(503).json({ error: e.message });

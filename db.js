@@ -4140,6 +4140,30 @@ async function deleteQwenReport(id) {
   return rows.length > 0;
 }
 
+/* Contacts the CRM already holds for a company, for reuse before paying Apollo.
+
+   company_id is the reliable link (1088 of 1089 contacts carry one); the name
+   compare is the fallback for a company the CRM has not linked yet. Ordered so
+   the most useful rows come first: a real email, then a LinkedIn profile, then
+   seniority. */
+async function contactsForResearch(company, limit = 40) {
+  const key = normalizeNameKey(String(company || ''));
+  if (!key) return [];
+  return await q(`
+    SELECT c.id, c.first_name, c.last_name, c.full_name, c.job_title, c.department,
+           c.department_category, c.seniority, c.seniority_level, c.email,
+           c.email_lookup_status, c.linkedin_url, c.company, c.company_id,
+           c.country, c.address
+    FROM contacts c
+    LEFT JOIN companies co ON co.id = c.company_id
+    WHERE co.name_key = $1 OR LOWER(TRIM(COALESCE(c.company,''))) = LOWER(TRIM($2))
+    ORDER BY (c.email IS NOT NULL AND c.email <> '') DESC,
+             (c.linkedin_url IS NOT NULL AND c.linkedin_url <> '') DESC,
+             c.seniority_level NULLS LAST, c.full_name
+    LIMIT $3
+  `, [key, String(company || '').trim(), limit]);
+}
+
 /* Removes the company's report entirely. The company then reads as having no
    report, and the next run generates fresh research. */
 async function deleteQwenReportsByCompany(company) {
@@ -4638,6 +4662,7 @@ async function setSetting(key, value) {
 }
 
 module.exports = {
+  contactsForResearch,
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
   logCompanyActivity, listCompanyActivity,
   logCrmActivity, listCrmActivity, activeUsers,
