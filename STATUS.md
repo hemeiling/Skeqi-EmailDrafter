@@ -12,7 +12,7 @@ re-key, chat, exhibitor sync). It is untracked and was not touched.
 
 ---
 
-## 0. MODEL STATUS — verified live 2026-09-03
+## 0. MODEL STATUS — re-probed after activation, 2026-09-03
 
 | Model | State |
 |---|---|
@@ -20,8 +20,9 @@ re-key, chat, exhibitor sync). It is untracked and was not touched.
 | `deepseek-v4-pro` | **available** |
 | `deepseek-v4-flash-0731` | **available** |
 
-Confirmed by a forced probe: `GET /api/aresearch/models/health?probe=1` returned
-`modelsAvailable: true` with `state: "available"` for all three.
+Confirmed by a forced probe (`?probe=1`) through the CRM proxy **and** directly
+against the engine, after paid activation. A real single-company run then
+succeeded end to end — see §2b.
 
 > ### ⚠ Generate and Refresh are LIVE actions
 >
@@ -231,6 +232,73 @@ shown, and `qwen3.6-flash` is selected; the reflow assertions hold in every stat
 
 ---
 
+## 2b. Live paid end-to-end run — 2026-09-03
+
+One approved single-company run through the production path: CRM → Current
+Account Research → Single Company → Generate Research. Exactly one research
+request was issued, asserted by counting calls to `/api/aresearch/research`.
+
+| | |
+|---|---|
+| Test company | **Manz AG** (`https://www.manz.com`) — not one of the 29 |
+| Model used | **`qwen3.6-flash`**, the default fast model. No fallback, no second model |
+| Model health | all three `available` on a forced probe |
+| Status | **done**, completed on the first attempt |
+| Sources | **5** |
+| Tokens | **4,953 in · 11,293 out · 16,246 total** |
+| Latency | **92.9 s** (engine-reported) |
+| Search queries issued | 23 |
+| Decision makers | **5**, from web research |
+| Apollo | **not configured** — `apollo_usage.status = "not_configured"`, 0 calls |
+| Neon persistence | ✅ `manz-ag__qwen3-6-flash__20260903191553`, version 1 |
+| Report body | 19 sections, ~21,900 chars bilingual |
+| Quality level | `acceptable`; identity verified; 5 official-site sources |
+
+**Pipeline confirmed end to end:** CRM request → engine → live web search →
+model generation → result returned → persisted to Neon on poll → Reports library
+→ language switching → PDF.
+
+| Check | Result |
+|---|---|
+| Appears in Reports | ✅ library 29 → 30 |
+| Metadata shown | ✅ sources, input/output/total tokens, latency, researched-at |
+| Company-specific content | ✅ correctly reports the **February 2025 insolvency proceedings**, the divestment of the Asia, US and Slovak subsidiaries, and names the actual board |
+| English / 中文 / Bilingual | ✅ 14,235 / 5,519 / 20,016 chars; CJK 52 / 3,090 / 3,289 |
+| Language switch cost | ✅ **no** research or job call — rendered from the stored record |
+| Inline PDF viewer | ✅ opens on the render route |
+| PDF export | ✅ 47,634 bytes, 13 pages, cites `manz.com` |
+| Reload persistence | ✅ reopens from Neon after a full page reload, **no** model call |
+| Page errors | ✅ none |
+
+### One content finding, not a defect
+
+The report contains **one** *Not enough evidence / 证据不足* entry, in Competitor
+Analysis: competitor names, product ranges and capacity comparisons were not in
+the retrieved evidence. The cause is retrieval breadth, not synthesis — **all 5
+sources are `manz.com` pages**, so no third-party competitor data was available.
+The model declining to invent it is the evidence-first design working. The
+internal confidence counter recorded 25 verified, 36 likely and 37
+not-enough-evidence claims out of 98; the display filter surfaces only the one.
+
+If a run should carry more third-party sourcing, that is a retrieval-tuning
+question in `research_service.py`, deliberately **not** changed here.
+
+### Cleanup
+
+The test report was deleted through the Reports ⋯ menu. Library 30 → 29. The 29
+rows were compared row for row against the pre-test snapshot: **identical**,
+0 added, 0 removed, no Manz rows left. No existing report was modified.
+
+### Note on the harness, not the app
+
+The first attempt's browser driver was killed by a 2-minute tool timeout while
+the engine was mid-synthesis. Rather than click Generate again and pay twice, the
+in-flight job was polled through `/api/aresearch/job/:id`, which is also what
+triggers persistence. The run completed and persisted normally. **No tokens were
+spent twice.**
+
+---
+
 ## 3. Recent test results — live Neon, 2026-09-03
 
 **Live Neon verification — summary**
@@ -314,13 +382,18 @@ No console or page errors in any of the three live runs.
 
 ## 4. Known issues / uncertain
 
-1. **Refresh and Generate have not been run end to end.** Their guard, confirm
-   step and wiring are verified; no real regeneration was performed, deliberately,
-   because they now spend tokens (§0). A single-company paid run is planned.
-2. **Batch Research generation was not re-run** against live Neon. Its layout was
+1. **Retrieval breadth on a thin-source company.** The Manz AG run returned 5
+   sources, all from the company's own domain, which left Competitor Analysis
+   without evidence (§2b). Worth watching; not addressed in this pass.
+2. **Apollo is not configured on the engine.** `APOLLO_API_KEY` is absent there,
+   so contacts come from web research only. Set it on the engine service, not
+   the CRM, to enable Apollo enrichment.
+3. **Refresh has not been run on an existing report**, deliberately — it would
+   replace a production record. Generate is now proven (§2b).
+4. **Batch Research generation was not re-run** against live Neon. Its layout was
    verified; its generation path is untouched by the UI pass.
-3. **The live Render configuration is unconfirmed from here.** See §4a.
-4. Deletion is a hard `DELETE` with no history. There is nothing to restore from
+5. **The live Render configuration is unconfirmed from here.** See §4a.
+6. Deletion is a hard `DELETE` with no history. There is nothing to restore from
    if a real report is removed.
 
 ### 4a. Environment — local vs Render
