@@ -373,7 +373,10 @@ snapshot, so it ports, but it has not been wired or verified there.
 
 ---
 
-## 2d. Ford diagnosis, and the three states Single Company was conflating (2026-09-04)
+## 2d. Ford diagnosis — the incident behind the state model (2026-09-04)
+
+> The durable contract is **§2e Single Company state model**. This section records
+> what went wrong and how it was found.
 
 ### Root cause of the Ford click that "did nothing"
 
@@ -451,6 +454,98 @@ told it is unchanged.
 
 Retrieval, prompts, model routing, Apollo and the Neon schema were not touched.
 **Batch Research still does not use any of this.**
+
+---
+
+## 2e. Single Company state model — CANONICAL
+
+The contract for the Current Account Research → Single Company pane. §2d is the
+incident that produced it; **this section is the reference.** Six states, and no
+two of them may share a treatment. Conflating any pair is the bug class that
+produced a red *"No saved report for this company"* in place of a research
+outcome.
+
+**Do not extend this to Batch Research yet.** Single Company is being held stable
+first; Batch still uses its own status badges and is deliberately untouched.
+
+### The six states
+
+| # | State | Entered when | Billable? | UI treatment | Primary action | Also offered |
+|---|---|---|---|---|---|---|
+| 1 | **Existing report** | the lookup finds a Neon record for the name in the box | no | neutral **purple** panel, `.qr-lookup.is-existing` | **Regenerate Research / 重新生成研究** | View Report · View PDF · Regenerate · Delete Report |
+| 2 | **New company** | the lookup finds none | no | neutral **dashed** panel, `.qr-lookup.is-new` | **Generate Research / 生成研究报告** | — |
+| 3 | **Running** | POST `/research` returned a `job_id`, or an in-flight job was re-attached | yes, once | progress panel, 12 steps, live counters | Generate is **disabled** for the duration | — |
+| 4 | **Needs review** | job ends `status: "needs_review"` | **NO — see below** | **warning** `.qr-msg.warn`, never red | **Research anyway / 仍然生成** (re-runs with the engine's `force`) | steps stay visible; existing report explicitly noted as unchanged |
+| 5 | **Complete** | job ends `done` with a complete model | already spent | progress panel becomes `✓ Research completed` + `N sources · T tokens · S sec`; report renders below | report actions | library refreshes |
+| 6 | **Error** | job ends `error`, or the model ends failed/timeout/access_denied, or a request throws | possibly, partially | **error** `.qr-msg.err` | retry is the user's call | the real API/job error text; completed steps retained; existing report noted as unchanged |
+
+### State 4 — `needs_review` is a NON-BILLABLE, PRE-SYNTHESIS outcome
+
+**This is the state that was being mis-reported, and the one to protect.**
+
+`needs_review` means retrieval did not produce enough evidence to be worth
+synthesising. The engine reaches it in exactly two places in `app.py`, **both
+before any model is called**:
+
+| Origin | Line | Mechanism |
+|---|---|---|
+| Quality guard | `if quality.get("blocking") and not force:` → `return` | **151** |
+| Retrieval exhausted | `except rs.RetrievalError:` | **205** |
+
+`run_model` is not even *defined* until line **159** and is not *called* until
+line **195**. The guard returns at 151; the exception is raised during retrieval.
+So:
+
+- **No model request is made. No tokens are spent. Nothing is charged.**
+- The per-model entries stay `status: "pending"` with no `token_usage`, so the UI
+  correctly shows no token count.
+- **Nothing is written to Neon.** The CRM persists only
+  `if (m.status === 'complete' && m.result)`, and the engine only computes
+  `saved = save_run(...) if ok else None`.
+- **An existing report is therefore untouched**, and the panel says so.
+
+**Rules:**
+
+- Never style `needs_review` as an error. It is a decision point.
+- Never announce it as "Research complete".
+- Never let it fall through to `openReport()`, whose 404 then becomes the
+  headline. That is exactly what happened with Ford.
+- Always show the engine's own `quality.reasons`, not a generic sentence.
+- Recovering from it costs tokens: **Research anyway** sets `force`, which skips
+  the guard and does spend. That is the only billable path out of state 4.
+
+### Rules that apply across all six
+
+1. **A lookup result is never an error.** "No saved report" answers *does a report
+   exist*, and may never stand in for *how did the run go*. A 404 from
+   `/company/:name` renders **state 2**, not an error.
+2. **Only states 4 and 6 may carry a non-neutral colour**, and they must not share
+   one: warning for 4, error for 6.
+3. **The real message wins.** State 6 shows the actual API or job error. No
+   substitutions.
+4. **Never pay twice.** A job id is kept per company in `sessionStorage`; a second
+   click or a reload mid-run re-attaches to the running job.
+5. **Progress is drawn before the POST**, so a failing POST still shows where it
+   stopped.
+6. **A failed run never replaces a good report** — enforced server-side, and
+   mirrored in the UI by restoring the previous report on failure.
+
+### State transitions
+
+```
+        ┌──────────────── lookup (debounced, /exists — no model) ───────────────┐
+        │                                                                      │
+   1 Existing report ──[Regenerate]──┐                    ┌──── 2 New company ──┘
+                                     ▼                    ▼
+                                   3 Running ◄── re-attach in-flight job
+                                     │
+             ┌───────────────────────┼────────────────────────┐
+             ▼                       ▼                        ▼
+   4 Needs review            5 Complete                  6 Error
+   (no tokens, no write)     (report saved)              (report preserved)
+             │
+             └──[Research anyway → force]──► 3 Running   ← the only billable exit
+```
 
 ---
 
@@ -551,8 +646,12 @@ No console or page errors in any of the three live runs.
    (`APOLLO_ENRICH_LIMIT` overrides). See the engine's `STATUS.md` §0a.
 3. **Refresh has not been run on an existing report**, deliberately — it would
    replace a production record. Generate is now proven (§2b).
-4. **Batch Research** was not re-run against live Neon, and does **not** yet use
-   the progress panel from §2c. Its layout was
+4. **Batch Research is deliberately unchanged.** It uses neither the §2e state
+   model nor the §2c progress panel, and keeps its own status badges. This is a
+   hold, not an oversight: Single Company is being kept stable first. Note that
+   the batch path has the same latent trap — a `needs_review` company will read
+   as an ordinary non-completion there — so it should be ported before batch is
+   relied on for ambiguous company names. Its layout was
    verified; its generation path is untouched by the UI pass.
 5. **The live Render configuration is unconfirmed from here.** See §4a.
 6. Deletion is a hard `DELETE` with no history. There is nothing to restore from
@@ -628,6 +727,13 @@ does not have to guess.
 - **Do not run Generate or Refresh to test.** They are live and cost tokens (§0),
   and Refresh replaces the saved report. Run them only when explicitly asked.
 - Do not describe model access as blocked. It is available; see §0.
+- **Do not collapse the six Single Company states (§2e).** In particular:
+  `needs_review` is a NON-BILLABLE, pre-synthesis outcome — never style it as an
+  error, never announce it as complete, and never let it fall through to
+  `openReport()`.
+- Do not let a lookup result ("no saved report") stand in for a run outcome.
+- Do not extend the state model or the progress panel to Batch Research yet.
+  Single Company is being held stable first.
 - Do not collapse the three model-health states back into a boolean. An
   unreachable engine is not a billing problem; see §2a.
 - Do not remove `.qr-form label[hidden]{display:none}` — without it a hidden
@@ -645,7 +751,10 @@ does not have to guess.
 3. Open a PR for `account-research-qwen` and merge to `main`.
 4. **When you choose:** one deliberate paid end-to-end run on a single company —
    Generate → Neon upsert → report → PDF. Not before; it costs tokens (§0).
-5. Optionally add `CURRENT_ACCOUNT_RESEARCH_URL` to the local `.env` so the
+5. **Hold Batch Research as-is.** Once Single Company has been used for a while
+   without surprises, port §2e's state model and the §2c progress panel to it.
+   Not before.
+6. Optionally add `CURRENT_ACCOUNT_RESEARCH_URL` to the local `.env` so the
    workspace runs locally without a command-line override.
 
 ---
@@ -662,7 +771,8 @@ Selected in two languages with contents checked, Download, the Refresh guard, an
 Delete on a disposable fixture. The 29 rows were compared row for row against a
 pre-test snapshot and are identical.
 
-**Open item:** the Render dashboard values in §4a. Everything else is done.
+**Open items:** the Render dashboard values in §4a, and `APOLLO_API_KEY` on the
+Render engine service (§0a). Batch Research is on a deliberate hold (§2e).
 
 **Do not:** run Generate or Refresh to test. They are live (§0).
 
