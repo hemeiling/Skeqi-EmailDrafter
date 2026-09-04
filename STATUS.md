@@ -270,15 +270,20 @@ model generation → result returned → persisted to Neon on poll → Reports l
 | Reload persistence | ✅ reopens from Neon after a full page reload, **no** model call |
 | Page errors | ✅ none |
 
-### One content finding, not a defect
+### One content finding — since fixed in the engine
 
-The report contains **one** *Not enough evidence / 证据不足* entry, in Competitor
-Analysis: competitor names, product ranges and capacity comparisons were not in
-the retrieved evidence. The cause is retrieval breadth, not synthesis — **all 5
-sources are `manz.com` pages**, so no third-party competitor data was available.
-The model declining to invent it is the evidence-first design working. The
-internal confidence counter recorded 25 verified, 36 likely and 37
-not-enough-evidence claims out of 98; the display filter surfaces only the one.
+The report contained **one** *Not enough evidence / 证据不足* entry, in Competitor
+Analysis. The cause is retrieval breadth, not synthesis — **all 5 sources are
+`manz.com` pages**, so no third-party competitor data was available, and the model
+declining to invent it is the evidence-first design working.
+
+Per instruction, unsupported claims should now be **omitted rather than
+announced**. `confidence.py` in the engine repository was corrected on 2026-09-03:
+malformed badges are swept, absence prose is recognised by meaning rather than
+length, and an absence clause is removed at sentence level so it cannot take a
+sourced finding with it. Across all 30 stored reports, tagged occurrences went
+**2,288 → 0** with no section lost. The stored record is untouched; only the
+reading view changes. See the engine's `STATUS.md` §0b.
 
 If a run should carry more third-party sourcing, that is a retrieval-tuning
 question in `research_service.py`, deliberately **not** changed here.
@@ -385,9 +390,15 @@ No console or page errors in any of the three live runs.
 1. **Retrieval breadth on a thin-source company.** The Manz AG run returned 5
    sources, all from the company's own domain, which left Competitor Analysis
    without evidence (§2b). Worth watching; not addressed in this pass.
-2. **Apollo is not configured on the engine.** `APOLLO_API_KEY` is absent there,
-   so contacts come from web research only. Set it on the engine service, not
-   the CRM, to enable Apollo enrichment.
+2. **Apollo is configured and live locally, pending on Render.**
+   `APOLLO_API_KEY` now sits in the engine's `ai_credentials.env` and a live
+   `/organizations/enrich` call authenticated successfully on 2026-09-03,
+   resolving `skeqi.com` to *SKEQI Intelligent Equipment*. The Manz AG run
+   predated it: the file was written at 19:18, three minutes after that run
+   finished. **Still to do: add `APOLLO_API_KEY` to the Render ENGINE service** —
+   `ai_credentials.env` is not deployed, and setting it on the CRM does nothing
+   because Apollo is called from the engine. Enrichment is capped at 12 contacts
+   (`APOLLO_ENRICH_LIMIT` overrides). See the engine's `STATUS.md` §0a.
 3. **Refresh has not been run on an existing report**, deliberately — it would
    replace a production record. Generate is now proven (§2b).
 4. **Batch Research generation was not re-run** against live Neon. Its layout was
