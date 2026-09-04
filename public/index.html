@@ -206,6 +206,46 @@
     .qr-formactions .btn-primary { height:var(--qr-ctl-h); padding:0 22px; font-size:14px;
       font-weight:600; border-radius:6px; }
     .qr-fieldwide { grid-column:1/-1; }
+
+    /* ── Live research progress ── */
+    .qr-progress { margin-top:16px; padding-top:15px; border-top:1px solid var(--color-border); }
+    .qr-prog-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
+    .qr-prog-title { font-size:0.68rem; font-weight:700; letter-spacing:.06em;
+      text-transform:uppercase; color:var(--color-text-tertiary); }
+    .qr-prog-title .i18n-zh { font-size:0.72rem; letter-spacing:0; text-transform:none; margin-left:5px; }
+    .qr-prog-pct { font-size:0.82rem; font-weight:700; color:var(--color-primary);
+      font-variant-numeric:tabular-nums; }
+    .qr-prog-track { height:7px; border-radius:4px; background:#ECECF1; overflow:hidden; margin:8px 0 10px; }
+    .qr-prog-fill { height:100%; border-radius:4px; background:var(--color-primary);
+      transition:width .35s ease; }
+    /* Synthesis reports no inner progress, so the bar says "working", not a number. */
+    .qr-prog-fill.is-indeterminate { width:100% !important;
+      background:repeating-linear-gradient(115deg, var(--color-primary) 0 14px,
+        var(--color-primary-hover) 14px 28px);
+      background-size:200% 100%; animation:qrslide 1.1s linear infinite; }
+    @keyframes qrslide { from { background-position:0 0; } to { background-position:-56px 0; } }
+    @media (prefers-reduced-motion: reduce) {
+      .qr-prog-fill.is-indeterminate { animation:none; }
+    }
+    .qr-prog-now { font-size:0.84rem; font-weight:600; color:var(--color-text-primary); margin-bottom:2px; }
+    .qr-prog-now .zh { display:block; font-size:0.78rem; font-weight:500; color:var(--color-text-tertiary); }
+    .qr-prog-steps { list-style:none; margin:10px 0 0; padding:0; font-size:0.8rem; }
+    .qr-prog-steps li { display:flex; align-items:flex-start; gap:8px; padding:2px 0;
+      color:var(--color-text-tertiary); }
+    .qr-prog-steps li .qr-mark { width:14px; flex:none; text-align:center; font-weight:700; }
+    .qr-prog-steps li.is-done { color:var(--color-text-secondary); }
+    .qr-prog-steps li.is-done .qr-mark { color:var(--color-success); }
+    .qr-prog-steps li.is-active { color:var(--color-primary-hover); font-weight:600; }
+    .qr-prog-steps li.is-active .qr-mark { color:var(--color-primary); }
+    .qr-prog-steps li.is-failed { color:var(--color-danger-text); }
+    .qr-prog-steps li.is-failed .qr-mark { color:var(--color-danger); }
+    .qr-prog-steps li .qr-note { color:var(--color-text-tertiary); font-weight:500; }
+    .qr-prog-counters { display:flex; flex-wrap:wrap; gap:4px 18px; margin-top:11px;
+      font-size:0.76rem; color:var(--color-text-tertiary); }
+    .qr-prog-counters b { color:var(--color-text-secondary); font-weight:600;
+      font-variant-numeric:tabular-nums; }
+    .qr-progress.is-complete .qr-prog-fill { background:var(--color-success); }
+    .qr-progress.is-failed .qr-prog-fill { background:var(--color-danger); }
     /* A hidden field must take no space at all — .qr-form label sets display:flex,
        which would otherwise beat the [hidden] attribute. */
     .qr-form label[hidden] { display:none !important; }
@@ -3175,6 +3215,19 @@
             </div>
           </div>
           <p id="qr-single-msg" class="qr-msg" hidden></p>
+
+          <!-- Live progress. Every value is read from the job snapshot the
+               polling loop already fetches; nothing here issues a request. -->
+          <div id="qr-progress" class="qr-progress" hidden>
+            <div class="qr-prog-head">
+              <span class="qr-prog-title">Research Progress <span class="i18n-zh">研究进度</span></span>
+              <span class="qr-prog-pct" id="qr-prog-pct"></span>
+            </div>
+            <div class="qr-prog-track"><div class="qr-prog-fill" id="qr-prog-fill"></div></div>
+            <div class="qr-prog-now" id="qr-prog-now"></div>
+            <ul class="qr-prog-steps" id="qr-prog-steps"></ul>
+            <div class="qr-prog-counters" id="qr-prog-counters"></div>
+          </div>
         </div>
 
         <div class="card" id="qr-report-card" style="display:none;">

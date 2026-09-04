@@ -304,6 +304,75 @@ spent twice.**
 
 ---
 
+## 2c. Live research progress panel — Single Company (2026-09-03)
+
+Replaces the static *Researching… 研究中…* line with a panel under Generate.
+**It issues no request of its own.** The polling loop already fetched a full job
+snapshot every 1.5 s and used only `snap.status`; the same snapshot now also
+draws the panel. Same interval, same call count, no model call.
+
+### What is real, and what was deliberately not built
+
+The engine reports retrieval as **aggregate** stages (`discover`, `official`,
+`listing`, `queries`, `site`, `search`, `dedupe`, `evidence`, `financial`,
+`apollo`, `quality`) and returns the synthesis **in one block**. So:
+
+- **No per-topic search steps.** There is no "Searching leadership" signal to
+  read; inventing nine topic rows would be a bar reporting on itself.
+- **No per-section streaming.** Sections do not arrive one at a time.
+- **No timer-based percentage.** It is `settled steps / 12`.
+
+Twelve steps, each mapped to a stage key, a `phase`, or a model-status change:
+validate · official website · plan search areas · read official site · search ·
+financial · contacts · dedupe · evidence set · generate · PDF · save.
+
+### Behaviour
+
+- **Percentage** from completed steps. During synthesis, which reports no inner
+  progress, the bar goes **indeterminate** (animated) rather than claiming a
+  number. It respects `prefers-reduced-motion`.
+- **Current stage** is always named. The engine reports a stage as it *finishes*,
+  so between reports nothing is explicitly active; the panel shows the first
+  unsettled step instead of falling back to "Starting…".
+- **Counters** are snapshot values only: sources found, search queries, model
+  label, elapsed. **Tokens appear only once `token_usage.total` is present**, so
+  never during the run.
+- **Completion** turns the panel into `✓ Research completed` with
+  `N sources · T tokens · S sec`, and the report renders below it.
+- **Soft failure** marks that one step `✕` with the engine's own message and the
+  run continues. A stage the engine reports as skipped (`Apollo: not configured`,
+  `Yahoo Finance used: No - unlisted`) shows `○` with its reason — **a skip is
+  not dressed as an error**.
+- **Hard failure** names the phase (*Research failed during synthesis*) and
+  **keeps every completed step on screen** for troubleshooting.
+- The panel is cleared when opening a different report from the library, and kept
+  when it follows the run that produced the report.
+
+### Verified 2026-09-03 — replayed, no model call
+
+Driven by replaying the **real captured Manz AG job snapshots** through the live
+frontend, plus two synthetic failure sequences. No research request was issued.
+
+| Check | Result |
+|---|---|
+| Hidden at rest, appears on run | ✓ |
+| Progress monotonic, never decreasing | ✓ 0 → 3 → 5 → 7 → 10 |
+| 12 steps, no technical log dump | ✓ |
+| Percentage varies with stages, not time | ✓ 0 / 25 / 42 / 75 / 100 |
+| Indeterminate bar during synthesis, cleared after | ✓ |
+| A stage is named at every point; never "Starting…" mid-run | ✓ |
+| Counters: sources, queries, model, elapsed | ✓ |
+| Tokens only after the model reports them | ✓ absent mid-run, 16,246 at the end |
+| Ends `✓ Research completed` at 100%, steps still visible | ✓ |
+| Soft failure names the stage, run still completes | ✓ *Financial sourcing — search failed - source unreachable* |
+| Hard failure names the phase, completed steps retained | ✓ 7 steps kept |
+| Extra requests introduced | ✓ none — 6 polls, 6 renders |
+
+**Batch Research is NOT done yet.** The renderer is written against a job
+snapshot, so it ports, but it has not been wired or verified there.
+
+---
+
 ## 3. Recent test results — live Neon, 2026-09-03
 
 **Live Neon verification — summary**
@@ -401,7 +470,8 @@ No console or page errors in any of the three live runs.
    (`APOLLO_ENRICH_LIMIT` overrides). See the engine's `STATUS.md` §0a.
 3. **Refresh has not been run on an existing report**, deliberately — it would
    replace a production record. Generate is now proven (§2b).
-4. **Batch Research generation was not re-run** against live Neon. Its layout was
+4. **Batch Research** was not re-run against live Neon, and does **not** yet use
+   the progress panel from §2c. Its layout was
    verified; its generation path is untouched by the UI pass.
 5. **The live Render configuration is unconfirmed from here.** See §4a.
 6. Deletion is a hard `DELETE` with no history. There is nothing to restore from

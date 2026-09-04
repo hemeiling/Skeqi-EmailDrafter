@@ -308,8 +308,12 @@
   }
 
   /* ── Single report ── */
-  async function openReport(company) {
+  /** keepProgress: true only when this call follows the run that produced the
+   *  report, so the completed panel stays above it. Opening any other report
+   *  clears it — a panel from an earlier run must not sit above someone else's. */
+  async function openReport(company, keepProgress) {
     msg('qr-single-msg', '');
+    if (!keepProgress && $('qr-progress')) $('qr-progress').hidden = true;
     showSub('single');
     try {
       const got = await fetch(api(`/company/${encodeURIComponent(company)}`)).then((r) => {
@@ -552,6 +556,187 @@
       b.classList.toggle('active', b.dataset.qrLang === l));
   }
 
+  /* ── Live research progress ─────────────────────────────────────────────
+     Rendered from the job snapshot the polling loop ALREADY fetches. It issues
+     no request of its own and triggers no model call.
+
+     Every step below maps to a stage the engine actually emits, or to a phase
+     or model-status transition. The engine reports retrieval as aggregate
+     stages and returns the synthesis in one block, so there are deliberately no
+     per-topic search steps and no per-section streaming: inventing either would
+     be a progress bar that reports on itself rather than on the work. ── */
+
+  const PROG_STEPS = [
+    { k: 'validate',  en: 'Validating company',            zh: '验证公司' },
+    { k: 'official',  en: 'Discovering official website',  zh: '查找官网' },
+    { k: 'queries',   en: 'Planning search areas',         zh: '规划检索范围' },
+    { k: 'site',      en: 'Reading the official site',     zh: '读取官网页面' },
+    { k: 'search',    en: 'Searching across research areas', zh: '跨领域联网检索' },
+    { k: 'financial', en: 'Financial sourcing',            zh: '财务信息来源' },
+    { k: 'apollo',    en: 'Decision-maker contacts',       zh: '关键决策人' },
+    { k: 'dedupe',    en: 'Deduplicating evidence',        zh: '证据去重' },
+    { k: 'evidence',  en: 'Building evidence set',         zh: '整理证据' },
+    { k: 'synthesis', en: 'Generating research',           zh: '生成研究报告' },
+    { k: 'pdf',       en: 'Generating PDF',                zh: '生成PDF' },
+    { k: 'save',      en: 'Saving report',                 zh: '保存报告' },
+  ];
+
+  /* A stage message the engine reports as a real failure, as opposed to one it
+     reports as "skipped, and here is why" — those must not read as errors. */
+  const PROG_FAIL = /\b(failed|failure|error|unreachable|timed out|blocked)\b/i;
+  const PROG_SKIP = /not configured|not forced|not needed|no -|not used|unlisted/i;
+
+  function progModel(job) {
+    const ids = Object.keys(job.models || {});
+    if (!ids.length) return null;
+    const active = ids.find((i) => (job.models[i] || {}).status === 'generating');
+    return job.models[active || ids[0]] || null;
+  }
+
+  function progLastFor(job, key) {
+    const hits = (job.stages || []).filter((s) => s.stage === key);
+    return hits.length ? hits[hits.length - 1] : null;
+  }
+
+  /** State for one step: done | active | failed | skipped | todo, plus a note. */
+  function progState(job, step) {
+    const m = progModel(job) || {};
+    const phase = job.phase;
+    const retrievalOver = phase === 'synthesis' || phase === 'done' || phase === 'needs_review';
+    const seen = (k) => !!progLastFor(job, k);
+
+    if (step.k === 'validate') {
+      const hit = progLastFor(job, 'discover') || progLastFor(job, 'official');
+      if (hit || seen('queries') || retrievalOver) return { st: 'done' };
+      return { st: job.status === 'running' ? 'active' : 'todo' };
+    }
+    if (step.k === 'synthesis') {
+      if (m.status === 'complete') return { st: 'done' };
+      if (['failed', 'timeout', 'access_denied'].includes(m.status)) {
+        return { st: 'failed', note: m.error || m.status };
+      }
+      if (phase === 'synthesis') return { st: 'active', indeterminate: true };
+      return { st: 'todo' };
+    }
+    if (step.k === 'pdf') {
+      if (m.result && m.result.pdf) return { st: 'done' };
+      if (m.status === 'complete') return { st: 'active' };
+      return { st: 'todo' };
+    }
+    if (step.k === 'save') {
+      if (m.persisted) return { st: 'done' };
+      if (m.persistError) return { st: 'failed', note: m.persistError };
+      if (m.status === 'complete') return { st: 'active' };
+      return { st: 'todo' };
+    }
+    if (step.k === 'evidence') {
+      if (seen('quality') || retrievalOver) return { st: 'done' };
+      if (seen('evidence')) return { st: 'active' };
+      return { st: 'todo' };
+    }
+
+    const hit = progLastFor(job, step.k);
+    if (hit) {
+      const text = hit.message || '';
+      if (PROG_FAIL.test(text) && !PROG_SKIP.test(text)) return { st: 'failed', note: text };
+      if (PROG_SKIP.test(text)) return { st: 'skipped', note: text };
+      return { st: 'done', note: text };
+    }
+    if (retrievalOver) return { st: 'skipped' };
+    return { st: 'todo' };
+  }
+
+  const PROG_MARK = { done: '✓', active: '→', failed: '✕', skipped: '○', todo: '○' };
+
+  function fmtElapsed(sec) {
+    if (sec == null) return null;
+    const s = Math.max(0, Math.round(sec));
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+  }
+
+  function renderProgress(job, startedAt) {
+    const box = $('qr-progress');
+    if (!box) return;
+    box.hidden = false;
+    const states = PROG_STEPS.map((step) => ({ step, ...progState(job, step) }));
+    const settled = states.filter((x) => x.st === 'done' || x.st === 'skipped').length;
+    const pct = Math.round((settled / PROG_STEPS.length) * 100);
+    const running = job.status === 'running' || job.status === undefined;
+    // The engine reports a stage as it FINISHES, so between two reports nothing
+    // is explicitly active. The step the run must be working on is the first one
+    // not yet settled — showing that beats falling back to "Starting…".
+    let active = states.find((x) => x.st === 'active');
+    if (!active && running) {
+      active = states.find((x) => x.st === 'todo');
+      if (active) active.st = 'active';
+    }
+    const failed = states.find((x) => x.st === 'failed');
+    const finished = job.status === 'done' || job.status === 'error' || job.status === 'needs_review';
+
+    box.classList.toggle('is-complete', job.status === 'done');
+    box.classList.toggle('is-failed', job.status === 'error');
+
+    const fill = $('qr-prog-fill');
+    const indeterminate = !!(active && active.indeterminate) && !finished;
+    fill.classList.toggle('is-indeterminate', indeterminate);
+    fill.style.width = `${job.status === 'done' ? 100 : pct}%`;
+    $('qr-prog-pct').textContent = job.status === 'done' ? '100%' : `${pct}%`;
+
+    const now = $('qr-prog-now');
+    if (job.status === 'done') {
+      now.innerHTML = '✓ Research completed<span class="zh">研究完成</span>';
+    } else if (job.status === 'error') {
+      now.innerHTML = `Research failed during ${esc(job.phase || 'the run')}.`
+        + '<span class="zh">研究运行失败。以下步骤保留以便排查。</span>';
+    } else if (job.status === 'needs_review') {
+      now.innerHTML = 'Retrieval incomplete — needs review<span class="zh">检索不完整，需人工确认</span>';
+    } else if (active) {
+      const live = progLastFor(job, active.step.k);
+      now.innerHTML = `${esc(active.step.en)}…<span class="zh">${esc(active.step.zh)}…</span>`
+        + (live && live.message ? `<span class="zh">${esc(live.message)}</span>` : '');
+    } else {
+      now.innerHTML = 'Starting…<span class="zh">正在开始…</span>';
+    }
+    // Re-derive after the fallback so the list marker matches the headline.
+    if (active && active.indeterminate === undefined) active.indeterminate = false;
+
+    $('qr-prog-steps').innerHTML = states.map((x) => {
+      const cls = x.st === 'done' ? 'is-done' : x.st === 'active' ? 'is-active'
+                : x.st === 'failed' ? 'is-failed' : '';
+      const note = x.st === 'failed' ? ` — ${esc(String(x.note || '').slice(0, 120))}`
+                 : x.st === 'skipped' && x.note ? ` — ${esc(String(x.note).slice(0, 90))}` : '';
+      return `<li class="${cls}"><span class="qr-mark">${PROG_MARK[x.st]}</span>`
+           + `<span>${esc(x.step.en)} / ${esc(x.step.zh)}`
+           + (note ? `<span class="qr-note">${note}</span>` : '') + '</span></li>';
+    }).join('');
+
+    // Counters: only values the snapshot actually carries.
+    const m = progModel(job) || {};
+    const bits = [];
+    const srcs = (job.sources || []).length;
+    if (srcs) bits.push(`Sources found / 来源 <b>${srcs}</b>`);
+    const q = (job.search_queries || []).length;
+    if (q) bits.push(`Search queries / 检索式 <b>${q}</b>`);
+    if (m.label) bits.push(`Model / 模型 <b>${esc(m.label)}</b>`);
+    const el = fmtElapsed(job.wall_seconds != null ? job.wall_seconds
+                          : (Date.now() - startedAt) / 1000);
+    if (el) bits.push(`Elapsed / 用时 <b>${el}</b>`);
+    // Tokens appear only once the model has actually reported them.
+    const tu = m.token_usage || {};
+    if (tu.total != null) bits.push(`Tokens <b>${Number(tu.total).toLocaleString()}</b>`);
+    if (m.fallback_used) bits.push(`<b>Fell back to ${esc(m.model_used || '?')}</b>`);
+    $('qr-prog-counters').innerHTML = bits.join('');
+  }
+
+  function progressSummary(job) {
+    const m = progModel(job) || {};
+    const tu = m.token_usage || {};
+    const parts = [`${(job.sources || []).length} sources`];
+    if (tu.total != null) parts.push(`${Number(tu.total).toLocaleString()} tokens`);
+    if (job.wall_seconds != null) parts.push(`${job.wall_seconds} sec`);
+    return parts.join(' · ');
+  }
+
   /* ── Research (blocked while models need activation) ── */
   async function startResearch(isRegen) {
     const company = $('qr-company').value.trim();
@@ -559,24 +744,36 @@
     await checkModels();
     if (blockIfNoModel('qr-single-msg')) return;
     msg('qr-single-msg', isRegen ? 'Regenerating… 重新生成中…' : 'Researching… 研究中…', 'info');
+    const startedAt = Date.now();
+    let last = null;
+    $('qr-generate').disabled = true;
     try {
       const start = await fetch(api('/research'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ company, website: $('qr-website').value.trim(), model: $('qr-model').value }),
       }).then((r) => r.json());
       if (start.error) throw new Error(start.error);
+      renderProgress({ status: 'running', phase: 'retrieval', stages: [], models: {} }, startedAt);
       while (true) {
+        // The SAME poll as before, at the same interval. It used to be discarded
+        // except for its status; now it also draws the panel. No extra request.
         const snap = await fetch(api(`/job/${start.job_id}`)).then((r) => r.json());
+        last = snap;
+        renderProgress(snap, startedAt);
         if (snap.modelUnavailable) { blockIfNoModel('qr-single-msg'); return; }
         if (snap.status === 'error') throw new Error(snap.message || 'Research failed.');
         if (snap.status !== 'running') break;
         await new Promise((r) => setTimeout(r, 1500));
       }
-      msg('qr-single-msg', 'Research complete. 研究完成。', 'info');
+      msg('qr-single-msg', `Research complete. 研究完成。 ${esc(progressSummary(last))}`, 'info');
       await loadLibrary();
-      await openReport(company);
+      await openReport(company, true);      // keep the completed panel on screen
     } catch (e) {
+      // The steps stay on screen: which one carries the ✕ is the diagnosis.
+      if (last) renderProgress({ ...last, status: 'error' }, startedAt);
       msg('qr-single-msg', esc(e.message), 'err');
+    } finally {
+      $('qr-generate').disabled = false;
     }
   }
 
