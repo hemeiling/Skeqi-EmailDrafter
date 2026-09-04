@@ -774,6 +774,93 @@ in-memory batch state and its Regenerate row action is unfixed.
 
 ---
 
+## 2h. Batch Research — durable regeneration and a quieter Setup (2026-09-04)
+
+### Row Regenerate now uses the SAME job as Single Company
+
+It used to call `startBatch([one item])`, a second job implementation with none
+of the durability: no durable row, no server-side duplicate guard, and a row that
+did not visibly change until a poll came back, which is why it read as inert.
+
+`rowAction('regen')` now calls `regenerateRow()`, which walks the same path as
+Single Company:
+
+```
+click Regenerate
+  → CRM checks Neon for an active job for that company
+       ├─ found → attach, no paid run
+       └─ none  → durable job claimed, engine started
+  → row shows progress immediately
+  → engine callback persists ONLY on success
+  → existing report intact until the replacement lands
+```
+
+Verified: the click issues exactly one `POST /api/aresearch/research` and **zero**
+calls to the old `/batch/start`.
+
+### Row-level progress
+
+The status cell shows the run rather than the stale report status, with a bar and
+the stage in both languages:
+
+`Researching / 研究中 75%` · `Generating / 生成中`
+
+Stage names map from the engine's own keys: Queued, Validating, Searching,
+Contacts, Building evidence, Generating, Generating PDF, Saving, Completed,
+Interrupted, Failed. A failed or interrupted row shows the reason, and the report
+it already had is untouched — `refreshExisting()` re-reads Neon rather than
+assuming.
+
+### Reconnecting
+
+Opening the Batch tab calls `/api/aresearch/active-jobs` and reattaches any row
+whose company is still running, so a tab switch, refresh or browser restart picks
+the run back up. **No session storage** is involved.
+
+### Setup is quieter
+
+Company Column and Website Column are hidden. After an upload the card shows one
+line:
+
+`✓ 3 companies loaded · 2 websites provided`
+
+plus a note that missing websites are resolved automatically. The mapping
+dropdowns appear **only when the company column is genuinely ambiguous**, with an
+amber prompt explaining why. The detected mapping is kept and used either way —
+this is a UI change, not a logic change.
+
+### Bilingual labels
+
+`View / 查看` · `PDF / 查看PDF` · `Regenerate / 重新生成` · `Delete / 删除` ·
+`Edit URL / 修改官网` · `Edit Company / 修改公司`. The `Regen` abbreviation is gone,
+and the library row's bare `PDF` is now bilingual too.
+
+### Verified 2026-09-04 — fixtures and stubs, NO paid batch run
+
+| Check | Result |
+|---|---|
+| Confident headers → summary, no dropdowns | ✓ "3 companies loaded · 2 websites provided" |
+| Straight to the company table | ✓ 3 rows |
+| Ambiguous headers → mapping shown, amber, reason given | ✓ |
+| Bilingual labels, no abbreviations | ✓ all six |
+| Regenerate → one `/aresearch/research`, no `/batch/start` | ✓ |
+| Row shows Researching with % and stage | ✓ 75%, "Generating / 生成中" |
+| Row progress bar renders | ✓ |
+| Engine-unreachable path | ✓ row shows Failed with the real reason |
+| Tab switch does not restart anything | ✓ no new POST |
+| Column detection across 8 header shapes | ✓ incl. 公司名称/官方网站, Domain, unlabelled URLs, junk column |
+
+### Remaining limitations
+
+- **Bulk batch generation is unchanged.** Generate Selected / Generate All /
+  Retry Failed still use the engine's in-memory batch, which is **not** durable:
+  an engine restart loses an in-flight batch, and its per-company reports still
+  reach Neon through polling. Only the per-row Regenerate is on the durable job.
+- **No paid batch run has been made.** Everything above is fixtures and stubs.
+- The in-flight model call still does not survive an engine restart (§2g).
+
+---
+
 ## 3. Recent test results — live Neon, 2026-09-03
 
 **Live Neon verification — summary**

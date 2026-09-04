@@ -295,7 +295,7 @@
         <span class="mt">${esc(r.modelLabel || '')} · ${esc(reportDate(r.researchedAt))} · ${r.sourceCount ?? '—'} src</span>
         <span class="sp">
           <button data-qr-open="${co}">View / 查看</button>
-          <button data-qr-pdf="${co}">PDF</button>
+          <button data-qr-pdf="${co}">PDF / 查看PDF</button>
           <details class="qr-menu"><summary>⋯</summary><div class="qr-menubox">
             <button data-qr-dl="${co}">Download PDF / 下载PDF</button>
             <button data-qr-refresh="${co}">Refresh / 刷新</button>
@@ -483,6 +483,9 @@
       b.classList.toggle('active', b.dataset.qrTab === name));
     document.querySelectorAll('.qr-view').forEach((v) => { v.hidden = v.dataset.qrView !== name; });
     if (name === 'library') loadLibrary();
+    // Rows pick their runs back up from Neon on every visit, so switching tabs
+    // or refreshing does not lose sight of work that is still going.
+    if (name === 'batch') reconnectBatchRows();
   }
 
   window.qwenResearchInit = async function init() {
@@ -1082,7 +1085,38 @@
   const setHTML = (el, html) => { if (el.__h !== html) { el.__h = html; el.innerHTML = html; } };
   const idx = (co) => batchItems.findIndex((x) => x.company === co);
 
+  /* Stage keys the engine reports, in the words a reader wants. */
+  const ROW_STAGE = {
+    queued: ['Queued', '排队中'], discover: ['Validating', '验证中'],
+    official: ['Validating', '验证中'], listing: ['Validating', '验证中'],
+    queries: ['Searching', '搜索中'], site: ['Searching', '搜索中'],
+    search: ['Searching', '搜索中'], financial: ['Searching', '搜索中'],
+    apollo: ['Contacts', '联系人'], contacts: ['Contacts', '联系人'],
+    dedupe: ['Building evidence', '整理证据'], evidence: ['Building evidence', '整理证据'],
+    quality: ['Building evidence', '整理证据'], synthesis: ['Generating', '生成中'],
+    model: ['Generating', '生成中'], pdf: ['Generating PDF', '生成PDF'],
+    save: ['Saving', '保存中'], done: ['Completed', '已完成'],
+    completed: ['Completed', '已完成'], interrupted: ['Interrupted', '已中断'],
+    failed: ['Failed', '失败'],
+  };
+
   function statusBadge(it) {
+    /* A row being regenerated shows the RUN, not the stale report status: the
+       point of the button is to see that something is happening. */
+    const job = rowJobs.get(it.company);
+    if (job && job.status === 'running') {
+      const [en, zh] = ROW_STAGE[job.stage] || ['Researching', '研究中'];
+      const pct = Math.max(0, Math.min(100, job.pct || 0));
+      return `<span class="qr-badge qr-b-Searching">Researching / 研究中${pct ? ' ' + pct + '%' : ''}</span>`
+        + `<div class="qr-rowprog"><span class="bar"><i style="width:${pct}%"></i></span>`
+        + `<span class="pct">${pct}%</span></div>`
+        + `<div class="qr-rowstage">${esc(en)} / ${esc(zh)}</div>`;
+    }
+    if (job && (job.status === 'interrupted' || job.status === 'failed')) {
+      const [en, zh] = ROW_STAGE[job.status];
+      return `<span class="qr-badge qr-b-Failed">${en} / ${zh}</span>`
+        + (job.error ? `<div class="qr-rowstage">${esc(String(job.error).slice(0, 90))}</div>` : '');
+    }
     const st = it.status || 'Pending';
     const zh = { Completed: '已完成', 'Existing Report': '已有报告', Failed: '失败',
       'Timed Out': '超时', Pending: '待处理', Searching: '检索中', Generating: '生成中',
@@ -1115,9 +1149,9 @@
     const co = esc(it.company);
     return `<div class="qr-acts">
       <button data-qr-act="view" data-co="${co}">View / 查看</button>
-      <button data-qr-act="pdf" data-co="${co}">PDF</button>
-      <button data-qr-act="regen" data-co="${co}">Regen</button>
-      <button data-qr-act="del" data-co="${co}" class="del">Delete</button></div>`;
+      <button data-qr-act="pdf" data-co="${co}">PDF / 查看PDF</button>
+      <button data-qr-act="regen" data-co="${co}">Regenerate / 重新生成</button>
+      <button data-qr-act="del" data-co="${co}" class="del">Delete / 删除</button></div>`;
   }
 
   function renderBatchSelCount() {
@@ -1221,8 +1255,119 @@
     if (act === 'regen') {
       await checkModels();
       if (blockIfNoModel('qr-batch-msg')) return;
-      return startBatch([{ ...it, selected: true }], false);
+      // The SAME durable single-company path Single Company uses. Batch used to
+      // start a one-row sub-batch here, which is a second job implementation
+      // with none of the durability or duplicate protection.
+      return regenerateRow(it);
     }
+  }
+
+  /* ── Row-level regeneration, on the durable job ─────────────────────────
+     One implementation, shared with Single Company: the CRM claims a durable
+     job, refuses a second one for a company already running, and the engine's
+     callback persists only on success. The row shows the progress. */
+
+  const rowJobs = new Map();          // company -> { jobId, stage, pct, status }
+
+  function setRowJob(company, patch) {
+    const cur = rowJobs.get(company) || {};
+    rowJobs.set(company, { ...cur, ...patch });
+    renderBatch();
+  }
+
+  async function regenerateRow(it) {
+    const company = it.company;
+    if ((rowJobs.get(company) || {}).status === 'running') return;   // already shown
+    setRowJob(company, { status: 'running', stage: 'queued', pct: 0 });
+    msg('qr-batch-msg', '');
+    try {
+      const running = await findRunningJob(company);
+      let jobId;
+      if (running) {
+        jobId = running.id;
+        msg('qr-batch-msg',
+            `${esc(company)}: attached to the run already in progress. 已接入正在进行的研究。`, 'info');
+      } else {
+        const start = await fetch(api('/research'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ company, website: it.website || '',
+                                 model: $('qr-batchmodel').value }),
+        }).then((r) => r.json());
+        if (start.error) throw new Error(start.error);
+        if (!start.job_id) throw new Error('The research service did not return a job id.');
+        jobId = start.job_id;
+        if (start.attached) {
+          msg('qr-batch-msg',
+              `${esc(company)}: attached to the run already in progress. 已接入正在进行的研究。`, 'info');
+        }
+      }
+      await followRowJob(company, jobId);
+    } catch (e) {
+      setRowJob(company, { status: 'failed', stage: 'failed', error: e.message });
+      msg('qr-batch-msg', `${esc(company)}: ${esc(e.message)}`, 'err');
+    }
+  }
+
+  /** Poll one job and paint the row. Leaves the existing report alone unless
+   *  and until the run actually completes. */
+  async function followRowJob(company, jobId) {
+    setRowJob(company, { jobId, status: 'running' });
+    while (true) {
+      const snap = await fetch(api(`/job/${encodeURIComponent(jobId)}`))
+        .then((r) => r.json()).catch(() => null);
+      if (snap && snap.status) {
+        const states = PROG_STEPS.map((step) => ({ step, ...progState(snap, step) }));
+        const settled = states.filter(
+          (x) => x.st === 'done' || x.st === 'skipped' || x.st === 'warned').length;
+        const active = states.find((x) => x.st === 'active');
+        setRowJob(company, {
+          pct: Math.round((settled / PROG_STEPS.length) * 100),
+          stage: active ? active.step.k : snap.phase,
+          status: snap.status === 'running' ? 'running' : snap.status,
+        });
+        if (snap.status !== 'running') break;
+      } else {
+        // Engine forgot it; fall back to the durable row.
+        const { active, latest } = await jobForCompany(company);
+        const row = active || latest;
+        if (!active) {
+          setRowJob(company, { status: (row && row.status) || 'interrupted',
+                               stage: (row && row.stage) || 'interrupted',
+                               pct: (row && row.progress_percent) || 0 });
+          break;
+        }
+        setRowJob(company, { pct: row.progress_percent, stage: row.stage, status: 'running' });
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    const { latest } = await jobForCompany(company);
+    if (latest && latest.status === 'completed') {
+      setRowJob(company, { status: 'completed', stage: 'completed', pct: 100 });
+      await refreshExisting();
+      await loadLibrary();
+    } else if (latest) {
+      setRowJob(company, { status: latest.status, stage: latest.stage,
+                           error: latest.error });
+      // The previous report is untouched: refreshExisting re-reads Neon.
+      await refreshExisting();
+    }
+    setTimeout(() => { rowJobs.delete(company); renderBatch(); }, 8000);
+  }
+
+  /* On tab open or refresh, pick any row back up from Neon. No session storage. */
+  async function reconnectBatchRows() {
+    if (!batchItems.length) return;
+    let active = [];
+    try { active = await fetch(api('/active-jobs')).then((r) => r.json()); }
+    catch (e) { return; }
+    (active || []).forEach((job) => {
+      const i = idx(job.company_name);
+      if (i < 0) return;
+      if ((rowJobs.get(job.company_name) || {}).jobId === job.job_id) return;
+      setRowJob(job.company_name, { jobId: job.job_id, status: 'running',
+                                    stage: job.stage, pct: job.progress_percent });
+      followRowJob(job.company_name, job.job_id);
+    });
   }
 
   /** Existing Report vs Generate, straight from Neon. */
@@ -1315,19 +1460,63 @@
         const r = await fetch('/api/aresearch/batch/upload', { method: 'POST', body: fd }).then((x) => x.json());
         if (r.error) throw new Error(r.error);
         batchRows = r.rows;
-        const opts = (r.headers || []).map((h, i) => `<option value="${i}">${esc(h || 'Column ' + (i + 1))}</option>`).join('');
-        $('qr-colname').innerHTML = opts; $('qr-colsite').innerHTML = opts;
-        $('qr-colname').value = r.mapping.name ?? 0;
-        $('qr-colsite').value = r.mapping.website ?? 1;
+        const map = r.mapping || {};
+        const opts = (r.headers || []).map((h, i) =>
+          `<option value="${i}">${esc(h || 'Column ' + (i + 1))}</option>`).join('');
+        $('qr-colname').innerHTML = opts;
+        $('qr-colsite').innerHTML = `<option value="">— none / 无 —</option>${opts}`;
+        $('qr-colname').value = map.name ?? 0;
+        $('qr-colsite').value = map.website == null ? '' : map.website;
         batchItems = (r.items || []).map((it) => ({ ...it, selected: true }));
+        renderUploadSummary(r, map);
         await refreshExisting();
         msg('qr-batch-msg', '');
       } catch (err) { msg('qr-batch-msg', esc(err.message), 'err'); }
     });
+    /* One line saying what was loaded and what was detected. The mapping
+       dropdowns only appear when the company column is genuinely unsure — a
+       missing website is not a problem, because research resolves the official
+       site itself. */
+    function renderUploadSummary(r, map) {
+      const box = $('qr-upload-summary');
+      const nameField = $('qr-colname-field');
+      const siteField = $('qr-colsite-field');
+      if (!box) return;
+      const companies = batchItems.length;
+      const sites = batchItems.filter((i) => (i.website || '').trim()).length;
+      const ambiguous = map.ambiguous === true;
+      box.hidden = false;
+      box.classList.toggle('needs-mapping', ambiguous);
+      if (ambiguous) {
+        box.innerHTML = `⚠ ${companies} row(s) loaded, but the company-name column `
+          + 'could not be identified from the headers. Please confirm it below.'
+          + `<span class="i18n-zh">已载入 ${companies} 行，但无法识别公司名称列，请在下方确认。</span>`;
+      } else {
+        box.innerHTML = `✓ ${companies} companies loaded · ${sites} websites provided`
+          + `<span class="i18n-zh">已载入 ${companies} 家公司 · ${sites} 个官网</span>`
+          + (sites < companies
+              ? '<span class="i18n-zh" style="display:block;opacity:.8;">'
+                + 'Missing websites are resolved automatically. 缺少官网将自动查找。</span>'
+              : '');
+      }
+      // Kept and used either way; only the visibility changes.
+      if (nameField) nameField.hidden = !ambiguous;
+      if (siteField) siteField.hidden = !ambiguous;
+      const form = nameField && nameField.closest('.qr-form');
+      if (form) form.classList.toggle('qr-nomodel', !ambiguous && !modelFieldVisible());
+    }
+
+    function modelFieldVisible() {
+      const f = document.querySelector('[data-qr-view="batch"] .qr-modelfield');
+      return !!f && !f.hidden;
+    }
+
     const remap = async () => {
-      const ni = +$('qr-colname').value, si = +$('qr-colsite').value;
+      const ni = +$('qr-colname').value;
+      const rawSi = $('qr-colsite').value;
+      const si = rawSi === '' ? null : +rawSi;
       batchItems = batchRows.map((row) => {
-        let site = (row[si] || '').trim();
+        let site = (si == null ? '' : (row[si] || '')).trim();
         if (site && !/^https?:\/\//i.test(site)) site = 'https://' + site.replace(/^\/+/, '');
         return { company: (row[ni] || '').trim(), website: site, status: 'Pending', selected: true };
       }).filter((x) => x.company);

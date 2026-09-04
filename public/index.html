@@ -232,6 +232,23 @@
       background:#fff; border:1px solid var(--color-warn-border); border-radius:6px;
       padding:5px 11px; cursor:pointer; color:var(--color-warn-text); }
 
+    /* Upload result: what was detected, in one line. */
+    .qr-uploadsum { font-size:0.84rem; padding:9px 12px; border-radius:var(--radius-md);
+      background:var(--color-success-soft); border:1px solid var(--color-success-border);
+      color:var(--color-success-text); }
+    .qr-uploadsum.needs-mapping { background:var(--color-warn-soft);
+      border-color:var(--color-warn-border); color:var(--color-warn-text); }
+    .qr-uploadsum .i18n-zh { margin-left:6px; opacity:.85; }
+    /* Row-level research progress inside the batch table. */
+    .qr-rowprog { display:flex; align-items:center; gap:7px; margin-top:5px; }
+    .qr-rowprog .bar { flex:1; height:5px; min-width:60px; border-radius:3px;
+      background:#ECECF1; overflow:hidden; }
+    .qr-rowprog .bar i { display:block; height:100%; background:var(--color-primary);
+      transition:width .35s ease; }
+    .qr-rowprog .pct { font-size:0.72rem; font-weight:700; color:var(--color-primary);
+      font-variant-numeric:tabular-nums; }
+    .qr-rowstage { font-size:0.72rem; color:var(--color-text-tertiary); margin-top:2px; }
+
     /* ── Live research progress ── */
     .qr-progress { margin-top:16px; padding-top:15px; border-top:1px solid var(--color-border); }
     .qr-prog-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
@@ -3294,8 +3311,16 @@
                 <input id="qr-file" type="file" accept=".csv,.xlsx,.xlsm"></label>
               <label class="qr-modelfield"><span class="qr-lab">Model / 模型</span>
                 <select id="qr-batchmodel"></select></label>
-              <label><span class="qr-lab">Company Column / 公司名称列</span><select id="qr-colname"></select></label>
-              <label><span class="qr-lab">Website Column / 官网列</span><select id="qr-colsite"></select></label>
+              <!-- Hidden unless detection is genuinely unsure. Confirming two
+                   dropdowns on every upload is noise when the header already
+                   says "Company Name"; the mapping is still kept and used. -->
+              <label id="qr-colname-field" hidden><span class="qr-lab">Company Column / 公司名称列</span>
+                <select id="qr-colname"></select></label>
+              <label id="qr-colsite-field" hidden><span class="qr-lab">Website Column / 官网列</span>
+                <select id="qr-colsite"></select></label>
+              <div class="qr-fieldwide">
+                <div id="qr-upload-summary" class="qr-uploadsum" hidden></div>
+              </div>
             </div>
           </div>
           <div class="qr-group">
