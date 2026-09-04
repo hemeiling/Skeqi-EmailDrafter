@@ -207,6 +207,31 @@
       font-weight:600; border-radius:6px; }
     .qr-fieldwide { grid-column:1/-1; }
 
+    /* ── Existing-report lookup ── */
+    .qr-lookup { margin-top:14px; padding:12px 14px; border-radius:var(--radius-md);
+      border:1px solid var(--color-border); background:var(--color-surface); font-size:0.84rem; }
+    .qr-lookup.is-existing { border-color:var(--color-primary-soft); background:var(--color-primary-soft); }
+    .qr-lookup.is-new { border-style:dashed; color:var(--color-text-secondary); }
+    .qr-lookup .qr-lk-title { font-weight:700; color:var(--color-text-primary); }
+    .qr-lookup .qr-lk-title .i18n-zh { font-weight:600; margin-left:5px; }
+    .qr-lookup .qr-lk-facts { display:flex; flex-wrap:wrap; gap:3px 18px; margin-top:5px;
+      font-size:0.78rem; color:var(--color-text-tertiary); }
+    .qr-lookup .qr-lk-facts b { color:var(--color-text-secondary); font-weight:600; }
+    .qr-lookup .qr-lk-acts { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+    .qr-lookup .qr-lk-acts button { font:inherit; font-size:0.76rem; font-weight:600;
+      background:#fff; border:1px solid var(--color-border); border-radius:6px; padding:5px 11px;
+      cursor:pointer; color:var(--color-text-secondary); }
+    .qr-lookup .qr-lk-acts button:hover { background:var(--color-primary-soft); color:var(--color-primary-text); }
+    .qr-lookup .qr-lk-acts button.del { color:var(--color-danger); }
+    .qr-lookup .qr-lk-acts button.del:hover { background:var(--color-danger-soft); color:var(--color-danger-text); }
+
+    /* Retrieval came back too thin to synthesise. A decision point, not a crash. */
+    .qr-msg.warn { background:var(--color-warn-soft); border:1px solid var(--color-warn-border);
+      color:var(--color-warn-text); }
+    .qr-msg.warn button { font:inherit; font-size:0.76rem; font-weight:600; margin-top:8px;
+      background:#fff; border:1px solid var(--color-warn-border); border-radius:6px;
+      padding:5px 11px; cursor:pointer; color:var(--color-warn-text); }
+
     /* ── Live research progress ── */
     .qr-progress { margin-top:16px; padding-top:15px; border-top:1px solid var(--color-border); }
     .qr-prog-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
@@ -3215,6 +3240,10 @@
             </div>
           </div>
           <p id="qr-single-msg" class="qr-msg" hidden></p>
+
+          <!-- Existing-report lookup. A company we already researched is not an
+               error condition, and neither is a new one. -->
+          <div id="qr-lookup" class="qr-lookup" hidden></div>
 
           <!-- Live progress. Every value is read from the job snapshot the
                polling loop already fetches; nothing here issues a request. -->

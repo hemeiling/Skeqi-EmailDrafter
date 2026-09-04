@@ -373,6 +373,87 @@ snapshot, so it ports, but it has not been wired or verified there.
 
 ---
 
+## 2d. Ford diagnosis, and the three states Single Company was conflating (2026-09-04)
+
+### Root cause of the Ford click that "did nothing"
+
+**No Ford job was ever in flight, and no tokens were spent.** Evidence: no
+`reports/Ford*` on the engine, no Ford entry in `evidence_cache/`, no Ford row in
+Neon, and `/api/aresearch/exists?companies=Ford` answers `{"Ford": false}`.
+
+What happened is that **`needs_review` was treated as success.** The engine has a
+quality guard that refuses to spend tokens when retrieval is too thin — for a name
+as ambiguous as *Ford* with no website, identity cannot be confirmed — and it ends
+the job with `status: "needs_review"` **before any model call**. The client did:
+
+```js
+if (snap.status !== 'running') break;      // needs_review falls through here
+msg('Research complete. 研究完成。');       // ...and is announced as success
+await openReport(company);                 // 404 — nothing was ever saved
+// catch: msg('No saved report for this company.', 'err')   ← the red message
+```
+
+So a deliberate "we did not have enough evidence, and deliberately spent nothing"
+outcome surfaced as a **red lookup error about a missing report**. The real reason
+never reached the screen.
+
+A second, independent trap was found while diagnosing: the engine's **unprobed**
+health reports every model as `state: "unknown"`, and the proxy computes
+`modelsAvailable = models.some(state === 'available')` → **false**, attaching an
+`unavailableNotice`. Under the pre-`87ba3d9` client that blocked the run outright
+with a payment message. The current client treats `unknown` as selectable, so it
+does not block — verified against the live payload.
+
+### The three states, now separate
+
+| State | Styling | Says |
+|---|---|---|
+| **Existing report** | neutral purple panel | date, model, sources + View Report / View PDF / Regenerate / Delete; the main button becomes **Regenerate Research** |
+| **New company** | neutral dashed panel | *New company — ready to research. 新公司 — 可以开始研究。* Never red |
+| **Retrieval incomplete** (`needs_review`) | **warning**, not error | *nothing was generated*, the engine's own reasons, an existing report is untouched, and a **Research anyway** button that re-runs with the engine's `force` flag |
+| **Real failure** | error | the actual API or job error, never a lookup message |
+
+`openReport` no longer reports a 404 as a failure: a missing report renders the
+**new-company** lookup panel. Only a non-404 fetch problem is styled as an error.
+
+### Job execution
+
+- The progress panel is rendered **on click, before the POST**, so a failing POST
+  still shows where it stopped. Traced: click → POST `/research` → `job_id` →
+  polling → panel updates → terminal state.
+- **In-flight jobs are attached, not restarted.** The job id is kept per company in
+  `sessionStorage`, so a second click — or a page reload mid-run — re-attaches and
+  polls the existing job instead of paying twice. The user is told it reattached.
+
+### Safe regeneration
+
+Confirmed in the code, not assumed: the engine does `saved = save_run(...) if ok
+else None`, and the CRM persists only `if (m.status === 'complete' && m.result)`.
+A failed or needs-review run therefore **cannot** overwrite the stored report. The
+UI matches: the previously displayed report is restored on failure and the user is
+told it is unchanged.
+
+### Verified 2026-09-04 — stubs and replay, no paid run
+
+| Check | Result |
+|---|---|
+| Live all-`unknown` health does not block a run | ✓ |
+| New company reads neutral, never red, keeps *Generate Research* | ✓ |
+| Existing report shows date/model/sources + 4 actions, button becomes *Regenerate* | ✓ |
+| Progress panel visible within ~250 ms of the click | ✓ |
+| `needs_review` → warning, reasons listed, *Research anyway* offered | ✓ |
+| `needs_review` never says "No saved report" | ✓ |
+| Real failure → red, with the actual error | ✓ |
+| In-flight job reattached, **no second POST** | ✓ |
+| Missing report on open → lookup panel, no red box | ✓ |
+| Lookup debounced | ✓ 13 keystrokes → 1 call |
+| Progress + failure suites still pass | ✓ |
+
+Retrieval, prompts, model routing, Apollo and the Neon schema were not touched.
+**Batch Research still does not use any of this.**
+
+---
+
 ## 3. Recent test results — live Neon, 2026-09-03
 
 **Live Neon verification — summary**

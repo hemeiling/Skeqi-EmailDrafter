@@ -249,6 +249,7 @@
     [...librarySelection].forEach((c) => { if (!live.has(c)) librarySelection.delete(c); });
     renderLibrary();
     renderStatusCards();
+    if ($('qr-company') && $('qr-company').value.trim()) lookupCompany($('qr-company').value);
   }
 
   function reportDate(v) { return v ? String(v).slice(0, 10) : ''; }
@@ -317,7 +318,12 @@
     showSub('single');
     try {
       const got = await fetch(api(`/company/${encodeURIComponent(company)}`)).then((r) => {
-        if (!r.ok) throw new Error('No saved report for this company.');
+        if (r.status === 404) {
+          const miss = new Error('No saved report for this company yet. 该公司暂无已保存报告。');
+          miss.notFound = true;
+          throw miss;
+        }
+        if (!r.ok) throw new Error(`The report service returned ${r.status}.`);
         return r.json();
       });
       current = { company, report: got.report };
@@ -325,7 +331,15 @@
     } catch (e) {
       current = null;
       $('qr-report-card').style.display = 'none';
-      msg('qr-single-msg', esc(e.message), 'err');
+      // A missing report is a LOOKUP result, not a failure. Only say "error"
+      // when something actually went wrong fetching it.
+      if (e && e.notFound) {
+        renderLookup('new', null, company);
+        msg('qr-single-msg', '');
+      } else {
+        msg('qr-single-msg', `Could not load the saved report. 无法加载已保存的报告。<br>`
+            + `<span>${esc(e.message)}</span>`, 'err');
+      }
     }
   }
 
@@ -535,6 +549,27 @@
     $('qr-delete').addEventListener('click', () => current && deleteReport(current.company));
     $('qr-generate').addEventListener('click', () => startResearch(false));
     $('qr-model').addEventListener('change', renderStatusCards);
+
+    $('qr-company').addEventListener('input', scheduleLookup);
+    $('qr-company').addEventListener('change', () => lookupCompany($('qr-company').value));
+
+    $('qr-lookup').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-qr-lk]');
+      if (!b) return;
+      const co = $('qr-lookup').dataset.company || $('qr-company').value.trim();
+      if (b.dataset.qrLk === 'view')   return openReport(co);
+      if (b.dataset.qrLk === 'pdf')    return openPdf(co);
+      if (b.dataset.qrLk === 'delete') return deleteReport(co);
+      if (b.dataset.qrLk === 'regen')  return startResearch(true);
+    });
+
+    // "Research anyway" after a needs-review outcome: the same run, with the
+    // engine's own force flag. Nothing else about the request changes.
+    $('qr-single-msg').addEventListener('click', (e) => {
+      if (!e.target.closest('[data-qr-force]')) return;
+      forceNextRun = true;
+      startResearch(true);
+    });
     $('qr-regen').addEventListener('click', () => {
       if (!current) return;
       $('qr-company').value = current.company;
@@ -554,6 +589,91 @@
     const l = getLang();
     document.querySelectorAll('#qr-lang button').forEach((b) =>
       b.classList.toggle('active', b.dataset.qrLang === l));
+  }
+
+  /* ── Existing-report lookup ──────────────────────────────────────────────
+     Three states that were previously collapsed into one red message:
+       existing report | new company | a real failure
+     "No saved report for this company" is a LOOKUP result. It is not an error,
+     and it must never stand in for the outcome of a research run. ── */
+
+  let lookupSeq = 0;              // guards against a slow reply overwriting a fast one
+  let lookupTimer = null;
+  let lookupHit = null;           // the library row for the name in the box, if any
+
+  function libRowFor(company) {
+    const key = String(company || '').trim().toLowerCase();
+    if (!key) return null;
+    return library.find((r) => String(r.companyName || '').trim().toLowerCase() === key) || null;
+  }
+
+  function setGenerateLabel(existing) {
+    const b = $('qr-generate');
+    if (!b) return;
+    b.innerHTML = existing
+      ? 'Regenerate Research <span class="i18n-zh">重新生成研究</span>'
+      : 'Generate Research <span class="i18n-zh">生成研究报告</span>';
+  }
+
+  function renderLookup(state, row, company) {
+    const box = $('qr-lookup');
+    if (!box) return;
+    box.classList.remove('is-existing', 'is-new');
+    if (state === 'none') { box.hidden = true; box.innerHTML = ''; setGenerateLabel(false); return; }
+    box.hidden = false;
+    if (state === 'existing') {
+      box.classList.add('is-existing');
+      const facts = [];
+      if (row && row.researchedAt) facts.push(`Last researched / 上次研究 <b>${esc(reportDate(row.researchedAt))}</b>`);
+      if (row && row.modelLabel) facts.push(`Model / 模型 <b>${esc(row.modelLabel)}</b>`);
+      if (row && row.sourceCount != null) facts.push(`Sources / 来源 <b>${esc(String(row.sourceCount))}</b>`);
+      box.innerHTML =
+        '<div class="qr-lk-title">Existing Report <span class="i18n-zh">已有报告</span></div>'
+        + `<div class="qr-lk-facts">${facts.join('')}</div>`
+        + `<div class="qr-lk-acts">
+             <button data-qr-lk="view">View Report / 查看报告</button>
+             <button data-qr-lk="pdf">View PDF / 查看PDF</button>
+             <button data-qr-lk="regen">Regenerate / 重新生成</button>
+             <button class="del" data-qr-lk="delete">Delete Report / 删除报告</button>
+           </div>`;
+      box.dataset.company = company;
+      setGenerateLabel(true);
+      return;
+    }
+    box.classList.add('is-new');
+    box.innerHTML = '<div class="qr-lk-title">New company — ready to research.'
+      + '<span class="i18n-zh">新公司 — 可以开始研究。</span></div>';
+    box.dataset.company = company;
+    setGenerateLabel(false);
+  }
+
+  /** Look the company up. The in-memory library answers most cases for free;
+   *  /exists settles the rest server-side with the same normaliser the writes
+   *  use. Neither is a search and neither calls a model. */
+  async function lookupCompany(company) {
+    const name = String(company || '').trim();
+    const seq = ++lookupSeq;
+    if (!name) { lookupHit = null; renderLookup('none'); return; }
+    const local = libRowFor(name);
+    if (local) { lookupHit = local; renderLookup('existing', local, name); return; }
+    let exists = false;
+    try {
+      const d = await fetch(api(`/exists?companies=${encodeURIComponent(name)}`)).then((r) => r.json());
+      // A legitimate `false` must not fall through to a fallback: read the key
+      // we asked about, and only then the single entry the server keyed itself.
+      const bag = (d && typeof d === 'object') ? d : {};
+      const entries = Object.entries(bag);
+      exists = Object.prototype.hasOwnProperty.call(bag, name) ? !!bag[name]
+             : entries.length === 1 ? !!entries[0][1] : false;
+    } catch (e) { /* lookup is advisory; never block the user on it */ }
+    if (seq !== lookupSeq) return;                       // a newer keystroke won
+    lookupHit = exists ? (libRowFor(name) || { companyName: name }) : null;
+    renderLookup(exists ? 'existing' : 'new', lookupHit, name);
+  }
+
+  function scheduleLookup() {
+    clearTimeout(lookupTimer);
+    lookupTimer = setTimeout(() => lookupCompany($('qr-company').value), 450);
   }
 
   /* ── Live research progress ─────────────────────────────────────────────
@@ -738,44 +858,137 @@
   }
 
   /* ── Research (blocked while models need activation) ── */
+  /* In-flight jobs, keyed by company. Survives a reload so a refresh mid-run
+     re-attaches instead of orphaning the job and paying for it twice. */
+  const IN_FLIGHT_KEY = 'qrInFlightJobs';
+
+  function inFlightJobs() {
+    try { return JSON.parse(sessionStorage.getItem(IN_FLIGHT_KEY) || '{}'); }
+    catch (e) { return {}; }
+  }
+  function rememberJob(company, jobId) {
+    try {
+      const all = inFlightJobs();
+      if (jobId) all[company] = jobId; else delete all[company];
+      sessionStorage.setItem(IN_FLIGHT_KEY, JSON.stringify(all));
+    } catch (e) { /* private browsing: attaching is a nicety, not a requirement */ }
+  }
+
+  /** A job id for this company that the engine still reports as running. */
+  async function findRunningJob(company) {
+    const id = inFlightJobs()[company];
+    if (!id) return null;
+    try {
+      const snap = await fetch(api(`/job/${encodeURIComponent(id)}`)).then((r) => r.json());
+      if (snap && snap.status === 'running') return { id, snap };
+    } catch (e) { /* fall through and treat it as gone */ }
+    rememberJob(company, null);
+    return null;
+  }
+
+  function reviewReasons(job) {
+    const q = job.quality || {};
+    const list = (q.reasons || []).slice(0, 4);
+    return list.length ? list : [job.message || 'Retrieval did not return enough evidence.'];
+  }
+
   async function startResearch(isRegen) {
     const company = $('qr-company').value.trim();
     if (!company) return msg('qr-single-msg', 'Company name is required. 请输入公司名称。', 'err');
     await checkModels();
     if (blockIfNoModel('qr-single-msg')) return;
-    msg('qr-single-msg', isRegen ? 'Regenerating… 重新生成中…' : 'Researching… 研究中…', 'info');
+
+    // The lookup panel belongs to the idle state; the run owns the screen now.
+    if ($('qr-lookup')) $('qr-lookup').hidden = true;
+    const hadReport = current && current.company === company ? current : null;
     const startedAt = Date.now();
     let last = null;
     $('qr-generate').disabled = true;
+    // Visible before the POST, so a failing POST still shows where it stopped.
+    renderProgress({ status: 'running', phase: 'retrieval', stages: [], models: {} }, startedAt);
+    msg('qr-single-msg', 'Starting research… 正在开始研究…', 'info');
+
     try {
-      const start = await fetch(api('/research'), {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ company, website: $('qr-website').value.trim(), model: $('qr-model').value }),
-      }).then((r) => r.json());
-      if (start.error) throw new Error(start.error);
-      renderProgress({ status: 'running', phase: 'retrieval', stages: [], models: {} }, startedAt);
+      let jobId;
+      const running = await findRunningJob(company);
+      if (running) {
+        // Never pay twice for the same company.
+        jobId = running.id;
+        msg('qr-single-msg',
+            'Reattached to the run already in progress for this company. 已接入正在进行的研究。', 'info');
+        renderProgress(running.snap, startedAt);
+      } else {
+        const start = await fetch(api('/research'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ company, website: $('qr-website').value.trim(),
+                                 model: $('qr-model').value, force: !!forceNextRun }),
+        }).then((r) => r.json());
+        forceNextRun = false;
+        if (start.error) throw new Error(start.error);
+        if (!start.job_id) throw new Error('The research service did not return a job id.');
+        jobId = start.job_id;
+        rememberJob(company, jobId);
+      }
+
       while (true) {
-        // The SAME poll as before, at the same interval. It used to be discarded
-        // except for its status; now it also draws the panel. No extra request.
-        const snap = await fetch(api(`/job/${start.job_id}`)).then((r) => r.json());
+        const snap = await fetch(api(`/job/${jobId}`)).then((r) => r.json());
         last = snap;
         renderProgress(snap, startedAt);
-        if (snap.modelUnavailable) { blockIfNoModel('qr-single-msg'); return; }
-        if (snap.status === 'error') throw new Error(snap.message || 'Research failed.');
+        if (snap.modelUnavailable) { rememberJob(company, null); blockIfNoModel('qr-single-msg'); return; }
         if (snap.status !== 'running') break;
         await new Promise((r) => setTimeout(r, 1500));
       }
+      rememberJob(company, null);
+
+      // ---- Terminal states, each said in its own words -------------------
+      if (last.status === 'error') {
+        throw new Error(last.message || modelErrorOf(last) || 'Research failed.');
+      }
+      if (last.status === 'needs_review') {
+        // Not a failure and not a success: retrieval was too thin to synthesise,
+        // and NO tokens were spent. The existing report, if any, is untouched.
+        const reasons = reviewReasons(last).map((r) => `<li>${esc(r)}</li>`).join('');
+        msg('qr-single-msg',
+            '<strong>Retrieval incomplete — nothing was generated.</strong>'
+            + '<br><span>检索证据不足，未生成报告。</span>'
+            + `<ul style="margin:6px 0 0 18px;">${reasons}</ul>`
+            + (hadReport ? '<div style="margin-top:6px;">The existing report is unchanged. '
+                           + '现有报告未被修改。</div>' : '')
+            + '<button data-qr-force="1">Research anyway / 仍然生成</button>', 'warn');
+        return;
+      }
+      const mErr = modelErrorOf(last);
+      if (mErr) throw new Error(mErr);
+
       msg('qr-single-msg', `Research complete. 研究完成。 ${esc(progressSummary(last))}`, 'info');
       await loadLibrary();
-      await openReport(company, true);      // keep the completed panel on screen
+      await openReport(company, true);
     } catch (e) {
-      // The steps stay on screen: which one carries the ✕ is the diagnosis.
+      rememberJob(company, null);
       if (last) renderProgress({ ...last, status: 'error' }, startedAt);
-      msg('qr-single-msg', esc(e.message), 'err');
+      // The real failure, never a lookup message standing in for one.
+      msg('qr-single-msg', `<strong>Research failed.</strong> 研究失败。<br><span>${esc(e.message)}</span>`
+          + (hadReport ? '<div style="margin-top:6px;">The existing report is unchanged. '
+                         + '现有报告未被修改。</div>' : ''), 'err');
+      // A regenerate that fails must leave the report that was on screen alone.
+      if (hadReport) { current = hadReport; await renderReport(); }
     } finally {
       $('qr-generate').disabled = false;
     }
   }
+
+  /** The model-level error, when the job finished but the model did not. */
+  function modelErrorOf(job) {
+    const m = progModel(job) || {};
+    if (m.status === 'complete') return null;
+    if (m.error) return m.error;
+    if (m.status === 'timeout') return 'The model timed out.';
+    if (m.status === 'access_denied') return MODEL_MSG;
+    if (m.status === 'failed') return 'The model did not return a report.';
+    return null;
+  }
+
+  let forceNextRun = false;
 
   /* ── Batch ─────────────────────────────────────────────────────────────
      Rows are keyed by company and updated in place. A row being edited is not
