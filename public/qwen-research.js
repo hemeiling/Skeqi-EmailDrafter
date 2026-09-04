@@ -762,9 +762,16 @@
     const hit = progLastFor(job, step.k, step.also);
     if (hit) {
       const text = hit.message || '';
+      // The engine states the outcome explicitly on some stages; an explicit
+      // verdict always beats inferring one from keywords.
+      const verdict = /^(OK|WARN)\s+/i.exec(text);
+      if (verdict) {
+        const body = text.replace(/^(OK|WARN)\s+/i, '');
+        return verdict[1].toUpperCase() === 'OK'
+          ? { st: 'done', note: body }
+          : { st: step.optional ? 'warned' : 'failed', note: body };
+      }
       if (PROG_FAIL.test(text) && !PROG_SKIP.test(text)) {
-        // An optional stage that failed is a WARNING: the run carries on with
-        // what it has, and the bar carries on with it.
         return { st: step.optional ? 'warned' : 'failed', note: text };
       }
       if (PROG_SKIP.test(text)) return { st: 'skipped', note: text };
@@ -832,10 +839,18 @@
     $('qr-prog-steps').innerHTML = states.map((x) => {
       const cls = x.st === 'done' ? 'is-done' : x.st === 'active' ? 'is-active'
                 : x.st === 'failed' ? 'is-failed' : x.st === 'warned' ? 'is-warned' : '';
+      // Prefer the engine's own sentence; the generic line is only a fallback
+      // for a stage that reported nothing useful.
+      // The row already names the step; do not repeat it in the detail.
+      const detail = String(x.note || '')
+        .replace(/^(Apollo|CRM):\s*/i, '')
+        .replace(/^Contact enrichment\s*[-–—]\s*/i, '')
+        .slice(0, 150);
       const note = x.st === 'warned'
-                 ? ' — unavailable, continuing with available data / 不可用，使用现有数据继续'
-                 : x.st === 'failed' ? ` — ${esc(String(x.note || '').slice(0, 120))}`
-                 : x.st === 'skipped' && x.note ? ` — ${esc(String(x.note).slice(0, 90))}` : '';
+                 ? ` — ${esc(detail || 'unavailable, continuing with available data / 不可用，使用现有数据继续')}`
+                 : x.st === 'failed' ? ` — ${esc(detail)}`
+                 : (x.st === 'skipped' || x.st === 'done') && detail && x.step.optional
+                   ? ` — ${esc(detail)}` : '';
       return `<li class="${cls}"><span class="qr-mark">${PROG_MARK[x.st]}</span>`
            + `<span>${esc(x.step.en)} / ${esc(x.step.zh)}`
            + (note ? `<span class="qr-note">${note}</span>` : '') + '</span></li>';
