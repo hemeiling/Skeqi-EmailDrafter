@@ -4242,24 +4242,32 @@ function isTerminalStatus(status) {
    account as "pcauto". So the supplied/verified domain is consulted at claim
    time and the resolved website is never used as an identity source. */
 function resolveIdentity({ companyId, companyName, website, alias } = {}) {
-  if (companyId) {
-    return { key: `crm:${companyId}`, source: 'crm_company_id', companyId };
-  }
+  /* The KEY is the normalised name, and that is not a claim about names being
+     better identifiers than domains - they are not. It is that this key is the
+     JOIN SURFACE. All 42 existing reports are name-keyed, companies.name_key is
+     name-keyed, and getQwenReportForCompany() is handed a NAME and nothing else.
+     A `crm:<id>` or `domain:<host>` key would miss every existing row: measured,
+     33 of the 42 reports have a CRM company, so a crm-keyed identity would have
+     orphaned all of them and saveQwenReport's ON CONFLICT would have inserted
+     duplicates instead of new versions.
+     The stronger anchors are still established here and stored ALONGSIDE the key,
+     as company_id and identity_source, where they disambiguate without breaking
+     the join. Domain remains the fallback for a name that normalises to nothing. */
   const named = normalizeNameKey(companyName || '');
-  if (named) return { key: named, source: 'company_name', companyId: null };
+  if (named) return { key: named, source: companyId ? 'company_name+crm' : 'company_name', companyId: companyId || null };
   const host = String(website || '').trim()
     .replace(/^https?:\/\//i, '').replace(/^www\./i, '').split(/[/?#]/)[0]
     .toLowerCase();
   const domain = host.split(':')[0];
   if (domain && domain.includes('.')) {
-    return { key: `domain:${domain}`, source: 'supplied_domain', companyId: null };
+    return { key: `domain:${domain}`, source: 'supplied_domain', companyId: companyId || null };
   }
   const alt = normalizeNameKey(alias || '');
-  if (alt) return { key: alt, source: 'alias', companyId: null };
+  if (alt) return { key: alt, source: 'alias', companyId: companyId || null };
   const fallback = String(companyName || alias || '').trim().toLowerCase();
   // Never '' - an empty key is what made saveQwenReport throw for every Chinese
   // account and left company_key blank on the job row.
-  return { key: fallback || `job:${Date.now()}`, source: 'display_name', companyId: null };
+  return { key: fallback || `job:${Date.now()}`, source: 'display_name', companyId: companyId || null };
 }
 /* A run with no heartbeat for this long is not running any more: the engine
    restarted, was redeployed, or spun down. Nothing else can tell us, because

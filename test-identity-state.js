@@ -34,8 +34,10 @@ function ck(name, cond, detail) {
 
   console.log('\n[B] Identity hierarchy: CRM id > name > supplied domain\n');
   const cases = [
+    // A CRM company does NOT change the key: 33 of 42 existing reports have one,
+    // and a crm:<id> key would orphan every single one of them.
     [{ companyId: 42, companyName: '红旗', website: 'https://www.hongqi-auto.com' },
-     'crm:42', 'crm_company_id', '红旗 already in CRM'],
+     '红旗', 'company_name+crm', '红旗 already in CRM keeps the name key'],
     [{ companyName: '红旗', website: 'https://www.hongqi-auto.com' },
      '红旗', 'company_name', '红旗 + hongqi-auto.com'],
     [{ companyName: '宁德时代', website: 'https://www.catl.com' },
@@ -66,6 +68,16 @@ function ck(name, cond, detail) {
      `${supplied.key} vs ${resolved.key}`);
   ck('the key is the account, not the portal', supplied.key === '红旗' &&
      !JSON.stringify(supplied).includes('pcauto'));
+
+  console.log('\n[C2] The key stays on the existing join surface\n');
+  const crmCase = db.resolveIdentity({ companyId: 21, companyName: 'toyota' });
+  ck('a CRM company keeps the name key (no crm: prefix)', crmCase.key === 'toyota',
+     crmCase.key);
+  ck('but the CRM id is still carried', crmCase.companyId === 21, String(crmCase.companyId));
+  ck('and the source records that CRM matched', crmCase.source === 'company_name+crm',
+     crmCase.source);
+  ck('domain is used only when the name yields nothing',
+     db.resolveIdentity({ companyName: '', website: 'https://x.example' }).key === 'domain:x.example');
 
   console.log('\n[D] Terminal states\n');
   for (const t of ['completed', 'completed_with_limitations', 'interrupted',
