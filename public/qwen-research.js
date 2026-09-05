@@ -672,9 +672,13 @@
   let sessionTimer = null;
   let sessionFollowing = null;   // job_id the follower loop is polling
   let sessionsWired = false;
-  let sessionsExpanded = false;        // history: 5 by default, HISTORY_MAX expanded
-  const HISTORY_SHORT = 5;
-  const HISTORY_MAX = 25;
+  /* Research Sessions is an operational surface: what is running, what needs
+     attention, and just enough recent history for context. The report library
+     already exists in the Reports tab, so this does not try to be one - the list
+     scrolls inside a fixed height instead of growing the page. */
+  const SESSION_NEEDS_ATTENTION = new Set(
+    ['interrupted', 'save_failed', 'synthesis_failed', 'failed']);
+  const RECENT_COMPLETED = 3;
 
   const SESSION_STAGE = {
     queued: ['Queued', '排队中'], discover: ['Validating company', '识别公司'],
@@ -718,24 +722,21 @@
     /* Every active session is always shown - those are the ones the user is
        waiting on. History is bounded so the panel stops eating the page. This is
        presentation only: nothing in Neon is filtered, deleted or altered. */
+    /* Priority, not recency: running work first, then anything a person has to
+       do something about, then a few recent completions for context. */
     const active = sessions.filter((x) => SESSION_LIVE.has(x.state));
-    const history = sessions.filter((x) => !SESSION_LIVE.has(x.state));
-    const shown = sessionsExpanded ? HISTORY_MAX : HISTORY_SHORT;
-    const visibleHistory = history.slice(0, shown);
+    const attention = sessions.filter((x) => SESSION_NEEDS_ATTENTION.has(x.state));
+    const completed = sessions
+      .filter((x) => !SESSION_LIVE.has(x.state) && !SESSION_NEEDS_ATTENTION.has(x.state))
+      .slice(0, RECENT_COMPLETED);
     const count = $('qr-sess-count');
     if (count) {
-      count.textContent = sessions.length
-        ? `${active.length} running · ${history.length} previous` : '';
+      const bits = [];
+      if (active.length) bits.push(`${active.length} running`);
+      if (attention.length) bits.push(`${attention.length} need attention`);
+      count.textContent = bits.join(' · ');
     }
-    const toggle = $('qr-sess-toggle');
-    if (toggle) {
-      const more = history.length > HISTORY_SHORT;
-      toggle.hidden = !more;
-      toggle.innerHTML = sessionsExpanded
-        ? 'Show Less <span class="i18n-zh">收起</span>'
-        : `Show More <span class="i18n-zh">展开更多</span> (${history.length - HISTORY_SHORT})`;
-    }
-    const rows = active.concat(visibleHistory);
+    const rows = active.concat(attention, completed);
     list.innerHTML = rows.map((x, idx) => {
       const [en, zh, cls] = SESSION_STATE[x.state] || SESSION_STATE.failed;
       const [sen] = SESSION_STAGE[x.stage] || [x.stage || '—'];
@@ -761,9 +762,13 @@
               Regenerate / 重新生成</button>
           </div>`;
       }
-      const divider = (idx === active.length && active.length && visibleHistory.length)
-        ? `<li class="qr-sess-group">Previous Research <span class="i18n-zh">历史研究</span></li>`
-        : '';
+      let divider = '';
+      if (idx === active.length && active.length && attention.length) {
+        divider = `<li class="qr-sess-group">Needs Attention <span class="i18n-zh">需要处理</span></li>`;
+      } else if (idx === active.length + attention.length
+                 && (active.length || attention.length) && completed.length) {
+        divider = `<li class="qr-sess-group">Recent <span class="i18n-zh">最近完成</span></li>`;
+      }
       return `${divider}<li class="qr-sess-row${x.job_id === sessionSel ? ' is-selected' : ''}"
                   data-qr-sess="${esc(x.job_id)}">
         <div class="qr-sess-main">
@@ -865,12 +870,11 @@
         openReport(row.company_name, true);
       });
     }
-    const toggle = $('qr-sess-toggle');
-    if (toggle) {
-      toggle.addEventListener('click', () => {
-        sessionsExpanded = !sessionsExpanded;
-        renderSessions();
-      });
+    const all = $('qr-sess-all');
+    if (all) {
+      // The library lives in Reports; this sends people there instead of turning
+      // the operational list into a second one.
+      all.addEventListener('click', () => showSub('library'));
     }
     list.addEventListener('click', (e) => {
       const view = e.target.closest('[data-qr-sess-view]');

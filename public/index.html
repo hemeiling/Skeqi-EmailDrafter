@@ -276,6 +276,9 @@
     .qr-savefail .zh { margin-top:6px; }
     .qr-savefail button { margin-top:9px; }
     .qr-sess-more { margin-top:8px; display:flex; justify-content:center; }
+    /* Operational workspace, not the report library: about five rows, then the
+       list scrolls inside itself so the page does not grow. */
+    .qr-sess-list { max-height:330px; overflow-y:auto; overscroll-behavior:contain; }
     .qr-prevrow { margin-top:12px; padding-top:11px; border-top:1px dashed var(--color-border);
                   display:flex; align-items:center; justify-content:space-between; gap:12px; }
     /* A class that sets display outranks the browser's [hidden] rule, so say it. */
@@ -3345,7 +3348,7 @@
             </div>
             <ul class="qr-sess-list" id="qr-sess-list"></ul>
             <div class="qr-sess-more">
-              <button class="btn-sm btn-ghost" id="qr-sess-toggle" hidden></button>
+              <button class="btn-sm btn-ghost" id="qr-sess-all">View All Reports <span class="i18n-zh">查看所有报告</span></button>
             </div>
           </div>
 
