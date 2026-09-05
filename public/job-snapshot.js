@@ -64,8 +64,42 @@
     };
   }
 
+  /* A stored section is SELF-CONTAINED markdown: the engine writes
+     "## <title>\n\n<body>" so each section stands alone for any consumer, which
+     is right. The sections panel then renders its own title element on top, so
+     the heading appeared twice - all 19 sections, both languages.
+
+     Fixed at the display layer, not in storage: nothing saved is rewritten.
+
+     Only an EXACT match is stripped, after normalising away heading marks,
+     emphasis, whitespace and trailing punctuation. A first sentence that merely
+     CONTAINS the title words is left alone - "Executive Summary of the year"
+     is content, not a repeated heading. */
+  function normalizeHeading(s) {
+    return String(s == null ? '' : s)
+      .replace(/^\s*#{1,6}\s*/, '')          // markdown heading marks
+      .replace(/[*_`~]/g, '')                 // emphasis
+      .replace(/[\s:：、，,.。!！?？\-–—]+$/, '')  // trailing punctuation, either script
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  function stripLeadingTitle(text, title) {
+    const body = String(text == null ? '' : text);
+    if (!body.trim() || !String(title || '').trim()) return body;
+    const lines = body.split('\n');
+    let i = 0;
+    while (i < lines.length && !lines[i].trim()) i += 1;   // skip leading blanks
+    if (i >= lines.length) return body;
+    if (normalizeHeading(lines[i]) !== normalizeHeading(title)) return body;
+    const rest = lines.slice(i + 1);
+    while (rest.length && !rest[0].trim()) rest.shift();   // and the blank after it
+    return rest.join('\n');
+  }
+
   return {
     ENGINE_STAGE_ORDER, DONE_STATUSES, DEAD_STATUSES, LIVE_STATUSES,
-    stagesUpTo, jobRowToSnapshot,
+    stagesUpTo, jobRowToSnapshot, stripLeadingTitle, normalizeHeading,
   };
 }));

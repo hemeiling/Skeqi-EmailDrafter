@@ -586,7 +586,11 @@
     body.innerHTML = secs.map((sec) => {
       const title = l === 'zh' ? (sec.section_title_zh || sec.section_title_en)
                                : (sec.section_title_en || sec.section_title_zh);
-      const en = sec.content_en || ''; const zh = sec.content_zh || '';
+      /* The stored section repeats its own title as a heading; the card already
+         shows one. Strip it per language BEFORE joining, so bilingual does not
+         end up with two headings under one title. */
+      const en = JobSnapshot.stripLeadingTitle(sec.content_en, sec.section_title_en);
+      const zh = JobSnapshot.stripLeadingTitle(sec.content_zh, sec.section_title_zh);
       const text = l === 'zh' ? (zh || en) : l === 'en' ? (en || zh)
                  : [en, zh].filter(Boolean).join('\n\n');
       return `<section class="qr-live-sec"><h4>${esc(title || sec.section_key)}</h4>

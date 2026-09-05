@@ -75,6 +75,85 @@ ck('percentage is clamped',
 ck('a row with no percentage yields null, not 0',
    J.jobRowToSnapshot({ status: 'running', stage: 'site' })._pct === null);
 
+console.log('\n[5] Duplicate section heading is stripped at the display layer\n');
+
+// Every heading the report actually uses, both languages, from the prompt.
+const SECTIONS = [
+  ['Executive Summary', '执行摘要'], ['Company Overview', '公司概况'],
+  ['Strategic Initiatives', '战略举措'], ['Industry Trends', '行业趋势'],
+  ['SWOT Analysis', 'SWOT分析'], ['Competitor Analysis', '竞争对手分析'],
+  ['Existing Automation Providers', '现有自动化供应商'],
+  ['Key Decision Makers', '关键决策人'], ['Upcoming Projects', '未来项目'],
+  ['Latest News', '最新动态'], ['Financial Information', '财务信息'],
+  ['Manufacturing Challenges', '制造挑战'],
+  ['Sustainability Objectives', '可持续发展目标'],
+  ['Relevant SKEQI Solutions', '思客琦相关解决方案'],
+  ['Sales Strategies', '销售策略'], ['Strategic Objectives', '战略目标'],
+  ['Potential SKEQI Use Cases', '潜在思客琦应用场景'],
+  ['Acronyms & Business Terms', '术语与缩写'], ['Sources', '信息来源'],
+  ['Research Evidence', '研究证据'],
+];
+ck('all 20 section types covered', SECTIONS.length === 20, String(SECTIONS.length));
+
+let stripped = 0;
+for (const [en, zh] of SECTIONS) {
+  const bodyEn = '- point one\n- point two';
+  const bodyZh = '- 第一点\n- 第二点';
+  const gotEn = J.stripLeadingTitle('## ' + en + '\n\n' + bodyEn, en);
+  const gotZh = J.stripLeadingTitle('## ' + zh + '\n\n' + bodyZh, zh);
+  if (gotEn === bodyEn && gotZh === bodyZh) stripped++;
+}
+ck('every section strips its own heading in both languages',
+   stripped === SECTIONS.length, stripped + '/' + SECTIONS.length);
+
+console.log('\n[6] Normalisation variants still count as duplicates\n');
+const T = 'Executive Summary';
+for (const [label, line] of [
+  ['plain', 'Executive Summary'],
+  ['# heading', '# Executive Summary'],
+  ['## heading', '## Executive Summary'],
+  ['#### heading', '#### Executive Summary'],
+  ['bold', '**Executive Summary**'],
+  ['bold + heading', '## **Executive Summary**'],
+  ['trailing colon', '## Executive Summary:'],
+  ['fullwidth colon', '## Executive Summary：'],
+  ['extra whitespace', '##   Executive   Summary   '],
+  ['different case', '## EXECUTIVE SUMMARY'],
+]) ck('stripped: ' + label, J.stripLeadingTitle(line + '\nbody', T) === 'body',
+      JSON.stringify(J.stripLeadingTitle(line + '\nbody', T)));
+for (const [label, line] of [
+  ['CJK plain', '执行摘要'], ['CJK heading', '## 执行摘要'],
+  ['CJK bold', '**执行摘要**'], ['CJK fullwidth colon', '## 执行摘要：'],
+  ['CJK ideographic comma', '## 执行摘要、'],
+]) ck('stripped: ' + label, J.stripLeadingTitle(line + '\n正文', '执行摘要') === '正文',
+      JSON.stringify(J.stripLeadingTitle(line + '\n正文', '执行摘要')));
+
+console.log('\n[7] A real first sentence is NOT removed\n');
+for (const [label, first] of [
+  ['contains the words', 'Executive Summary of the 2026 financial year follows.'],
+  ['starts with them', 'Executive Summary highlights three risks.'],
+  ['CJK contains them', '执行摘要显示三项风险。'],
+  ['different section', '## Company Overview'],
+  ['a bullet', '- Executive Summary'],
+]) {
+  const src = first + '\nrest';
+  ck('kept: ' + label, J.stripLeadingTitle(src, T) === src || J.stripLeadingTitle(src, '执行摘要') === src,
+     JSON.stringify(J.stripLeadingTitle(src, T)));
+}
+ck('only the FIRST heading goes, not a later one',
+   J.stripLeadingTitle('## Sources\n\nbody\n\n## Sources\n\nmore', 'Sources')
+     === 'body\n\n## Sources\n\nmore');
+
+console.log('\n[8] Content without a repeated heading is untouched\n');
+// The evidence block does not store its title; it must pass through unchanged.
+const ev = '**Evidence collected: 16 source(s)**\n11 independent third-party sources';
+ck('evidence content is unchanged', J.stripLeadingTitle(ev, 'Research Evidence') === ev);
+ck('empty content is safe', J.stripLeadingTitle('', 'Sources') === '');
+ck('null content is safe', J.stripLeadingTitle(null, 'Sources') === '');
+ck('missing title is safe', J.stripLeadingTitle('## Sources\nbody', '') === '## Sources\nbody');
+ck('heading-only content collapses to empty',
+   J.stripLeadingTitle('## Sources', 'Sources') === '');
+
 console.log('\n' + pass + ' passed, ' + fail.length + ' failed');
 fail.forEach((f) => console.log('  FAILED: ' + f));
 process.exit(fail.length ? 1 : 0);
