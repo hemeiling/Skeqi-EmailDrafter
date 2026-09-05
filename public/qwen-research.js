@@ -392,12 +392,22 @@
       meta.push([ru.cost_estimated ? 'Est. AI Cost / 预估 AI 成本' : 'AI Cost / AI 成本',
                  '$' + Number(ru.estimated_cost_usd).toFixed(4)]);
     } else {
-      meta.push(['Est. AI Cost / 预估 AI 成本', 'Not available / 无数据']);
+      /* Historical runs discarded their retrieval usage, so a synthesis-only
+         figure would misrepresent the full research cost. Say why rather than
+         showing a dash. */
+      meta.push(['Est. AI Cost / 预估 AI 成本',
+                 { text: 'Not available / 暂不可用',
+                   title: 'Cost unavailable because retrieval usage was not '
+                        + 'captured for this historical run.\n'
+                        + '该历史研究任务未记录检索阶段用量，因此无法计算完整成本。' }]);
     }
     meta.push(['Latency / 耗时', (r.latency_seconds ?? '—') + ' s'],
               ['Researched / 研究时间', (r.timestamp || '').slice(0, 16).replace('T', ' ')]);
-    $('qr-meta').innerHTML = meta
-      .map(([k, v]) => `<div><b>${esc(k)}</b>${esc(v)}</div>`).join('');
+    $('qr-meta').innerHTML = meta.map(([k, v]) => {
+      const val = (v && typeof v === 'object') ? v : { text: v, title: '' };
+      const tip = val.title ? ` title="${esc(val.title)}"` : '';
+      return `<div${tip}><b>${esc(k)}</b>${esc(val.text)}</div>`;
+    }).join('');
 
     const dm = r.decision_makers || [];
     $('qr-contacts').innerHTML = dm.length ? `

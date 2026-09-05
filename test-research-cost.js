@@ -48,7 +48,8 @@ function record(jobId, calls) {
     const tot = c.total_tokens || (inTok + outTok);
     input += inTok; output += outTok; total += tot; detail[kind].calls += 1;
     const r = usage.recordAiEvent({
-      feature: 'account_research', sub_feature: kind, provider: 'bailian',
+      feature: 'account_research', sub_feature: kind,
+      provider: String(c.model || '').startsWith('claude') ? 'anthropic' : 'bailian',
       model: c.model, input_tokens: inTok, output_tokens: outTok, total_tokens: tot,
       request_id: `arq:${jobId}:${kind}:${i}`, request_type: 'new_call',
       status: (c.status && c.status !== 200) ? 'error' : 'success',
@@ -172,6 +173,57 @@ ck('the session total is the sum, not a double count',
 ck('research is a line under the platform total, not a separate feature',
    Object.keys(all.by_feature).includes('account_research')
    && !Object.keys(all.by_feature).includes('qwen_research'));
+
+console.log('\n[I] Aggregation invariants\n');
+usage.resetUsage(); persisted.length = 0;
+const mixed = [
+  { kind: 'retrieval', model: F, input_tokens: 500, output_tokens: 90 },    // estimated card
+  { kind: 'retrieval', model: F, input_tokens: 700, output_tokens: 110 },
+  { kind: 'synthesis', model: MAX, input_tokens: 40000, output_tokens: 8000 },
+];
+const agg = record('agg', mixed);
+const sumIn = mixed.reduce((a, c) => a + c.input_tokens, 0);
+const sumOut = mixed.reduce((a, c) => a + c.output_tokens, 0);
+ck('job input tokens = sum of every recorded call', agg.input_tokens === sumIn,
+   `${agg.input_tokens} vs ${sumIn}`);
+ck('job output tokens = sum of every recorded call', agg.output_tokens === sumOut,
+   `${agg.output_tokens} vs ${sumOut}`);
+const perCall = mixed.reduce((a, c) =>
+  a + usage.costFor(c.model, c.input_tokens, c.output_tokens, 0, 0, 'bailian'), 0);
+ck('job cost = sum of each call priced at its own card',
+   Math.abs(agg.estimated_cost_usd - perCall) < 1e-9,
+   `${agg.estimated_cost_usd} vs ${perCall}`);
+const evIn = persisted.reduce((a, e) => a + (e.input_tokens || 0), 0);
+const evOut = persisted.reduce((a, e) => a + (e.output_tokens || 0), 0);
+ck('persisted events carry the same input total', evIn === sumIn, `${evIn} vs ${sumIn}`);
+ck('persisted events carry the same output total', evOut === sumOut, `${evOut} vs ${sumOut}`);
+const featI = usage.getUsage().by_feature.account_research;
+ck('platform feature line matches, counted exactly once',
+   featI.input_tokens === sumIn && featI.output_tokens === sumOut
+   && Math.abs(featI.cost_usd - perCall) < 1e-5,
+   `${featI.input_tokens}/${featI.output_tokens}/${featI.cost_usd}`);
+
+// The estimated flag must reflect ANY call, not just the last/synthesis one.
+usage.resetUsage(); persisted.length = 0;
+const anyEst = record('mix1', [
+  { kind: 'retrieval', model: F, input_tokens: 100, output_tokens: 10 },        // estimated
+  { kind: 'synthesis', model: 'claude-sonnet-5', input_tokens: 100, output_tokens: 10 },
+]);
+ck('cost_estimated is true when ANY call used an estimated card',
+   anyEst.cost_estimated === true);
+usage.resetUsage(); persisted.length = 0;
+const noneEst = record('mix2', [
+  { kind: 'retrieval', model: 'claude-sonnet-5', input_tokens: 100, output_tokens: 10 },
+  { kind: 'synthesis', model: 'claude-sonnet-5', input_tokens: 100, output_tokens: 10 },
+]);
+ck('and false only when NO call used one', noneEst.cost_estimated === false);
+usage.resetUsage(); persisted.length = 0;
+const estFirst = record('mix3', [
+  { kind: 'retrieval', model: F, input_tokens: 100, output_tokens: 10 },        // estimated FIRST
+  { kind: 'synthesis', model: 'claude-sonnet-5', input_tokens: 100, output_tokens: 10 },
+]);
+ck('it does not depend on the final synthesis model alone',
+   estFirst.cost_estimated === true);
 
 console.log(`\n${pass} passed, ${fail.length} failed`);
 fail.forEach((f) => console.log('  FAILED: ' + f));
