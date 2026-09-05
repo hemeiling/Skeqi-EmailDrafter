@@ -275,14 +275,13 @@
                           text-transform:uppercase; margin-bottom:2px; }
     .qr-savefail .zh { margin-top:6px; }
     .qr-savefail button { margin-top:9px; }
-    .qr-sess-more { margin-top:8px; display:flex; justify-content:center; }
     /* Operational workspace, not the report library: about five rows, then the
        list scrolls inside itself so the page does not grow. */
     .qr-sess-list { max-height:330px; overflow-y:auto; overscroll-behavior:contain; }
     .qr-prevrow { margin-top:12px; padding-top:11px; border-top:1px dashed var(--color-border);
                   display:flex; align-items:center; justify-content:space-between; gap:12px; }
     /* A class that sets display outranks the browser's [hidden] rule, so say it. */
-    .qr-prevrow[hidden], .qr-sess-more[hidden] { display:none; }
+    .qr-prevrow[hidden] { display:none; }
     .qr-prevrow-t { font-size:12px; font-weight:600; color:var(--color-text-secondary); }
     .qr-prevbanner { border:1px solid #f0c98a; background:#fff8ec; color:#7a4a06;
                      border-radius:6px; padding:10px 13px; margin:0 0 12px; font-size:13px; }
@@ -290,38 +289,63 @@
                             text-transform:uppercase; margin-bottom:2px; }
     .qr-prevbanner div { opacity:.9; }
     .qr-prevbanner .zh { margin-top:6px; }
-    /* ---- Research Sessions ------------------------------------------- */
+    /* ---- Research Sessions: operational monitoring, not a report library --
+       Ordered by what needs a person. Completed work lives in Reports; here it
+       collapses to a single line so running and blocked jobs own the space. */
     .qr-sessions { margin-top:16px; padding-top:15px; border-top:1px solid var(--color-border); }
     .qr-sess-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
     .qr-sess-title { font-size:12px; font-weight:600; letter-spacing:.04em;
                      text-transform:uppercase; color:var(--color-text-secondary); }
     .qr-sess-count { font-size:12px; color:var(--color-text-secondary); font-variant-numeric:tabular-nums; }
+    /* Only NOW + NEEDS ATTENTION can ever scroll, and only past ~6 rows. */
     .qr-sess-list { list-style:none; margin:10px 0 0; padding:0;
-                    border:1px solid var(--color-border); border-radius:8px; overflow:hidden; }
-    .qr-sess-row { display:grid; grid-template-columns:1fr auto auto; align-items:center;
-                   gap:12px; padding:9px 12px; cursor:pointer; background:var(--color-surface);
-                   border-top:1px solid var(--color-border); }
+                    border:1px solid var(--color-border); border-radius:8px; overflow:hidden;
+                    max-height:300px; overflow-y:auto; overscroll-behavior:contain; }
+    .qr-sess-group { padding:7px 12px 5px; font-size:11px; font-weight:600;
+                     letter-spacing:.06em; text-transform:uppercase;
+                     color:var(--color-text-secondary); background:var(--color-surface-hover,#f6f7f9);
+                     border-top:1px solid var(--color-border); }
+    .qr-sess-group:first-child { border-top:0; }
+    /* One line, four zones, fixed positions. The rail carries state, so no chip. */
+    .qr-sess-row { display:grid; grid-template-columns:3px 1fr auto auto auto;
+                   align-items:center; gap:0 12px; padding:0; cursor:pointer;
+                   background:var(--color-surface); border-top:1px solid var(--color-border); }
     .qr-sess-row:first-child { border-top:0; }
-    .qr-sess-row:hover { background:var(--color-surface-hover, #f6f7f9); }
-    .qr-sess-row.is-selected { background:var(--color-surface-hover, #eef2ff);
-                               box-shadow:inset 3px 0 0 var(--color-primary, #5b5bd6); }
-    .qr-sess-main { min-width:0; }
-    .qr-sess-co { font-weight:600; font-size:13px; white-space:nowrap;
-                  overflow:hidden; text-overflow:ellipsis; }
-    .qr-sess-meta { font-size:11px; color:var(--color-text-secondary); margin-top:2px;
-                    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .qr-sess-pct { font-size:12px; font-variant-numeric:tabular-nums;
-                   color:var(--color-text-secondary); min-width:38px; text-align:right; }
-    .qr-sess-state { font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px;
-                     white-space:nowrap; border:1px solid transparent; }
-    .qr-sess-state.st-queued      { background:#eef1f5; color:#4a5568; }
-    .qr-sess-state.st-researching { background:#e7f0ff; color:#1d4ed8; }
-    .qr-sess-state.st-generating  { background:#ede9fe; color:#6d28d9; }
-    .qr-sess-state.st-completed   { background:#e7f7ee; color:#15803d; }
-    .qr-sess-state.st-limited     { background:#fff4e5; color:#b45309; }
-    .qr-sess-state.st-failed      { background:#fdecec; color:#b91c1c; }
-    .qr-sess-actions { display:flex; gap:6px; margin-top:6px; }
-    .qr-sess-actions button { font-size:11px; padding:2px 8px; }
+    .qr-sess-row:hover { background:var(--color-surface-hover,#f6f7f9); }
+    .qr-sess-row.is-selected { background:var(--color-surface-hover,#eef2ff); }
+    .qr-rail { align-self:stretch; background:var(--color-border); }
+    .qr-sess-row.st-active .qr-rail { background:#2563eb; }
+    .qr-sess-row.st-attention .qr-rail { background:#b45309; }
+    .qr-sess-row.st-done .qr-rail { background:#15803d; }
+    .qr-sess-row.is-selected .qr-rail { box-shadow:inset 0 0 0 1px rgba(0,0,0,.15); }
+    .qr-sess-co { font-weight:600; font-size:13.5px; padding:10px 0;
+                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .qr-sess-state { font-size:12.5px; color:var(--color-text); white-space:nowrap; }
+    .qr-sess-ctx { font-size:12px; color:var(--color-text-secondary);
+                   font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .qr-sess-act { display:flex; align-items:center; gap:6px; padding-right:10px; }
+    .qr-sess-act button { font-size:11.5px; padding:3px 9px; }
+    /* Completed work: one line, and a route to where it actually lives. */
+    .qr-sess-done { display:flex; align-items:center; justify-content:space-between;
+                    gap:12px; padding:9px 12px; font-size:12.5px;
+                    color:var(--color-text-secondary);
+                    border-top:1px solid var(--color-border); }
+    .qr-sess-done[hidden] { display:none; }
+    .qr-sess-done b { color:var(--color-text); font-weight:600; }
+    .qr-sess-done a { color:var(--color-primary,#5b5bd6); cursor:pointer; white-space:nowrap; }
+    .qr-menuinfo { padding:6px 10px; font-size:11px; color:var(--color-text-secondary);
+                   white-space:nowrap; }
+    .qr-sess-empty { padding:14px 12px; font-size:12.5px; color:var(--color-text-secondary); }
+    @media (max-width:720px) {
+      /* Two clean lines rather than shrinking everything. */
+      .qr-sess-row { grid-template-columns:3px 1fr auto; grid-template-areas:
+                     "rail co act" "rail state act" "rail ctx act"; }
+      .qr-rail { grid-area:rail; }
+      .qr-sess-co { grid-area:co; padding:8px 0 0; }
+      .qr-sess-state { grid-area:state; }
+      .qr-sess-ctx { grid-area:ctx; padding-bottom:8px; }
+      .qr-sess-act { grid-area:act; }
+    }
     /* ---- Live incremental research output ---------------------------- */
     .qr-progress { margin-top:16px; padding-top:15px; border-top:1px solid var(--color-border); }
     .qr-prog-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
@@ -3347,8 +3371,9 @@
               <span class="qr-sess-count" id="qr-sess-count"></span>
             </div>
             <ul class="qr-sess-list" id="qr-sess-list"></ul>
-            <div class="qr-sess-more">
-              <button class="btn-sm btn-ghost" id="qr-sess-all">View All Reports <span class="i18n-zh">查看所有报告</span></button>
+            <div class="qr-sess-done" id="qr-sess-done" hidden>
+              <span id="qr-sess-done-text"></span>
+              <a id="qr-sess-all" role="button" tabindex="0">View all reports <span class="i18n-zh">查看所有报告</span> →</a>
             </div>
           </div>
 

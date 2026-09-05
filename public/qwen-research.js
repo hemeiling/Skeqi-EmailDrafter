@@ -715,20 +715,81 @@
     }
   }
 
+  /* Rendered by URGENCY, in three tiers.
+
+     NOW and NEEDS ATTENTION are the page's actual job: what is running and what
+     is stuck. Completed sessions collapse to one line, because listing them
+     rebuilds the Reports library one tab away - and if this list ever needs a
+     search box, it has become Reports again.
+
+     The left rail carries state, so the old percentage-plus-chip pair is gone.
+     Each blocked row offers exactly ONE inline action; everything else lives in
+     the same ⋯ menu the report table already uses. Nothing is removed. */
+  const SECTION_COUNTS = new Map();      // job_id -> stored section count
+
+  function railClass(state) {
+    if (SESSION_LIVE.has(state)) return 'st-active';
+    if (SESSION_NEEDS_ATTENTION.has(state)) return 'st-attention';
+    return 'st-done';
+  }
+
+  /* state + the ONE number that matters + the primary action, per state. */
+  function rowContent(x) {
+    const co = esc(x.company_name || '');
+    const site = esc(x.website || '');
+    const [stageEn] = SESSION_STAGE[x.stage] || [x.stage || ''];
+    const pct = x.progress_percent == null ? null : x.progress_percent;
+    if (SESSION_LIVE.has(x.state)) {
+      return { state: esc(stageEn), ctx: (pct == null ? '' : pct + '% · ') + esc(sessionElapsed(x)),
+               action: '' };
+    }
+    if (x.state === 'save_failed') {
+      const n = SECTION_COUNTS.get(x.job_id);
+      return { state: 'Generated · save failed',
+               ctx: n == null ? 'sections stored' : `${n} sections stored`,
+               action: `<button data-qr-sess-retry="${esc(x.job_id)}">Retry Save / 重新保存</button>` };
+    }
+    if (SESSION_NEEDS_ATTENTION.has(x.state)) {
+      const label = x.state === 'interrupted' ? 'Interrupted' : 'Failed';
+      return { state: `${label}${pct == null ? '' : ' at ' + pct + '%'}`,
+               ctx: esc(stageEn),
+               action: `<button data-qr-sess-regen="${co}" data-qr-sess-site="${site}">Regenerate / 重新生成</button>` };
+    }
+    return { state: 'Completed', ctx: esc(sessionElapsed(x)), action: '' };
+  }
+
+  function rowMenu(x) {
+    const co = esc(x.company_name || '');
+    const site = esc(x.website || '');
+    const host = esc(String(x.website || '').replace(/^https?:\/\//, '').replace(/\/$/, ''));
+    const hasReport = SESSION_HAS_REPORT.has(x.state) || !!libRowFor(x.company_name);
+    const items = [];
+    if (hasReport) {
+      items.push(`<button data-qr-sess-view="${co}">View Report / 查看报告</button>`);
+      items.push(`<button data-qr-sess-pdf="${co}">PDF / 查看PDF</button>`);
+    }
+    if (!SESSION_HAS_REPORT.has(x.state) && libRowFor(x.company_name)) {
+      items.push(`<button data-qr-sess-prev="${co}">View Previous Report / 查看上一版本</button>`);
+    }
+    if (!SESSION_LIVE.has(x.state)) {
+      items.push(`<button data-qr-sess-regen="${co}" data-qr-sess-site="${site}">Regenerate / 重新生成</button>`);
+    }
+    // Host and model belong here, not competing with the company name.
+    items.push('<div class="qr-menusep"></div>');
+    items.push(`<div class="qr-menuinfo">${host || '—'} · ${esc(x.model || '—')}</div>`);
+    return `<details class="qr-menu"><summary>⋯</summary>
+      <div class="qr-menubox">${items.join('')}</div></details>`;
+  }
+
   function renderSessions() {
     const box = $('qr-sessions'); const list = $('qr-sess-list');
     if (!box || !list) return;
-    box.hidden = sessions.length === 0;
-    /* Every active session is always shown - those are the ones the user is
-       waiting on. History is bounded so the panel stops eating the page. This is
-       presentation only: nothing in Neon is filtered, deleted or altered. */
-    /* Priority, not recency: running work first, then anything a person has to
-       do something about, then a few recent completions for context. */
     const active = sessions.filter((x) => SESSION_LIVE.has(x.state));
     const attention = sessions.filter((x) => SESSION_NEEDS_ATTENTION.has(x.state));
-    const completed = sessions
-      .filter((x) => !SESSION_LIVE.has(x.state) && !SESSION_NEEDS_ATTENTION.has(x.state))
-      .slice(0, RECENT_COMPLETED);
+    const done = sessions.filter((x) => !SESSION_LIVE.has(x.state)
+                                     && !SESSION_NEEDS_ATTENTION.has(x.state));
+    box.hidden = sessions.length === 0;
+
     const count = $('qr-sess-count');
     if (count) {
       const bits = [];
@@ -736,52 +797,54 @@
       if (attention.length) bits.push(`${attention.length} need attention`);
       count.textContent = bits.join(' · ');
     }
-    const rows = active.concat(attention, completed);
-    list.innerHTML = rows.map((x, idx) => {
-      const [en, zh, cls] = SESSION_STATE[x.state] || SESSION_STATE.failed;
-      const [sen] = SESSION_STAGE[x.stage] || [x.stage || '—'];
-      const pct = SESSION_HAS_REPORT.has(x.state) ? 100 : (x.progress_percent || 0);
-      const host = (x.website || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
-      const co = esc(x.company_name || '');
-      let acts = '';
-      if (SESSION_HAS_REPORT.has(x.state)) {
-        acts = `
-          <div class="qr-sess-actions">
-            <button data-qr-sess-view="${co}">View Report / 查看</button>
-            <button data-qr-sess-pdf="${co}">PDF</button>
-            <button data-qr-sess-regen="${co}" data-qr-sess-site="${esc(x.website || '')}">
-              Regenerate / 重新生成</button>
-          </div>`;
-      } else if (!SESSION_LIVE.has(x.state) && libRowFor(x.company_name)) {
-        // The run produced nothing, but an earlier report survived it. Offer that
-        // one explicitly, labelled, rather than leaving the row a dead end.
-        acts = `
-          <div class="qr-sess-actions">
-            <button data-qr-sess-prev="${co}">View Previous Report / 查看上一版本</button>
-            <button data-qr-sess-regen="${co}" data-qr-sess-site="${esc(x.website || '')}">
-              Regenerate / 重新生成</button>
-          </div>`;
-      }
-      let divider = '';
-      if (idx === active.length && active.length && attention.length) {
-        divider = `<li class="qr-sess-group">Needs Attention <span class="i18n-zh">需要处理</span></li>`;
-      } else if (idx === active.length + attention.length
-                 && (active.length || attention.length) && completed.length) {
-        divider = `<li class="qr-sess-group">Recent <span class="i18n-zh">最近完成</span></li>`;
-      }
-      return `${divider}<li class="qr-sess-row${x.job_id === sessionSel ? ' is-selected' : ''}"
+
+    const render = (x) => {
+      const c = rowContent(x);
+      return `<li class="qr-sess-row ${railClass(x.state)}${x.job_id === sessionSel ? ' is-selected' : ''}"
                   data-qr-sess="${esc(x.job_id)}">
-        <div class="qr-sess-main">
-          <div class="qr-sess-co">${co}</div>
-          <div class="qr-sess-meta">${esc(sen)}${host ? ` · ${esc(host)}` : ''}
-            ${x.model ? ` · ${esc(x.model)}` : ''} · ${esc(sessionStarted(x))}
-            · ${esc(sessionElapsed(x))}</div>
-          ${acts}
-        </div>
-        <div class="qr-sess-pct">${pct}%</div>
-        <div class="qr-sess-state ${cls}">${esc(en)}<span class="i18n-zh"> ${esc(zh)}</span></div>
+        <span class="qr-rail"></span>
+        <span class="qr-sess-co">${esc(x.company_name || '')}</span>
+        <span class="qr-sess-state">${c.state}</span>
+        <span class="qr-sess-ctx">${c.ctx}</span>
+        <span class="qr-sess-act">${c.action}${rowMenu(x)}</span>
       </li>`;
-    }).join('');
+    };
+
+    let html = '';
+    if (active.length) {
+      html += `<li class="qr-sess-group">Now <span class="i18n-zh">进行中</span></li>`;
+      html += active.map(render).join('');
+    }
+    if (attention.length) {
+      html += `<li class="qr-sess-group">Needs Attention <span class="i18n-zh">需要处理</span></li>`;
+      html += attention.map(render).join('');
+    }
+    if (!active.length && !attention.length) {
+      html += `<li class="qr-sess-empty">No research running. <span class="i18n-zh">当前没有进行中的研究。</span></li>`;
+    }
+    list.innerHTML = html;
+
+    /* Completed work gets one line and a route, never a list. */
+    const doneRow = $('qr-sess-done');
+    const doneText = $('qr-sess-done-text');
+    if (doneRow && doneText) {
+      doneRow.hidden = done.length === 0;
+      if (done.length) {
+        const names = done.slice(0, 3).map((x) => x.company_name).join(', ');
+        doneText.innerHTML = `✓ <b>${done.length}</b> completed recently · ${esc(names)}`
+          + (done.length > 3 ? ' …' : '');
+      }
+    }
+    // save_failed rows show how much was salvaged; fetched once, only for those.
+    attention.filter((x) => x.state === 'save_failed' && !SECTION_COUNTS.has(x.job_id))
+      .forEach((x) => {
+        SECTION_COUNTS.set(x.job_id, null);
+        fetch(api(`/job/${encodeURIComponent(x.job_id)}/sections`))
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => { if (d) { SECTION_COUNTS.set(x.job_id, (d.sections || []).length);
+                                  renderSessions(); } })
+          .catch(() => {});
+      });
   }
 
   /* Poll only while something is live, and stop the moment nothing is. */
@@ -872,15 +935,27 @@
     }
     const all = $('qr-sess-all');
     if (all) {
-      // The library lives in Reports; this sends people there instead of turning
-      // the operational list into a second one.
-      all.addEventListener('click', () => showSub('library'));
+      // Completed work lives in Reports; this is the route, not an expander.
+      const go = () => showSub('library');
+      all.addEventListener('click', go);
+      all.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+      });
     }
     list.addEventListener('click', (e) => {
       const view = e.target.closest('[data-qr-sess-view]');
       if (view) { e.stopPropagation(); return openReport(view.dataset.qrSessView, true); }
       const pdf = e.target.closest('[data-qr-sess-pdf]');
       if (pdf) { e.stopPropagation(); return openPdf(pdf.dataset.qrSessPdf); }
+      // The overflow menu is inside the row; opening it must not switch workspace.
+      if (e.target.closest('.qr-menu')) {
+        const b = e.target.closest('.qr-menubox button');
+        if (!b) return;                       // clicking ⋯ itself just opens it
+        const box = e.target.closest('.qr-menu');
+        if (box) box.open = false;
+      }
+      const retry = e.target.closest('[data-qr-sess-retry]');
+      if (retry) { e.stopPropagation(); return retrySave(retry.dataset.qrSessRetry); }
       const prev = e.target.closest('[data-qr-sess-prev]');
       if (prev) {
         e.stopPropagation();
