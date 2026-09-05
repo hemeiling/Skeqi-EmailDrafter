@@ -26,7 +26,11 @@ function normalizeNameKey(name) {
   } while (key !== prev && key);
   key = key
     .replace(/[.,]/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
+    // CJK is kept. Stripping to [a-z0-9] deleted every Chinese character, so
+    // 红旗, 宁德时代 and 中创新航 all normalised to the empty string - which made
+    // saveQwenReport throw and silently blocked EVERY Chinese-named account.
+    // Neon held zero reports with a CJK name before this was fixed.
+    .replace(/[^a-z0-9\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
   return key;

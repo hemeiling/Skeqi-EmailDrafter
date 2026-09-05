@@ -72,10 +72,11 @@ async function callEngine(path, { method = 'GET', body, raw = false } = {}) {
 
 /** Save a completed run. Returns null (never throws) when there is nothing to
  *  save, so a caller can persist opportunistically without a try/catch. */
-async function persistRun(record, userId) {
+async function persistRun(record, userId, identity = null) {
   if (!record || !record.company) return null;
   if (record.status !== 200 || !record.research_result) return null;   // only successes
-  return db.saveQwenReport(record, userId || null);
+  // `identity` is the key the JOB established at claim time; see saveQwenReport.
+  return db.saveQwenReport(record, userId || null, identity);
 }
 
 async function listReports(search) {

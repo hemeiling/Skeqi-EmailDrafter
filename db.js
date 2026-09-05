@@ -1071,6 +1071,9 @@ async function initDb() {
                       ON account_research_qwen_job_sections(job_id, position)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_sections_updated
                       ON account_research_qwen_job_sections(updated_at DESC)`);
+  // How the account identity was established, for traceability when a key looks odd.
+  await pool.query(`ALTER TABLE account_research_qwen_jobs
+                      ADD COLUMN IF NOT EXISTS identity_source TEXT`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_jobs_company
                       ON account_research_qwen_jobs(company_key)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_jobs_updated
@@ -4086,10 +4089,15 @@ function arqReportId(company, model, researchedAt) {
    installs the new report or leaves the old one untouched. Nothing is deleted
    first, so a failed model call or a failed write cannot leave a company with
    no report. */
-async function saveQwenReport(record, userId) {
+async function saveQwenReport(record, userId, identity = null) {
   const company = String(record.company || '').trim();
   if (!company) throw new Error('saveQwenReport: company is required');
-  const companyKey = normalizeNameKey(company);
+  /* Identity is ESTABLISHED AT CLAIM and passed in. It is not rediscovered here,
+     and record.website is never consulted: for 红旗 the job carried the supplied
+     hongqi-auto.com while the record resolved to pcauto.com.cn, a car portal, so
+     a record-derived key would have filed the account under "pcauto".
+     The name fallback exists only for callers with no job behind them. */
+  const companyKey = (identity && String(identity).trim()) || normalizeNameKey(company);
   if (!companyKey) throw new Error(`saveQwenReport: cannot derive an identity for "${company}"`);
   const model = record.model || '';
   const researchedAt = record.timestamp || new Date().toISOString();
@@ -4210,24 +4218,75 @@ async function deleteQwenReport(id) {
    engine process and the browser. */
 
 const JOB_LIVE = "('queued','running')";
+
+/* Terminal states. A job that has reached one of these has finished deciding what
+   it is, and a late callback must not undo that.
+
+   红旗 is why this exists: failQwenJob() ran at 18:12:28.511, then section
+   callbacks arriving until 18:12:28.871 each called updateQwenJob with
+   status:'running' and put the job back to active. The row ended up reporting
+   85% running while carrying a completion time AND an error - which is exactly
+   the state that made Sessions and Progress disagree. */
+const JOB_TERMINAL = ['completed', 'completed_with_limitations', 'interrupted',
+                      'failed', 'synthesis_failed', 'save_failed'];
+
+function isTerminalStatus(status) {
+  return JOB_TERMINAL.indexOf(String(status || '')) >= 0;
+}
+
+/* Canonical account identity, established ONCE when the job is claimed.
+
+   Order matters and the reason is concrete: for 红旗 the user supplied
+   hongqi-auto.com, but retrieval later auto-discovered pcauto.com.cn, a car
+   portal. Deriving identity from the finished record would have keyed the
+   account as "pcauto". So the supplied/verified domain is consulted at claim
+   time and the resolved website is never used as an identity source. */
+function resolveIdentity({ companyId, companyName, website, alias } = {}) {
+  if (companyId) {
+    return { key: `crm:${companyId}`, source: 'crm_company_id', companyId };
+  }
+  const named = normalizeNameKey(companyName || '');
+  if (named) return { key: named, source: 'company_name', companyId: null };
+  const host = String(website || '').trim()
+    .replace(/^https?:\/\//i, '').replace(/^www\./i, '').split(/[/?#]/)[0]
+    .toLowerCase();
+  const domain = host.split(':')[0];
+  if (domain && domain.includes('.')) {
+    return { key: `domain:${domain}`, source: 'supplied_domain', companyId: null };
+  }
+  const alt = normalizeNameKey(alias || '');
+  if (alt) return { key: alt, source: 'alias', companyId: null };
+  const fallback = String(companyName || alias || '').trim().toLowerCase();
+  // Never '' - an empty key is what made saveQwenReport throw for every Chinese
+  // account and left company_key blank on the job row.
+  return { key: fallback || `job:${Date.now()}`, source: 'display_name', companyId: null };
+}
 /* A run with no heartbeat for this long is not running any more: the engine
    restarted, was redeployed, or spun down. Nothing else can tell us, because
    the worker that died cannot report its own death. */
 const JOB_STALE_MINUTES = 25;
 
 async function claimQwenJob({ jobId, companyName, companyKey, website, model,
-                             jobType = 'single', createdBy = null }) {
-  const key = normalizeNameKey(companyName || '') || String(companyKey || '');
-  const co = await q(`SELECT id FROM companies WHERE name_key = $1 LIMIT 1`, [key]);
+                             jobType = 'single', createdBy = null, alias = null }) {
+  // The CRM company is looked up on the NAME key, which is also the identity we
+  // prefer when it exists. This is the one place identity is decided.
+  const named = normalizeNameKey(companyName || '') || String(companyKey || '');
+  const co = named
+    ? await q(`SELECT id FROM companies WHERE name_key = $1 LIMIT 1`, [named])
+    : [];
+  const ident = resolveIdentity({
+    companyId: co.length ? co[0].id : null,
+    companyName, website, alias,
+  });
   const rows = await q(`
     INSERT INTO account_research_qwen_jobs
       (job_id, company_key, company_id, company_name, website, model, job_type,
-       status, stage, progress_percent, created_by)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,'queued','queued',0,$8)
+       status, stage, progress_percent, created_by, identity_source)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,'queued','queued',0,$8,$9)
     ON CONFLICT DO NOTHING
     RETURNING *
-  `, [jobId, key, co.length ? co[0].id : null, companyName, website || null,
-      model || null, jobType, createdBy]);
+  `, [jobId, ident.key, ident.companyId, companyName, website || null,
+      model || null, jobType, createdBy, ident.source]);
   return rows[0] || null;          // null = the unique index refused it
 }
 
@@ -4267,26 +4326,35 @@ async function latestQwenJob(companyName) {
   return rows[0] || null;
 }
 
+/* A heartbeat NEVER un-finishes a job. Once the row is terminal, status, stage,
+   progress and completion are frozen; a late callback may still append a warning,
+   because that is metadata about work already done and cannot mislead about
+   whether the job is running. */
 async function updateQwenJob(jobId, { status, stage, progress, warning }) {
   const rows = await q(`
     UPDATE account_research_qwen_jobs SET
-      status           = COALESCE($2, status),
-      stage            = COALESCE($3, stage),
-      progress_percent = COALESCE($4, progress_percent),
+      status           = CASE WHEN status = ANY($6) THEN status
+                              ELSE COALESCE($2, status) END,
+      stage            = CASE WHEN status = ANY($6) THEN stage
+                              ELSE COALESCE($3, stage) END,
+      progress_percent = CASE WHEN status = ANY($6) THEN progress_percent
+                              ELSE COALESCE($4, progress_percent) END,
       warnings         = CASE WHEN $5::text IS NULL THEN warnings
                               ELSE warnings || to_jsonb($5::text) END,
-      updated_at       = NOW()
+      updated_at       = CASE WHEN status = ANY($6) THEN updated_at ELSE NOW() END
     WHERE job_id = $1
     RETURNING *
   `, [jobId, status || null, stage || null,
       progress == null ? null : Math.max(0, Math.min(100, Math.round(progress))),
-      warning || null]);
+      warning || null, JOB_TERMINAL]);
   return rows[0] || null;
 }
 
 /* `outcome` distinguishes a clean run from one that produced a report despite a
    degraded stage. Both are successes and both have a report behind them - see
    the best-effort continuation invariant in the engine's CLAUDE.md. */
+/* Explicit terminal transitions are always allowed - that is how a save_failed
+   job becomes completed after a successful replay. Only the heartbeat is frozen. */
 async function completeQwenJob(jobId, reportId, outcome = 'completed') {
   const status = outcome === 'completed_with_limitations'
     ? 'completed_with_limitations' : 'completed';
@@ -4935,7 +5003,7 @@ module.exports = {
   contactsForResearch,
   claimQwenJob, activeQwenJob, getQwenJob, latestQwenJob, updateQwenJob,
   completeQwenJob, failQwenJob, sweepStaleQwenJobs, listActiveQwenJobs,
-  listRecentQwenJobs,
+  listRecentQwenJobs, isTerminalStatus, resolveIdentity, JOB_TERMINAL,
   upsertQwenJobSection, listQwenJobSections, clearQwenJobSections, SECTION_STATES,
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
   logCompanyActivity, listCompanyActivity,

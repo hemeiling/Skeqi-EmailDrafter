@@ -360,6 +360,7 @@
     if ($('qr-report-card')) $('qr-report-card').style.display = 'none';
     if ($('qr-prev-banner')) $('qr-prev-banner').hidden = true;
     if ($('qr-prevrow')) $('qr-prevrow').hidden = true;
+    clearLive();                       // never leave another job's sections mounted
   }
 
   async function renderReport() {
@@ -515,11 +516,103 @@
 
 
 
-  /* Live Research was removed from the UI: sections only began appearing during
-     final generation, which is too late to be worth the complexity. The BACKEND
-     is intact and dormant - the engine still publishes sections, the CRM still
-     stores and serves them - so this can be revisited without rebuilding it.
-     Nothing here polls /job/:id/sections any more. */
+  /* ── Generated sections: a RECOVERY surface ──────────────────────────────
+     Restored for one reason: 红旗 finished research, generated a report and a
+     PDF, then failed to save, and the user was left with nothing on screen.
+     These sections are durable in Neon and are what survives that.
+
+     Strictly keyed to job_id and torn down by setWorkspace(), so one account's
+     sections can never sit under another account's progress.
+
+     Not yet genuinely progressive: 红旗 published all 19 sections in a 1.08s
+     burst AFTER synthesis. The streaming path is now instrumented in the engine
+     rather than assumed. */
+  let liveJobId = null;
+  let liveTimer = null;
+  let liveSeq = 0;
+
+  function clearLive() {
+    liveSeq += 1;
+    clearTimeout(liveTimer);
+    liveJobId = null;
+    const box = $('qr-live'); const body = $('qr-live-body');
+    if (box) box.hidden = true;
+    if (body) body.innerHTML = '';
+    const fail = $('qr-savefail');
+    if (fail) fail.hidden = true;
+  }
+
+  function renderLive(payload, state) {
+    const box = $('qr-live'); const body = $('qr-live-body');
+    if (!box || !body) return;
+    const secs = (payload && payload.sections) || [];
+    const failed = state === 'save_failed';
+    box.hidden = secs.length === 0 && !failed;
+    const fail = $('qr-savefail');
+    if (fail) fail.hidden = !failed;
+    const note = $('qr-live-note');
+    if (note) note.textContent = secs.length ? `${secs.length} section(s) stored` : '';
+    const l = getLang();
+    body.innerHTML = secs.map((sec) => {
+      const title = l === 'zh' ? (sec.section_title_zh || sec.section_title_en)
+                               : (sec.section_title_en || sec.section_title_zh);
+      const en = sec.content_en || ''; const zh = sec.content_zh || '';
+      const text = l === 'zh' ? (zh || en) : l === 'en' ? (en || zh)
+                 : [en, zh].filter(Boolean).join('\n\n');
+      return `<section class="qr-live-sec"><h4>${esc(title || sec.section_key)}</h4>
+        <div class="qr-live-text">${md(text)}</div></section>`;
+    }).join('');
+  }
+
+  async function pollLive(jobId, seq) {
+    if (seq !== liveSeq || jobId !== liveJobId) return;
+    let payload = null;
+    try {
+      const r = await fetch(api(`/job/${encodeURIComponent(jobId)}/sections`));
+      payload = r.ok ? await r.json() : null;
+    } catch (e) { /* transient */ }
+    if (seq !== liveSeq || jobId !== liveJobId) return;
+    const row = sessionRow(jobId);
+    if (payload) renderLive(payload, row && row.state);
+    const live = payload && ['queued', 'running'].includes(payload.status);
+    clearTimeout(liveTimer);
+    if (live) liveTimer = setTimeout(() => pollLive(jobId, seq), 3000);
+  }
+
+  function followLive(jobId) {
+    clearLive();
+    if (!jobId) return;
+    liveSeq += 1;
+    liveJobId = jobId;
+    pollLive(jobId, liveSeq);
+  }
+
+  /* Persistence only. No model call, no retrieval, no regeneration. */
+  async function retrySave(jobId) {
+    const btn = $('qr-retry-save');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch(api(`/job/${encodeURIComponent(jobId)}/retry-save`),
+                            { method: 'POST' });
+      const d = await r.json();
+      if (r.ok) {
+        msg('qr-single-msg', 'Report saved. 报告已保存。', 'info');
+        await loadLibrary();
+        await refreshSessions();
+        const row = sessionRow(jobId);
+        if (row) { reportMode = 'current'; await openReport(row.company_name, true); }
+      } else {
+        msg('qr-single-msg', `Could not save. 保存失败。<br><span>${esc(d.error || '')}</span>`
+            + (d.sections ? `<div>${d.sections} generated section(s) remain stored. `
+                            + `${d.sections} 个已生成章节仍然保留。</div>` : ''), 'err');
+      }
+    } catch (e) {
+      msg('qr-single-msg', esc(e.message), 'err');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
 
   /* ── Research Sessions ────────────────────────────────────────────────────
      The list is rendered from Neon, never from browser state, so a session
@@ -533,6 +626,7 @@
     completed:                  ['Completed', '已完成', 'st-completed'],
     completed_with_limitations: ['Completed with limitations', '已完成（有限制）', 'st-limited'],
     synthesis_failed:           ['Synthesis failed', '生成失败', 'st-failed'],
+    save_failed:                ['Generated · save failed', '已生成·保存失败', 'st-limited'],
     interrupted:                ['Interrupted', '已中断', 'st-failed'],
     failed:                     ['Failed', '失败', 'st-failed'],
   };
@@ -634,7 +728,7 @@
           </div>`;
       }
       const divider = (idx === active.length && active.length && visibleHistory.length)
-        ? `<li class="qr-sess-head">Previous Research <span class="i18n-zh">历史研究</span></li>`
+        ? `<li class="qr-sess-group">Previous Research <span class="i18n-zh">历史研究</span></li>`
         : '';
       return `${divider}<li class="qr-sess-row${x.job_id === sessionSel ? ' is-selected' : ''}"
                   data-qr-sess="${esc(x.job_id)}">
@@ -697,6 +791,7 @@
     setWorkspace(row ? row.company_name : null);
     renderSessions();
     followSession(jobId);
+    followLive(jobId);
     syncWorkspaceReport(row);
   }
 
@@ -725,6 +820,8 @@
     const list = $('qr-sess-list');
     if (!list) return;
     sessionsWired = true;
+    const retry = $('qr-retry-save');
+    if (retry) retry.addEventListener('click', () => { if (liveJobId) retrySave(liveJobId); });
     const openPrev = $('qr-prev-open');
     if (openPrev) {
       openPrev.addEventListener('click', () => {
@@ -1336,6 +1433,7 @@
         // Show the run in Research Sessions immediately, and select it, so the
         // user can navigate away and still find it on the way back.
         refreshSessions().then(() => selectSession(jobId));
+        followLive(jobId);
       }
 
       while (true) {

@@ -959,6 +959,8 @@ function sessionState(row) {
     case 'completed':                   return 'completed';
     case 'completed_with_limitations':  return 'completed_with_limitations';
     case 'synthesis_failed':            return 'synthesis_failed';
+    // Synthesis SUCCEEDED; only persistence failed. Retryable without paying again.
+    case 'save_failed':                 return 'save_failed';
     case 'interrupted':                 return 'interrupted';
     default:                            return row.report_id ? 'completed' : 'failed';
   }
@@ -1168,7 +1170,23 @@ app.post('/api/qwen-research/callback', express.json({ limit: '25mb' }), async (
     if (b.event === 'completed') {
       // ONLY a successful run is persisted, and only here.
       if (!b.record) return res.status(400).json({ error: 'record is required' });
-      const saved = await qr.persistRun(b.record, b.created_by || 'engine');
+      /* Identity comes from the JOB, established when it was claimed. Never from
+         the record: 红旗 supplied hongqi-auto.com and the record resolved to
+         pcauto.com.cn. */
+      const job = await jobsDb.getQwenJob(jobId);
+      let saved = null;
+      try {
+        saved = await qr.persistRun(b.record, b.created_by || 'engine',
+                                    job && job.company_key);
+      } catch (e) {
+        /* Synthesis SUCCEEDED and only persistence failed. That is not a research
+           failure: the work exists and must be retryable without paying for it
+           again. The sections published during the run stay in Neon as the
+           user-visible copy. */
+        const why = `Report generated but saving failed: ${String(e.message).slice(0, 200)}`;
+        await jobsDb.failQwenJob(jobId, why, 'save_failed');
+        return res.status(500).json({ ok: false, error: why, state: 'save_failed' });
+      }
       if (!saved) {
         /* persistRun refuses anything that is not a complete success. Reporting
            ok here would tell the engine the report is safe when nothing was
@@ -1186,6 +1204,41 @@ app.post('/api/qwen-research/callback', express.json({ limit: '25mb' }), async (
   } catch (e) {
     // Never lose the reason: the engine logs whatever we say here.
     try { await jobsDb.failQwenJob(jobId, `Callback failed: ${e.message}`); } catch (_) { /* noop */ }
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* Retry PERSISTENCE ONLY for a job whose synthesis already succeeded.
+
+   No model call, no retrieval, no regeneration. The generated record is read back
+   from the engine, which still holds it, and written with the identity the job
+   established at claim time. If the engine has forgotten the run, the sections it
+   published during the run are still in Neon and are reported as the remaining
+   copy rather than silently doing nothing. */
+app.post('/api/aresearch/job/:id/retry-save', async (req, res) => {
+  const jobId = String(req.params.id || '');
+  try {
+    const job = await jobsDb.getQwenJob(jobId);
+    if (!job) return res.status(404).json({ error: 'unknown job' });
+    const out = await qr.callEngine(`/api/job/${encodeURIComponent(jobId)}`);
+    const snap = out.data || {};
+    const produced = Object.values(snap.models || {})
+      .filter((m) => m && m.status === 'complete' && m.result);
+    if (!produced.length) {
+      const sections = await jobsDb.listQwenJobSections(jobId);
+      return res.status(409).json({
+        error: 'The research service no longer holds this run.',
+        sections: sections.length,
+        hint: sections.length
+          ? 'The generated sections are still stored and remain viewable.'
+          : 'Nothing recoverable remains for this job.',
+      });
+    }
+    const saved = await qr.persistRun(produced[0].result, reqUser(req), job.company_key);
+    if (!saved) return res.status(422).json({ error: 'The stored run is not a complete success.' });
+    await jobsDb.completeQwenJob(jobId, saved.id);
+    res.json({ ok: true, report_id: saved.id, version: saved.version });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
