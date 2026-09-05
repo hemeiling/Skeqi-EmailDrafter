@@ -1,11 +1,11 @@
 # SKQ CRM — Project Status
 
-> Last updated: 2026-09-03
+> Last updated: 2026-09-05
 > Updated by: Claude
 > Scope of this document: **Current Account Research (Qwen-based)** inside the CRM.
 > Branch: `account-research-qwen`
-> Current phase: **PRODUCTION BASELINE** — UI parity pass committed (`1feeed9`) and
-> verified against live Neon
+> Current phase: **PRODUCTION** — Research Sessions redesign deployed (`31ec355`),
+> asset parity confirmed under authentication, 14/14 production smoke checks green
 
 `HANDOFF.md` remains the week-of-2026-08-23 handoff for the wider CRM (Booth Map
 re-key, chat, exhibitor sync). It is untracked and was not touched.
@@ -915,6 +915,109 @@ percentage, `Completed / 已完成`, `Failed / 失败` with the reason,
 
 ---
 
+## 2i. Research Sessions — ordered by what needs a person (2026-09-05) — TESTED
+
+**Commit `31ec355`, frontend only** (`public/index.html`, `public/qwen-research.js`).
+No backend, engine, retrieval or synthesis code was touched.
+
+The list was previously ordered by recency, so finished work competed for
+attention with work that was blocked. It is now three tiers:
+
+| Tier | Contains | Rendering |
+|---|---|---|
+| NOW | `running` | one row each, blue rail `st-active` |
+| NEEDS ATTENTION | `interrupted`, `save_failed`, `synthesis_failed`, `failed` | one row each, amber rail `st-attention` |
+| DONE | `completed` | ONE collapsed line + `View all reports →` |
+
+- A left status rail replaced the percentage-plus-chip pair. `railClass()` maps
+  state to rail, so state lives in one function.
+- **At most one inline action per row** (Regenerate, or Retry Save). Host, model
+  and every secondary action moved into a `<details class="qr-menu">` overflow
+  that reuses the Reports table pattern. An explicit guard stops opening the
+  menu from switching workspace — the menu sits inside a clickable row.
+- Completed sessions no longer render as rows at all; the summary names a few
+  accounts and links to the Reports library.
+- `save_failed` section counts are fetched lazily, only for those rows.
+
+**Verification.** Three CRM suites green before commit — job-snapshot 51,
+research-cost 44, identity-state 41. Production smoke after deploy: 29 browser
+checks green, invariant-based (expectations derived from the live sessions API,
+not hard-coded), plus a 6-check run for `save_failed`. No research POST was
+issued by any check.
+
+> `save_failed` exists in neither production data nor the unit tests, so its
+> branch is verified by stubbing the sessions response **in the browser only**
+> (`scratchpad/savefailed.py`). Nothing is written. If that branch is changed,
+> re-run that script — no other test covers it.
+
+---
+
+## 2j. P0 — target website integrity (2026-09-05) — DIAGNOSED, NOT FIXED
+
+**The defect.** A validated user-supplied domain can be silently replaced by
+auto-discovery, and the substitute then monopolises the evidence.
+
+红旗: job website `https://www.hongqi-auto.com`; stored report
+`company_website` = `https://pcauto.com.cn`; all 16 retained sources on that
+consumer car-price portal, classified `official-website`; zero automation
+vendors named. Job `d9e9fd9677b0407ab4a494d420002dcc`.
+
+**Path.** `resolve_website` → `validate_website` returns `ok=False`,
+`website_mismatch` → the only trace is a `progress("discover", ...)` line, never
+persisted → `discover_official_website` returns `pcauto.com.cn` as
+`auto_discovered`, which becomes the official domain for tier classification,
+for the `site:` query, and for the report's `company_website`.
+
+**Root cause.** The gate is `score >= 5 and (named or multi)`. For 红旗 the call
+returns score 4, signals `['about','contact','products','shallow-path']`. The
+account name is CJK-only; the fetched page is English (10,495 chars, opens
+`HONGQI AUTO OFFICIAL WEBSITE`, **zero** occurrences of 红旗). No signal compares
+a transliterated domain against a CJK name. Note the **blocked**-host branch
+already trusts `domain~name`; the reachable branch, with strictly more
+information, uses no domain evidence at all.
+
+**Second, larger defect — no per-domain ceiling.** `apply_evidence_caps` sorts
+by tier first; `classify_source` gives tier 1/2 to anything on the resolved
+domain *including subdomains*; `MAX_EVIDENCE_ITEMS` is 16; there is no per-host
+or per-domain cap anywhere in retention or fetching (grepped: none). Official
+pages therefore fill all 16 slots and third-party evidence is dropped as
+`evidence cap` before the low-tier budget is consulted. **This is the mechanical
+reason Competitor Analysis and Existing Automation Providers are weak** — the
+evidence set contains no third-party sources, so no prompt change can fix it.
+
+**Blast radius, measured against live Neon.**
+
+- Supplied domain replaced in **3 of 12** jobs carrying both fields:
+  BMW `bwm.com`→`bmw.com.cn` (benign typo fix), Volkswagen `vw.com`→`volkswagen.com`
+  (benign), 红旗 `hongqi-auto.com`→`pcauto.com.cn` (harmful). Any correction must
+  preserve the two benign ones.
+- Concentration across all 43 reports, **by registrable domain**: 18 at ≥80% one
+  domain (10 of them with ≥10 sources); 14 entirely single-domain (8 with ≥10);
+  median top-domain share 75%.
+
+> **Measurement trap:** an earlier cut computed this per *hostname* and reported
+> 14, not 18 — 红旗 was invisible because its sources split across
+> `pcauto.com.cn`, `m.pcauto.com.cn` and `price.pcauto.com.cn`. Always collapse
+> to the registrable domain.
+
+**Proposed smallest correction (NOT implemented).**
+- *P0a* — add a `domain~name` corroboration signal to the reachable branch of
+  `validate_website` (the rule the blocked branch already applies); and when
+  discovery returns a domain sharing no token with the supplied one, keep the
+  supplied domain, record the other as a candidate, and warn on the job.
+- *P0b* — one counter in `apply_evidence_caps`: no single registrable domain may
+  supply more than ~half of `MAX_EVIDENCE_ITEMS`.
+
+**Concentration diagnostic (NOT implemented).** A report-level *warning*, never a
+gate — the best-effort principle stands. Computed on the registrable domain,
+persisted on the job (top domain, share, distinct-domain count, whether it is the
+resolved official site), suppressed below a small source count (4 of the 14
+single-domain reports have 1–2 sources).
+
+Full write-up: artifact `b0e03927-9b83-4ee6-a30e-575645b9ef87`.
+
+---
+
 ## 3. Recent test results — live Neon, 2026-09-03
 
 **Live Neon verification — summary**
@@ -1113,36 +1216,44 @@ does not have to guess.
 
 ## 6. NEXT ACTIONS
 
-1. **Confirm the Render environment** for the CRM service: both
-   `CURRENT_ACCOUNT_RESEARCH_URL` and `ACCOUNT_RESEARCH_SERVICE_KEY` present and
-   non-empty, the key matching `APP_SERVICE_KEY` on the engine (§4a). No code
-   change is needed if they are already set.
-2. Record the real Render hostnames in `DEPLOY.md`, replacing the placeholders.
-3. Open a PR for `account-research-qwen` and merge to `main`.
-4. **When you choose:** one deliberate paid end-to-end run on a single company —
-   Generate → Neon upsert → report → PDF. Not before; it costs tokens (§0).
-5. **Hold Batch Research as-is.** Once Single Company has been used for a while
-   without surprises, port §2e's state model and the §2c progress panel to it.
-   Not before.
-6. Optionally add `CURRENT_ACCOUNT_RESEARCH_URL` to the local `.env` so the
-   workspace runs locally without a command-line override.
+1. **P0 — target-website integrity.** A validated user-supplied domain must not
+   be silently replaced by auto-discovery. Diagnosis complete (§2j); the
+   correction is NOT yet implemented.
+2. **P1 — persist bounded rejected-candidate diagnostics** (candidate, query,
+   URL/host, rejection reason, identity/provenance outcome).
+3. Add the source-concentration diagnostic (§2j) as a **report-level warning**,
+   explicitly not a fail-fast gate.
+4. Record the real Render hostnames in `DEPLOY.md`, replacing the placeholders.
+5. Open a PR for `account-research-qwen` and merge to `main`.
+
+**Deliberately NOT scheduled** (user decision, 2026-09-04): supplier/integrator
+discovery expansion, distributor discovery, new competitor retrieval, prompt
+changes, and Workstream 2 Version 4. Version 3 was measured and rejected —
+NOT WORTH THE ADDED RETRIEVAL.
 
 ---
 
 ## 7. Session handoff
 
-**Current state:** this is the **production baseline**. Commit `1feeed9` on
-`account-research-qwen`, pushed to `origin`. Working tree clean apart from
-pre-existing untracked files (`HANDOFF.md`, `researchConfidence.js`,
-`researchSections.js`, `skqCapabilities.js`), none of which were touched.
+**Current state:** commit `31ec355` on `account-research-qwen`, pushed to
+`origin`, deployed to the production CRM. The Research Sessions redesign is
+**IMPLEMENTED, DEPLOYED and TESTED**; the user has closed that UX issue.
 
-**Last successful operation:** live Neon verification, §3 — 29 reports, Compile
-Selected in two languages with contents checked, Download, the Refresh guard, and
-Delete on a disposable fixture. The 29 rows were compared row for row against a
-pre-test snapshot and are identical.
+**Last successful operation:** production smoke of the redesign — 29 browser
+checks green against live Neon plus a 6-check stub run for `save_failed`, with
+no research POST issued by any check. Asset parity was confirmed by comparing
+SHA-256 of `qwen-research.js`, `job-snapshot.js` and `index.html` fetched **with
+HTTP Basic credentials** against the working tree; all three matched.
 
-**Open items:** the Render dashboard values in §4a, and `APOLLO_API_KEY` on the
-Render engine service (§0a). Batch Research is on a deliberate hold (§2e).
+> **Deploy-verification trap, twice hit:** every CRM route except `/healthz` and
+> the engine callback is behind HTTP Basic. An unauthenticated `curl` of a static
+> asset returns the 15-byte body `Login required.`, so a hash comparison against
+> it always "differs" and tells you nothing. Always pass `-u "$APP_USERNAME:$APP_PASSWORD"`.
+> A 200/404 probe is likewise not a deploy signal — only an exact asset hash is.
+
+**Open items:** §2j P0 (not implemented), P1 rejected-candidate persistence, the
+Render dashboard values in §4a, and `APOLLO_API_KEY` on the Render engine
+service (§0a). Batch Research remains on a deliberate hold (§2e).
 
 **Do not:** run Generate or Refresh to test. They are live (§0).
 
@@ -1150,3 +1261,7 @@ Render engine service (§0a). Batch Research is on a deliberate hold (§2e).
 with the engine started from its own repository. `DATABASE_URL` in `.env` already
 points at live Neon, so local runs read and write **production data** — take care
 with delete and regenerate.
+
+**Browser tests** need an explicit Chromium path; the venv's bundled revision is
+stale. Use
+`~/Library/Caches/ms-playwright/chromium_headless_shell-1228/chrome-headless-shell-mac-arm64/chrome-headless-shell`.
