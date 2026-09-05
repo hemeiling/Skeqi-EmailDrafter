@@ -282,6 +282,28 @@
     .qr-sess-state.st-failed      { background:#fdecec; color:#b91c1c; }
     .qr-sess-actions { display:flex; gap:6px; margin-top:6px; }
     .qr-sess-actions button { font-size:11px; padding:2px 8px; }
+    /* ---- Live incremental research output ---------------------------- */
+    .qr-live { margin-top:16px; padding-top:15px; border-top:1px solid var(--color-border); }
+    .qr-live-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
+    .qr-live-title { font-size:12px; font-weight:600; letter-spacing:.04em;
+                     text-transform:uppercase; color:var(--color-text-secondary); }
+    .qr-live-note { font-size:12px; color:var(--color-text-secondary); }
+    .qr-live-body { margin-top:10px; display:flex; flex-direction:column; gap:10px; }
+    .qr-live-sec { border:1px solid var(--color-border); border-radius:8px; padding:10px 13px;
+                   background:var(--color-surface); }
+    .qr-live-sec.is-evidence { background:var(--color-surface-hover, #f6f7f9); }
+    .qr-live-sec h4 { margin:0 0 6px; font-size:13px; font-weight:600;
+                      display:flex; align-items:center; gap:8px; }
+    .qr-live-badge { font-size:10px; font-weight:600; padding:1px 7px; border-radius:999px;
+                     text-transform:uppercase; letter-spacing:.03em; }
+    .qr-live-badge.st-generating { background:#e7f0ff; color:#1d4ed8; }
+    .qr-live-badge.st-partial    { background:#ede9fe; color:#6d28d9; }
+    .qr-live-badge.st-complete   { background:#e7f7ee; color:#15803d; }
+    .qr-live-badge.st-unavailable{ background:#fff4e5; color:#b45309; }
+    .qr-live-text { font-size:13px; line-height:1.55; color:var(--color-text); }
+    .qr-live-text :is(p,ul,ol) { margin:.4em 0; }
+    .qr-live-text h2, .qr-live-text h3 { font-size:13px; margin:.4em 0; }
+    .qr-live-wait { font-size:12px; color:var(--color-text-secondary); font-style:italic; }
     .qr-progress { margin-top:16px; padding-top:15px; border-top:1px solid var(--color-border); }
     .qr-prog-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
     .qr-prog-title { font-size:0.68rem; font-weight:700; letter-spacing:.06em;
@@ -3317,6 +3339,16 @@
             <div class="qr-prog-now" id="qr-prog-now"></div>
             <ul class="qr-prog-steps" id="qr-prog-steps"></ul>
             <div class="qr-prog-counters" id="qr-prog-counters"></div>
+          </div>
+
+          <!-- Live incremental output, read from Neon against the durable job id.
+               Survives navigation, reload and a new browser session. -->
+          <div id="qr-live" class="qr-live" hidden>
+            <div class="qr-live-head">
+              <span class="qr-live-title">Live Research <span class="i18n-zh">实时研究</span></span>
+              <span class="qr-live-note" id="qr-live-note"></span>
+            </div>
+            <div class="qr-live-body" id="qr-live-body"></div>
           </div>
         </div>
 

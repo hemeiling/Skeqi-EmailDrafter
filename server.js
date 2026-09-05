@@ -1130,6 +1130,29 @@ app.post('/api/qwen-research/callback', express.json({ limit: '25mb' }), async (
                                       progress: b.progress_percent, warning: b.warning });
       return res.json({ ok: true });
     }
+    /* Live incremental output. The engine publishes a section as soon as it has
+       one, and re-publishes it if a later stage enriches it. Buffered engine-side,
+       so this is a handful of writes per run, not one per token. Partial output
+       NEVER touches the saved report: that is written only by 'completed'. */
+    if (b.event === 'section') {
+      const secs = Array.isArray(b.sections) ? b.sections : (b.section ? [b.section] : []);
+      if (!secs.length) return res.status(400).json({ error: 'section(s) required' });
+      const saved = [];
+      for (const sec of secs.slice(0, 40)) {
+        if (!sec || !sec.section_key) continue;
+        saved.push(await jobsDb.upsertQwenJobSection(jobId, sec));
+      }
+      // A section arriving is also a heartbeat: it keeps the run off the sweeper.
+      await jobsDb.updateQwenJob(jobId, { status: 'running', stage: b.stage || null,
+                                          progress: b.progress_percent });
+      return res.json({ ok: true, stored: saved.length });
+    }
+    /* A fresh run for this job starts from a clean slate, so one company's live
+       output can never show fragments of its previous attempt. */
+    if (b.event === 'sections_reset') {
+      await jobsDb.clearQwenJobSections(jobId);
+      return res.json({ ok: true });
+    }
     if (b.event === 'failed') {
       await jobsDb.failQwenJob(jobId, b.error || 'Research failed.');
       return res.json({ ok: true });           // the previous report is untouched
@@ -1254,6 +1277,27 @@ app.get('/api/aresearch/sessions', async (req, res) => {
       (['queued', 'running'].includes(r.status) ? reconcileOrphanJob(r) : Promise.resolve(r))
         .catch(() => r)));
     res.json(checked.map((r) => ({ ...r, state: sessionState(r) })));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* Live incremental output for one job. Read from Neon, so it survives a reload,
+   a new browser session and an engine restart, and it is scoped to the job_id so
+   two companies researching at once never mix. */
+app.get('/api/aresearch/job/:id/sections', async (req, res) => {
+  try {
+    const [job, sections] = await Promise.all([
+      jobsDb.getQwenJob(req.params.id),
+      jobsDb.listQwenJobSections(req.params.id),
+    ]);
+    if (!job) return res.status(404).json({ error: 'unknown job' });
+    res.json({
+      job_id: job.job_id, company_name: job.company_name,
+      status: job.status, stage: job.stage,
+      progress_percent: job.progress_percent,
+      report_id: job.report_id, sections,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

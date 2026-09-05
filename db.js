@@ -1045,6 +1045,32 @@ async function initDb() {
       completed_at     TIMESTAMPTZ
     )
   `);
+  /* Live, incremental research output, keyed to the durable job.
+
+     Long-running research must show something before it finishes, and that
+     something must survive leaving the page. Browser memory cannot do it, so
+     sections land here as they are produced and are read back on reload, in a
+     new tab or on another machine. This is PARTIAL output: the saved report in
+     account_research_qwen_reports stays the source of truth and is written only
+     when synthesis succeeds. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS account_research_qwen_job_sections (
+      job_id          TEXT NOT NULL,
+      section_key     TEXT NOT NULL,
+      position        INTEGER NOT NULL DEFAULT 0,
+      section_title_en TEXT,
+      section_title_zh TEXT,
+      content_en      TEXT,
+      content_zh      TEXT,
+      status          TEXT NOT NULL DEFAULT 'pending',
+      updated_at      TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (job_id, section_key)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_sections_job
+                      ON account_research_qwen_job_sections(job_id, position)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_sections_updated
+                      ON account_research_qwen_job_sections(updated_at DESC)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_jobs_company
                       ON account_research_qwen_jobs(company_key)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_jobs_updated
@@ -4302,6 +4328,63 @@ async function sweepStaleQwenJobs() {
    restart, and only the database survives all four. `stale` is computed here so
    the caller can show a run whose worker has died without waiting for the
    sweeper to relabel it. */
+/* Section states: pending | generating | partial | complete | unavailable.
+   `partial` is a section still being written; `unavailable` is one the run could
+   not complete, which per the best-effort invariant never stops the others. */
+const SECTION_STATES = ['pending', 'generating', 'partial', 'complete', 'unavailable'];
+
+async function upsertQwenJobSection(jobId, sec) {
+  const status = SECTION_STATES.includes(sec.status) ? sec.status : 'partial';
+  const rows = await q(`
+    INSERT INTO account_research_qwen_job_sections
+      (job_id, section_key, position, section_title_en, section_title_zh,
+       content_en, content_zh, status, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+    ON CONFLICT (job_id, section_key) DO UPDATE SET
+      position         = EXCLUDED.position,
+      section_title_en = COALESCE(EXCLUDED.section_title_en, account_research_qwen_job_sections.section_title_en),
+      section_title_zh = COALESCE(EXCLUDED.section_title_zh, account_research_qwen_job_sections.section_title_zh),
+      -- A finished section is immutable against PARTIAL writes. A late flush can
+      -- carry a truncated buffer, and letting it land would replace finished text
+      -- with half a sentence. Only another complete write may revise it.
+      content_en       = CASE WHEN account_research_qwen_job_sections.status = 'complete'
+                               AND EXCLUDED.status = 'partial'
+                              THEN account_research_qwen_job_sections.content_en
+                              ELSE COALESCE(EXCLUDED.content_en,
+                                            account_research_qwen_job_sections.content_en) END,
+      content_zh       = CASE WHEN account_research_qwen_job_sections.status = 'complete'
+                               AND EXCLUDED.status = 'partial'
+                              THEN account_research_qwen_job_sections.content_zh
+                              ELSE COALESCE(EXCLUDED.content_zh,
+                                            account_research_qwen_job_sections.content_zh) END,
+      -- Nor does it regress out of 'complete'.
+      status           = CASE WHEN account_research_qwen_job_sections.status = 'complete'
+                              THEN 'complete' ELSE EXCLUDED.status END,
+      updated_at       = NOW()
+    RETURNING *
+  `, [jobId, String(sec.section_key || '').slice(0, 120), Number(sec.position) || 0,
+      sec.section_title_en || null, sec.section_title_zh || null,
+      sec.content_en == null ? null : String(sec.content_en),
+      sec.content_zh == null ? null : String(sec.content_zh), status]);
+  return rows[0] || null;
+}
+
+/** Everything published so far for one job, in report order. */
+async function listQwenJobSections(jobId) {
+  return await q(`
+    SELECT job_id, section_key, position, section_title_en, section_title_zh,
+           content_en, content_zh, status, updated_at
+    FROM account_research_qwen_job_sections
+    WHERE job_id = $1 ORDER BY position, section_key
+  `, [jobId]);
+}
+
+/** Live output is per RUN. Regenerating clears the previous run's sections so
+    two runs for one company can never bleed into each other. */
+async function clearQwenJobSections(jobId) {
+  await q(`DELETE FROM account_research_qwen_job_sections WHERE job_id = $1`, [jobId]);
+}
+
 async function listRecentQwenJobs(limit = 25) {
   return await q(`
     SELECT job_id, company_name, company_key, website, model, job_type,
@@ -4853,6 +4936,7 @@ module.exports = {
   claimQwenJob, activeQwenJob, getQwenJob, latestQwenJob, updateQwenJob,
   completeQwenJob, failQwenJob, sweepStaleQwenJobs, listActiveQwenJobs,
   listRecentQwenJobs,
+  upsertQwenJobSection, listQwenJobSections, clearQwenJobSections, SECTION_STATES,
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
   logCompanyActivity, listCompanyActivity,
   logCrmActivity, listCrmActivity, activeUsers,

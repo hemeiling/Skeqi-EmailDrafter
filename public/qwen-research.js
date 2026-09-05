@@ -488,6 +488,93 @@
   }
 
 
+
+  /* ── Live incremental research output ────────────────────────────────────
+     Sections are read from Neon against the durable job id, so partial work
+     survives leaving the page, a refresh and a new browser session. Scoped to
+     one job at a time: two companies researching at once never mix. */
+
+  const LIVE_BADGE = {
+    pending:     ['Pending', '待生成'],
+    generating:  ['Generating…', '生成中…'],
+    partial:     ['Writing…', '生成中…'],
+    complete:    ['Complete', '已完成'],
+    unavailable: ['Limited evidence', '证据有限'],
+  };
+
+  let liveJobId = null;      // the job whose output is on screen
+  let liveTimer = null;
+  let liveSeq = 0;           // guards against a slow response for an old job
+
+  function relayoutLive() {
+    if (liveJobId) pollLive(liveJobId, liveSeq);
+  }
+
+  function liveSectionBody(sec) {
+    const en = sec.content_en || '';
+    const zh = sec.content_zh || '';
+    const l = getLang();
+    if (l === 'zh') return zh || en;
+    if (l === 'en') return en || zh;
+    return [en, zh].filter(Boolean).join('\n\n');
+  }
+
+  function renderLive(payload) {
+    const box = $('qr-live'); const body = $('qr-live-body');
+    if (!box || !body) return;
+    const secs = (payload && payload.sections) || [];
+    box.hidden = secs.length === 0;
+    if (!secs.length) { body.innerHTML = ''; return; }
+    const note = $('qr-live-note');
+    if (note) {
+      const done = secs.filter((x) => x.status === 'complete').length;
+      note.textContent = `${done} of ${secs.length} section(s) ready`;
+    }
+    body.innerHTML = secs.map((sec) => {
+      const [en, zh] = LIVE_BADGE[sec.status] || LIVE_BADGE.pending;
+      const title = getLang() === 'zh' ? (sec.section_title_zh || sec.section_title_en)
+                                       : (sec.section_title_en || sec.section_title_zh);
+      const evidence = sec.section_key === '_evidence';
+      const text = liveSectionBody(sec);
+      /* A section with no text yet still gets a row, so the reader can see it is
+         coming rather than wondering whether anything is happening. */
+      const inner = text
+        ? `<div class="qr-live-text">${md(text)}</div>`
+        : '<div class="qr-live-wait">Generating… 生成中…</div>';
+      return `<section class="qr-live-sec${evidence ? ' is-evidence' : ''}">
+        <h4>${esc(title || sec.section_key)}
+          <span class="qr-live-badge st-${esc(sec.status)}">${esc(en)}<span class="zh"> ${esc(zh)}</span></span>
+        </h4>${inner}</section>`;
+    }).join('');
+  }
+
+  async function pollLive(jobId, seq) {
+    if (seq !== liveSeq) return;
+    let payload = null;
+    try {
+      const r = await fetch(api(`/job/${encodeURIComponent(jobId)}/sections`));
+      payload = r.ok ? await r.json() : null;
+    } catch (e) { /* transient: keep what is on screen */ }
+    if (seq !== liveSeq) return;
+    if (payload) renderLive(payload);
+    const live = payload && ['queued', 'running'].includes(payload.status);
+    clearTimeout(liveTimer);
+    // Poll while the run is going; once it is finished the saved report takes over.
+    if (live) liveTimer = setTimeout(() => pollLive(jobId, seq), 2500);
+  }
+
+  /** Point the Live Research panel at one job — and only that job. */
+  function followLive(jobId) {
+    liveSeq += 1;
+    clearTimeout(liveTimer);
+    liveJobId = jobId || null;
+    const box = $('qr-live');
+    if (!jobId) { if (box) box.hidden = true; return; }
+    const body = $('qr-live-body');
+    if (body) body.innerHTML = '';        // never show the previous job's text
+    pollLive(jobId, liveSeq);
+  }
+
   /* ── Research Sessions ────────────────────────────────────────────────────
      The list is rendered from Neon, never from browser state, so a session
      survives navigation, a refresh, a closed browser and an engine restart.
@@ -629,6 +716,7 @@
     sessionSel = jobId;
     renderSessions();
     followSession(jobId);
+    followLive(jobId);
   }
 
   function wireSessions() {
@@ -771,6 +859,9 @@
     const l = getLang();
     document.querySelectorAll('#qr-lang button').forEach((b) =>
       b.classList.toggle('active', b.dataset.qrLang === l));
+    // Live sections are stored per language, so the panel follows the selector
+    // without re-running anything.
+    relayoutLive();
   }
 
   /* ── Existing-report lookup ──────────────────────────────────────────────
@@ -1196,6 +1287,7 @@
         // Show the run in Research Sessions immediately, and select it, so the
         // user can navigate away and still find it on the way back.
         refreshSessions().then(() => selectSession(jobId));
+        followLive(jobId);
       }
 
       while (true) {
