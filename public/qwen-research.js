@@ -331,7 +331,7 @@
         return r.json();
       });
       if (workspaceCompany !== company) setWorkspace(company);
-      current = { company, report: got.report };
+      current = { company, report: got.report, runUsage: got.run_usage || null };
       await renderReport();
     } catch (e) {
       current = null;
@@ -376,14 +376,28 @@
     $('qr-report-card').style.display = '';
     $('qr-report-title').textContent = `${r.company} — ${r.model_label || r.model || ''}`;
     const u = r.token_usage || {};
-    $('qr-meta').innerHTML = [
+    /* Cost comes from the JOB, calculated once at generation time. A report with
+       no job usage is left blank rather than priced today: runs from before the
+       instrumentation discarded their retrieval tokens, so any figure would be a
+       synthesis-only number wearing a full-run label. */
+    const ru = current.runUsage;
+    const tokens = ru ? ru.total_tokens : (u.total ?? null);
+    const meta = [
       ['Sources / 来源', (r.sources || []).length],
-      ['Input tokens / 输入', u.input ?? '—'],
-      ['Output tokens / 输出', u.output ?? '—'],
-      ['Total tokens / 合计', u.total ?? '—'],
-      ['Latency / 耗时', (r.latency_seconds ?? '—') + ' s'],
-      ['Researched / 研究时间', (r.timestamp || '').slice(0, 16).replace('T', ' ')],
-    ].map(([k, v]) => `<div><b>${esc(k)}</b>${esc(v)}</div>`).join('');
+      ['Searches / 检索次数', (r.search_queries || []).length || '—'],
+      ['Model / 模型', r.model_label || r.model || '—'],
+      ['Tokens / 令牌', tokens == null ? '—' : Number(tokens).toLocaleString()],
+    ];
+    if (ru) {
+      meta.push([ru.cost_estimated ? 'Est. AI Cost / 预估 AI 成本' : 'AI Cost / AI 成本',
+                 '$' + Number(ru.estimated_cost_usd).toFixed(4)]);
+    } else {
+      meta.push(['Est. AI Cost / 预估 AI 成本', 'Not available / 无数据']);
+    }
+    meta.push(['Latency / 耗时', (r.latency_seconds ?? '—') + ' s'],
+              ['Researched / 研究时间', (r.timestamp || '').slice(0, 16).replace('T', ' ')]);
+    $('qr-meta').innerHTML = meta
+      .map(([k, v]) => `<div><b>${esc(k)}</b>${esc(v)}</div>`).join('');
 
     const dm = r.decision_makers || [];
     $('qr-contacts').innerHTML = dm.length ? `

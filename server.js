@@ -949,6 +949,54 @@ async function reconcileOrphanJob(row) {
   return updated || { ...row, status: 'interrupted' };
 }
 
+/* THE ONE ACCOUNTING BOUNDARY for Qwen Account Research.
+
+   Every model call the engine actually made - each retrieval search and each
+   synthesis attempt - becomes one ai_usage_event under the EXISTING
+   account_research feature, priced by the central table with the model that
+   actually handled that call. Nothing else in this codebase turns Account
+   Research tokens into events; the job's own columns are a projection for
+   display and history.
+
+   Idempotent by construction: request_id is deterministic per (job, call) and
+   the table has a unique index with ON CONFLICT DO NOTHING. A retried callback,
+   a replay, or a retry-save therefore records nothing new - and retry-save
+   makes no model call at all, so there is nothing to record. */
+function recordResearchUsage(jobId, calls, meta = {}) {
+  const rows = Array.isArray(calls) ? calls : [];
+  let input = 0, output = 0, total = 0, cost = 0, estimated = false;
+  const detail = { retrieval: { calls: 0, input: 0, output: 0 },
+                   synthesis: { calls: 0, input: 0, output: 0 } };
+  rows.forEach((c, i) => {
+    const kind = c.kind === 'synthesis' ? 'synthesis' : 'retrieval';
+    const inTok = Number(c.input_tokens) || 0;
+    const outTok = Number(c.output_tokens) || 0;
+    const tot = Number(c.total_tokens) || (inTok + outTok);
+    input += inTok; output += outTok; total += tot;
+    detail[kind].calls += 1; detail[kind].input += inTok; detail[kind].output += outTok;
+    const priced = recordAiEvent({
+      feature: 'account_research',           // NOT a new top-level feature
+      sub_feature: kind,                     // retrieval | synthesis
+      provider: 'bailian',
+      model: c.model || meta.model || null,
+      input_tokens: inTok,
+      output_tokens: outTok,
+      total_tokens: tot,
+      status: (c.status && c.status !== 200) ? 'error' : 'success',
+      request_type: 'new_call',
+      request_id: `arq:${jobId}:${kind}:${i}`,   // deterministic -> idempotent
+      company_id: meta.companyId || null,
+      user_id: meta.userId || null,
+    });
+    // recordAiEvent returns { cost_usd, cost_saved_usd, reuse, cost_estimated }.
+    if (priced && typeof priced.cost_usd === 'number') cost += priced.cost_usd;
+    if (priced && priced.cost_estimated) estimated = true;
+  });
+  return { input_tokens: input, output_tokens: output, total_tokens: total,
+           estimated_cost_usd: cost, cost_estimated: estimated, detail,
+           calls: rows.length };
+}
+
 function sessionState(row) {
   const stale = row.stale === true;
   switch (row.status) {
@@ -1197,6 +1245,15 @@ app.post('/api/qwen-research/callback', express.json({ limit: '25mb' }), async (
         await jobsDb.failQwenJob(jobId, why);
         return res.status(422).json({ ok: false, error: why });
       }
+      /* Accounting runs HERE and only here. Priced with the model that handled
+         each call; the totals are then projected onto the job. */
+      try {
+        const u = recordResearchUsage(jobId, b.ai_usage, {
+          companyId: job && job.company_id, userId: b.created_by || 'engine',
+          model: b.model,
+        });
+        if (u.calls) await jobsDb.setQwenJobUsage(jobId, u);
+      } catch (e) { /* accounting must never fail a save */ }
       await jobsDb.completeQwenJob(jobId, saved.id, b.outcome);
       return res.json({ ok: true, report_id: saved.id, version: saved.version });
     }

@@ -1074,6 +1074,17 @@ async function initDb() {
   // How the account identity was established, for traceability when a key looks odd.
   await pool.query(`ALTER TABLE account_research_qwen_jobs
                       ADD COLUMN IF NOT EXISTS identity_source TEXT`);
+  /* Usage for the WHOLE run - retrieval plus synthesis - kept on the session for
+     display, audit and history. ai_usage_events remains the source of truth for
+     platform aggregation; these are a projection, never a second event stream.
+     The cost is stored AS CALCULATED AT GENERATION TIME so a later price change
+     cannot silently reprice history. */
+  for (const col of ['input_tokens INTEGER', 'output_tokens INTEGER',
+                     'total_tokens INTEGER', 'estimated_cost_usd NUMERIC(12,6)',
+                     'cost_estimated BOOLEAN', 'usage_detail JSONB']) {
+    await pool.query(`ALTER TABLE account_research_qwen_jobs
+                        ADD COLUMN IF NOT EXISTS ${col}`);
+  }
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_jobs_company
                       ON account_research_qwen_jobs(company_key)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_jobs_updated
@@ -4191,12 +4202,32 @@ async function getQwenReport(id) {
 /* The company's current report, or null. There is only ever one row, so this
    is a lookup rather than a "pick the newest" query. */
 async function getQwenReportForCompany(company) {
+  /* The run's accounting lives on the JOB that produced this report, not in the
+     record, because cost is calculated once at generation time and must not be
+     recomputed later at a different rate. Joined here so the report card can show
+     it without a second round trip. Older reports have no job row and simply
+     report no usage - which is correct: their retrieval tokens were discarded
+     before instrumentation and inventing a figure would be worse than none. */
   const rows = await q(`
-    SELECT id, research_data, version FROM account_research_qwen_reports
-     WHERE company_key = $1 LIMIT 1
+    SELECT r.id, r.research_data, r.version,
+           j.total_tokens, j.input_tokens, j.output_tokens,
+           j.estimated_cost_usd, j.cost_estimated, j.usage_detail
+      FROM account_research_qwen_reports r
+      LEFT JOIN LATERAL (
+        SELECT * FROM account_research_qwen_jobs
+         WHERE report_id = r.id ORDER BY completed_at DESC NULLS LAST LIMIT 1
+      ) j ON TRUE
+     WHERE r.company_key = $1 LIMIT 1
   `, [normalizeNameKey(String(company || ''))]);
   if (!rows.length) return null;
-  return { id: rows[0].id, report: rows[0].research_data, version: rows[0].version };
+  const x = rows[0];
+  return { id: x.id, report: x.research_data, version: x.version,
+           run_usage: x.total_tokens == null ? null : {
+             input_tokens: x.input_tokens, output_tokens: x.output_tokens,
+             total_tokens: x.total_tokens,
+             estimated_cost_usd: Number(x.estimated_cost_usd) || 0,
+             cost_estimated: x.cost_estimated !== false,
+             detail: x.usage_detail || {} } };
 }
 
 /* Existing-report detection is a boolean, not a version scan. */
@@ -4461,11 +4492,27 @@ async function clearQwenJobSections(jobId) {
   await q(`DELETE FROM account_research_qwen_job_sections WHERE job_id = $1`, [jobId]);
 }
 
+/* Store the run's usage on the job. Cost is computed by the caller with the
+   central pricing table and passed in already calculated. */
+async function setQwenJobUsage(jobId, u) {
+  const rows = await q(`
+    UPDATE account_research_qwen_jobs SET
+      input_tokens = $2, output_tokens = $3, total_tokens = $4,
+      estimated_cost_usd = $5, cost_estimated = $6, usage_detail = $7
+    WHERE job_id = $1 RETURNING *
+  `, [jobId, u.input_tokens || 0, u.output_tokens || 0, u.total_tokens || 0,
+      u.estimated_cost_usd || 0, u.cost_estimated !== false,
+      JSON.stringify(u.detail || {})]);
+  return rows[0] || null;
+}
+
 async function listRecentQwenJobs(limit = 25) {
   return await q(`
     SELECT job_id, company_name, company_key, website, model, job_type,
            status, stage, progress_percent, warnings, error, report_id,
            created_by, started_at, updated_at, completed_at,
+           input_tokens, output_tokens, total_tokens,
+           estimated_cost_usd, cost_estimated,
            (status IN ${JOB_LIVE}
             AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale,
            EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW()) - started_at)) AS elapsed_seconds
@@ -5012,6 +5059,7 @@ module.exports = {
   claimQwenJob, activeQwenJob, getQwenJob, latestQwenJob, updateQwenJob,
   completeQwenJob, failQwenJob, sweepStaleQwenJobs, listActiveQwenJobs,
   listRecentQwenJobs, isTerminalStatus, resolveIdentity, JOB_TERMINAL,
+  setQwenJobUsage,
   upsertQwenJobSection, listQwenJobSections, clearQwenJobSections, SECTION_STATES,
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
   logCompanyActivity, listCompanyActivity,
