@@ -916,6 +916,26 @@ app.get('/api/account-research/config', (req, res) => {
    A SECOND engine: nothing here reads or writes account_reports. */
 
 // Report library. Served from Neon, so it survives a restart of either app.
+/* One vocabulary for session state, derived server-side so every client agrees.
+
+   Recoverable degradation is NEVER reported as failure: a run that produced a
+   report is completed_with_limitations, not failed. `failed` and `synthesis_failed`
+   mean no report exists. */
+function sessionState(row) {
+  const stale = row.stale === true;
+  switch (row.status) {
+    case 'queued':   return 'queued';
+    case 'running':
+      if (stale) return 'interrupted';
+      return /synthes|model|generat/i.test(row.stage || '') ? 'generating' : 'researching';
+    case 'completed':                   return 'completed';
+    case 'completed_with_limitations':  return 'completed_with_limitations';
+    case 'synthesis_failed':            return 'synthesis_failed';
+    case 'interrupted':                 return 'interrupted';
+    default:                            return row.report_id ? 'completed' : 'failed';
+  }
+}
+
 app.get('/api/aresearch/reports', async (req, res) => {
   try {
     res.json(await qr.listReports(req.query.q));
@@ -1086,6 +1106,14 @@ app.post('/api/qwen-research/callback', express.json({ limit: '25mb' }), async (
       await jobsDb.failQwenJob(jobId, b.error || 'Research failed.');
       return res.json({ ok: true });           // the previous report is untouched
     }
+    /* The one genuinely fatal execution outcome: retrieval succeeded but no model
+       could synthesise. Kept distinct from 'failed' so the UI can offer "retry
+       synthesis" rather than implying the whole run has to be paid for again. */
+    if (b.event === 'synthesis_failed') {
+      await jobsDb.failQwenJob(jobId, b.error || 'Synthesis failed after all fallbacks.',
+                               'synthesis_failed');
+      return res.json({ ok: true });
+    }
     if (b.event === 'completed') {
       // ONLY a successful run is persisted, and only here.
       if (!b.record) return res.status(400).json({ error: 'record is required' });
@@ -1100,7 +1128,7 @@ app.post('/api/qwen-research/callback', express.json({ limit: '25mb' }), async (
         await jobsDb.failQwenJob(jobId, why);
         return res.status(422).json({ ok: false, error: why });
       }
-      await jobsDb.completeQwenJob(jobId, saved.id);
+      await jobsDb.completeQwenJob(jobId, saved.id, b.outcome);
       return res.json({ ok: true, report_id: saved.id, version: saved.version });
     }
     return res.status(400).json({ error: `Unknown event: ${b.event}` });
@@ -1167,6 +1195,20 @@ app.get('/api/aresearch/job-for-company', async (req, res) => {
       jobsDb.latestQwenJob(company),
     ]);
     res.json({ active: active || null, latest: latest || null });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* Research Sessions: everything running plus what recently finished.
+
+   Reads Neon, never the engine. That is what makes a session survive a
+   navigation, a refresh, a closed browser and an engine restart. The derived
+   `state` is computed here so the browser never has to infer it. */
+app.get('/api/aresearch/sessions', async (req, res) => {
+  try {
+    const rows = await jobsDb.listRecentQwenJobs(req.query.limit || 25);
+    res.json(rows.map((r) => ({ ...r, state: sessionState(r) })));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

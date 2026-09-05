@@ -481,9 +481,189 @@
       b.classList.toggle('active', b.dataset.qrTab === name));
     document.querySelectorAll('.qr-view').forEach((v) => { v.hidden = v.dataset.qrView !== name; });
     if (name === 'library') loadLibrary();
+    if (name === 'single') { wireSessions(); refreshSessions(); }
     // Rows pick their runs back up from Neon on every visit, so switching tabs
     // or refreshing does not lose sight of work that is still going.
     if (name === 'batch') reconnectBatchRows();
+  }
+
+
+  /* ── Research Sessions ────────────────────────────────────────────────────
+     The list is rendered from Neon, never from browser state, so a session
+     survives navigation, a refresh, a closed browser and an engine restart.
+     Selecting a session only READS it: nothing here can start a paid job. */
+
+  const SESSION_STATE = {
+    queued:                     ['Queued', '排队中', 'st-queued'],
+    researching:                ['Researching', '研究中', 'st-researching'],
+    generating:                 ['Generating', '生成中', 'st-generating'],
+    completed:                  ['Completed', '已完成', 'st-completed'],
+    completed_with_limitations: ['Completed with limitations', '已完成（有限制）', 'st-limited'],
+    synthesis_failed:           ['Synthesis failed', '生成失败', 'st-failed'],
+    interrupted:                ['Interrupted', '已中断', 'st-failed'],
+    failed:                     ['Failed', '失败', 'st-failed'],
+  };
+  const SESSION_LIVE = new Set(['queued', 'researching', 'generating']);
+  const SESSION_HAS_REPORT = new Set(['completed', 'completed_with_limitations']);
+
+  let sessions = [];
+  let sessionSel = null;         // job_id whose detail is on screen
+  let sessionTimer = null;
+  let sessionFollowing = null;   // job_id the follower loop is polling
+  let sessionsWired = false;
+
+  const SESSION_STAGE = {
+    queued: ['Queued', '排队中'], discover: ['Validating company', '识别公司'],
+    official: ['Reading official website', '读取官网'], listing: ['Listing lookup', '上市信息'],
+    queries: ['Planning research areas', '规划检索'], site: ['Reading official website', '读取官网'],
+    search: ['Searching research areas', '检索资料'], verify: ['Verifying sources', '核实来源'],
+    dedupe: ['Ranking sources', '排序来源'], evidence: ['Building evidence set', '构建证据'],
+    financial: ['Financial sourcing', '财务信息'], apollo: ['Contact enrichment', '联系人补充'],
+    contacts: ['Contact enrichment', '联系人补充'], quality: ['Assessing evidence', '评估证据'],
+    model: ['Generating research', '生成报告'], synthesis: ['Generating research', '生成报告'],
+    completed: ['Completed', '已完成'],
+  };
+
+  function sessionElapsed(s) {
+    const sec = s.elapsed_seconds != null
+      ? Number(s.elapsed_seconds)
+      : (Date.now() - new Date(s.started_at || Date.now()).getTime()) / 1000;
+    return fmtElapsed(sec) || '—';
+  }
+
+  function sessionStarted(s) {
+    const d = new Date(s.started_at || Date.now());
+    return Number.isNaN(d.getTime()) ? '—'
+      : d.toLocaleString([], { month: 'short', day: 'numeric',
+                               hour: '2-digit', minute: '2-digit' });
+  }
+
+  async function fetchSessions() {
+    try {
+      const r = await fetch(api('/sessions')).then((x) => x.json());
+      return Array.isArray(r) ? r : null;
+    } catch (e) {
+      return null;                  // transient: keep whatever is on screen
+    }
+  }
+
+  function renderSessions() {
+    const box = $('qr-sessions'); const list = $('qr-sess-list');
+    if (!box || !list) return;
+    box.hidden = sessions.length === 0;
+    const live = sessions.filter((x) => SESSION_LIVE.has(x.state)).length;
+    const count = $('qr-sess-count');
+    if (count) {
+      count.textContent = sessions.length
+        ? `${live} running · ${sessions.length} recent` : '';
+    }
+    list.innerHTML = sessions.map((x) => {
+      const [en, zh, cls] = SESSION_STATE[x.state] || SESSION_STATE.failed;
+      const [sen] = SESSION_STAGE[x.stage] || [x.stage || '—'];
+      const pct = SESSION_HAS_REPORT.has(x.state) ? 100 : (x.progress_percent || 0);
+      const host = (x.website || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
+      const co = esc(x.company_name || '');
+      const acts = SESSION_HAS_REPORT.has(x.state) ? `
+          <div class="qr-sess-actions">
+            <button data-qr-sess-view="${co}">View Report / 查看</button>
+            <button data-qr-sess-pdf="${co}">PDF</button>
+            <button data-qr-sess-regen="${co}" data-qr-sess-site="${esc(x.website || '')}">
+              Regenerate / 重新生成</button>
+          </div>` : '';
+      return `<li class="qr-sess-row${x.job_id === sessionSel ? ' is-selected' : ''}"
+                  data-qr-sess="${esc(x.job_id)}">
+        <div class="qr-sess-main">
+          <div class="qr-sess-co">${co}</div>
+          <div class="qr-sess-meta">${esc(sen)}${host ? ` · ${esc(host)}` : ''}
+            ${x.model ? ` · ${esc(x.model)}` : ''} · ${esc(sessionStarted(x))}
+            · ${esc(sessionElapsed(x))}</div>
+          ${acts}
+        </div>
+        <div class="qr-sess-pct">${pct}%</div>
+        <div class="qr-sess-state ${cls}">${esc(en)}<span class="i18n-zh"> ${esc(zh)}</span></div>
+      </li>`;
+    }).join('');
+  }
+
+  /* Poll only while something is live, and stop the moment nothing is. */
+  function scheduleSessions() {
+    clearTimeout(sessionTimer);
+    if (!sessions.some((x) => SESSION_LIVE.has(x.state))) return;
+    sessionTimer = setTimeout(refreshSessions, 3000);
+  }
+
+  async function refreshSessions() {
+    const rows = await fetchSessions();
+    if (rows) {
+      sessions = rows;
+      if (sessionSel && !sessions.some((x) => x.job_id === sessionSel)) sessionSel = null;
+      renderSessions();
+    }
+    scheduleSessions();
+  }
+
+  /* Follow one session's detailed progress. Reads the engine while it still
+     remembers the job, and falls back to the durable row when it does not. */
+  async function followSession(jobId) {
+    if (sessionFollowing === jobId) return;
+    sessionFollowing = jobId;
+    const row = sessions.find((x) => x.job_id === jobId);
+    if (!row) return;
+    const startedAt = new Date(row.started_at || Date.now()).getTime();
+    renderProgress(jobRowToSnapshot(row), startedAt);
+    while (sessionFollowing === jobId) {
+      const live = sessions.find((x) => x.job_id === jobId);
+      if (!live || !SESSION_LIVE.has(live.state)) {
+        renderProgress(jobRowToSnapshot(live || row), startedAt);
+        break;
+      }
+      const snap = await fetch(api(`/job/${encodeURIComponent(jobId)}`))
+        .then((r) => r.json()).catch(() => null);
+      if (sessionFollowing !== jobId) return;
+      renderProgress(snap && snap.status ? snap : jobRowToSnapshot(live), startedAt);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+
+  function selectSession(jobId) {
+    sessionSel = jobId;
+    renderSessions();
+    followSession(jobId);
+  }
+
+  function wireSessions() {
+    if (sessionsWired) return;
+    const list = $('qr-sess-list');
+    if (!list) return;
+    sessionsWired = true;
+    list.addEventListener('click', (e) => {
+      const view = e.target.closest('[data-qr-sess-view]');
+      if (view) { e.stopPropagation(); return openReport(view.dataset.qrSessView, true); }
+      const pdf = e.target.closest('[data-qr-sess-pdf]');
+      if (pdf) { e.stopPropagation(); return openPdf(pdf.dataset.qrSessPdf); }
+      const regen = e.target.closest('[data-qr-sess-regen]');
+      if (regen) {
+        e.stopPropagation();
+        // startOrAttachJob attaches to a live run rather than starting a second
+        // one; duplicate protection is enforced again in Neon behind it.
+        return regenerateSession(regen.dataset.qrSessRegen, regen.dataset.qrSessSite);
+      }
+      const row = e.target.closest('[data-qr-sess]');
+      if (row) selectSession(row.dataset.qrSess);
+    });
+  }
+
+  async function regenerateSession(company, website) {
+    try {
+      const { jobId, attached } = await startOrAttachJob(company, website);
+      msg('qr-single-msg', attached
+        ? `Already researching ${esc(company)} — reconnected. 已有研究进行中，已重新连接。`
+        : `Research started for ${esc(company)}. 已开始研究。`, 'info');
+      await refreshSessions();
+      selectSession(jobId);
+    } catch (e) {
+      msg('qr-single-msg', esc(e.message), 'err');
+    }
   }
 
   window.qwenResearchInit = async function init() {
@@ -491,7 +671,12 @@
        banner and the Model field were frozen at whatever the first page load saw,
        so access being granted — or the engine coming back — left a stale warning
        on screen until a full refresh. One small GET; no model is called. */
-    if (window.__qrReady) { checkModels(); loadLibrary(); return; }
+    /* Sessions are re-read from Neon on EVERY entry to the tab, including the
+       early return below. That is the whole point: leaving and coming back must
+       not lose sight of a run, and it must not start a second one either. */
+    if (window.__qrReady) {
+      checkModels(); loadLibrary(); wireSessions(); refreshSessions(); return;
+    }
     window.__qrReady = true;
 
     document.querySelectorAll('.qr-subtab').forEach((b) =>
@@ -564,13 +749,9 @@
       if (b.dataset.qrLk === 'regen')  return startResearch(true);
     });
 
-    // "Research anyway" after a needs-review outcome: the same run, with the
-    // engine's own force flag. Nothing else about the request changes.
-    $('qr-single-msg').addEventListener('click', (e) => {
-      if (!e.target.closest('[data-qr-force]')) return;
-      forceNextRun = true;
-      startResearch(true);
-    });
+    /* There is deliberately no "Research anyway" control. Evidence quality
+       annotates a report; it never blocks one. See the best-effort continuation
+       invariant in the engine's CLAUDE.md. */
     $('qr-regen').addEventListener('click', () => {
       if (!current) return;
       $('qr-company').value = current.company;
@@ -960,10 +1141,13 @@
 
   /* When the engine no longer knows the job — it restarted — the durable row is
      still enough to draw the panel, so the user sees state rather than nothing. */
+  const DONE_STATUSES = ['completed', 'completed_with_limitations'];
+  const DEAD_STATUSES = ['failed', 'interrupted', 'synthesis_failed'];
+
   function jobRowToSnapshot(row) {
     return {
-      status: row.status === 'completed' ? 'done'
-            : (row.status === 'failed' || row.status === 'interrupted') ? 'error' : 'running',
+      status: DONE_STATUSES.includes(row.status) ? 'done'
+            : DEAD_STATUSES.includes(row.status) ? 'error' : 'running',
       phase: row.stage || 'retrieval',
       message: row.error || '',
       stages: (row.warnings || []).map((w, i) => ({ at: i, stage: 'contacts', message: w })),
@@ -1008,12 +1192,14 @@
         const start = await fetch(api('/research'), {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ company, website: $('qr-website').value.trim(),
-                                 model: $('qr-model').value, force: !!forceNextRun }),
+                                 model: $('qr-model').value }),
         }).then((r) => r.json());
-        forceNextRun = false;
         if (start.error) throw new Error(start.error);
         if (!start.job_id) throw new Error('The research service did not return a job id.');
         jobId = start.job_id;
+        // Show the run in Research Sessions immediately, and select it, so the
+        // user can navigate away and still find it on the way back.
+        refreshSessions().then(() => selectSession(jobId));
       }
 
       while (true) {
@@ -1029,23 +1215,42 @@
       if (last.status === 'error') {
         throw new Error(last.message || modelErrorOf(last) || 'Research failed.');
       }
+      /* needs_review no longer exists: thin evidence reaches synthesis in
+         zero-grounding mode and the run completes with limitations. This branch
+         only catches an older engine still reporting the old state, and it never
+         offers "Research anyway" - researching anyway IS the behaviour now. */
       if (last.status === 'needs_review') {
-        // Not a failure and not a success: retrieval was too thin to synthesise,
-        // and NO tokens were spent. The existing report, if any, is untouched.
         const reasons = reviewReasons(last).map((r) => `<li>${esc(r)}</li>`).join('');
         msg('qr-single-msg',
-            '<strong>Retrieval incomplete — nothing was generated.</strong>'
-            + '<br><span>检索证据不足，未生成报告。</span>'
+            '<strong>Limited verified public evidence was available for this company.</strong>'
+            + '<br><span>该公司可验证的公开信息有限，部分章节可能不完整。</span>'
             + `<ul style="margin:6px 0 0 18px;">${reasons}</ul>`
             + (hadReport ? '<div style="margin-top:6px;">The existing report is unchanged. '
-                           + '现有报告未被修改。</div>' : '')
-            + '<button data-qr-force="1">Research anyway / 仍然生成</button>', 'warn');
+                           + '现有报告未被修改。</div>' : ''), 'warn');
+        return;
+      }
+      if (last.status === 'synthesis_failed') {
+        // The one genuinely fatal outcome. Retrieval is preserved on the engine.
+        msg('qr-single-msg',
+            '<strong>Report generation failed.</strong> 报告生成失败。<br>'
+            + `<span>${esc(last.message || 'Every synthesis model failed.')}</span>`
+            + '<div style="margin-top:6px;">Research evidence was retrieved and is '
+            + 'preserved. 检索到的证据已保留。</div>', 'err');
         return;
       }
       const mErr = modelErrorOf(last);
       if (mErr) throw new Error(mErr);
 
-      msg('qr-single-msg', `Research complete. 研究完成。 ${esc(progressSummary(last))}`, 'info');
+      const limited = !!(last.zero_grounding
+                         || (last.quality && last.quality.degraded)
+                         || last.outcome === 'completed_with_limitations');
+      msg('qr-single-msg', limited
+        ? '<strong>Completed with limitations.</strong> 已完成（有限制）。<br>'
+          + '<span>Limited verified public evidence was available for this company. '
+          + 'Some sections may therefore be less complete. '
+          + '该公司可验证的公开信息有限，部分章节可能不完整。</span>'
+        : `Research complete. 研究完成。 ${esc(progressSummary(last))}`,
+        limited ? 'warn' : 'info');
       await loadLibrary();
       await openReport(company, true);
     } catch (e) {
@@ -1072,7 +1277,6 @@
     return null;
   }
 
-  let forceNextRun = false;
 
   /* ── Batch ─────────────────────────────────────────────────────────────
      Rows are keyed by company and updated in place. A row being edited is not

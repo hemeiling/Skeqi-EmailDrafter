@@ -4258,13 +4258,18 @@ async function updateQwenJob(jobId, { status, stage, progress, warning }) {
   return rows[0] || null;
 }
 
-async function completeQwenJob(jobId, reportId) {
+/* `outcome` distinguishes a clean run from one that produced a report despite a
+   degraded stage. Both are successes and both have a report behind them - see
+   the best-effort continuation invariant in the engine's CLAUDE.md. */
+async function completeQwenJob(jobId, reportId, outcome = 'completed') {
+  const status = outcome === 'completed_with_limitations'
+    ? 'completed_with_limitations' : 'completed';
   const rows = await q(`
     UPDATE account_research_qwen_jobs
-    SET status='completed', stage='completed', progress_percent=100,
+    SET status=$3, stage='completed', progress_percent=100,
         report_id=$2, error=NULL, completed_at=NOW(), updated_at=NOW()
     WHERE job_id=$1 RETURNING *
-  `, [jobId, reportId || null]);
+  `, [jobId, reportId || null, status]);
   return rows[0] || null;
 }
 
@@ -4288,6 +4293,29 @@ async function sweepStaleQwenJobs() {
     RETURNING job_id, company_name
   `);
   return rows;
+}
+
+/* Sessions view: everything running plus what recently finished.
+
+   Deliberately one query against Neon and not the engine. A session must stay
+   visible across a navigation, a refresh, a closed browser and an engine
+   restart, and only the database survives all four. `stale` is computed here so
+   the caller can show a run whose worker has died without waiting for the
+   sweeper to relabel it. */
+async function listRecentQwenJobs(limit = 25) {
+  return await q(`
+    SELECT job_id, company_name, company_key, website, model, job_type,
+           status, stage, progress_percent, warnings, error, report_id,
+           created_by, started_at, updated_at, completed_at,
+           (status IN ${JOB_LIVE}
+            AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale,
+           EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW()) - started_at)) AS elapsed_seconds
+    FROM account_research_qwen_jobs
+    WHERE status IN ${JOB_LIVE}
+       OR completed_at > NOW() - INTERVAL '24 hours'
+    ORDER BY (status IN ${JOB_LIVE}) DESC, started_at DESC
+    LIMIT $1
+  `, [Math.max(1, Math.min(100, Number(limit) || 25))]);
 }
 
 async function listActiveQwenJobs() {
@@ -4824,6 +4852,7 @@ module.exports = {
   contactsForResearch,
   claimQwenJob, activeQwenJob, getQwenJob, latestQwenJob, updateQwenJob,
   completeQwenJob, failQwenJob, sweepStaleQwenJobs, listActiveQwenJobs,
+  listRecentQwenJobs,
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
   logCompanyActivity, listCompanyActivity,
   logCrmActivity, listCrmActivity, activeUsers,
