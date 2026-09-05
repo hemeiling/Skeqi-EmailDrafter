@@ -750,10 +750,19 @@
                action: `<button data-qr-sess-retry="${esc(x.job_id)}">Retry Save / 重新保存</button>` };
     }
     if (SESSION_NEEDS_ATTENTION.has(x.state)) {
-      const label = x.state === 'interrupted' ? 'Interrupted' : 'Failed';
-      return { state: `${label}${pct == null ? '' : ' at ' + pct + '%'}`,
+      /* Name the state truthfully and offer the action it actually needs. An
+         interrupted run that still has a saved report is a stale row, not work
+         to pay for again, so it is never offered Regenerate. */
+      const LABEL = { interrupted: 'Interrupted', synthesis_failed: 'Synthesis failed',
+                      failed: 'Failed' };
+      const stale = x.state === 'interrupted' && !!x.report_id;
+      return { state: stale ? 'Interrupted · report saved' : (LABEL[x.state] || 'Failed'),
                ctx: esc(stageEn),
-               action: `<button data-qr-sess-regen="${co}" data-qr-sess-site="${site}">Regenerate / 重新生成</button>` };
+               action: stale
+                 ? '<button data-qr-sess-reconcile disabled title="A saved report exists for'
+                   + ' this run; its row needs reconciling, not regenerating.">Reconcile /'
+                   + ' 待校正</button>'
+                 : `<button data-qr-sess-regen="${co}" data-qr-sess-site="${site}">Regenerate / 重新生成</button>` };
     }
     return { state: 'Completed', ctx: esc(sessionElapsed(x)), action: '' };
   }
@@ -1401,11 +1410,28 @@
     $('qr-prog-pct').textContent = `${shownPct}%`;
 
     const now = $('qr-prog-now');
-    if (job.status === 'done') {
+    /* Say what actually happened. A terminal row carries its durable state, so
+       an interrupted run no longer claims the model failed - for the Sept 5
+       jobs the model had already written a full report - and the stage is
+       reported as where execution last checked in, not as the cause. */
+    const copy = job.state
+      ? JobSnapshot.terminalCopy(job.state, job.has_artifact) : null;
+    if (copy) {
+      const stage = JobSnapshot.lastStageLabel(job.phase);
+      now.innerHTML = `${copy.tone === 'ok' ? '✓ ' : ''}${esc(copy.en)}.`
+        + `<span class="zh">${esc(copy.zh)}。</span>`
+        + (stage && copy.tone !== 'ok'
+          ? `<span class="zh">Last recorded stage: ${esc(stage.en)}`
+            + ` / 最后记录阶段：${esc(stage.zh)}</span>`
+          : '');
+    } else if (job.status === 'done') {
       now.innerHTML = '✓ Research completed<span class="zh">研究完成</span>';
     } else if (job.status === 'error') {
-      now.innerHTML = `Research failed during ${esc(job.phase || 'the run')}.`
-        + '<span class="zh">研究运行失败。以下步骤保留以便排查。</span>';
+      const stage = JobSnapshot.lastStageLabel(job.phase);
+      now.innerHTML = 'Research did not finish.'
+        + '<span class="zh">研究未完成。</span>'
+        + (stage ? `<span class="zh">Last recorded stage: ${esc(stage.en)}`
+                   + ` / 最后记录阶段：${esc(stage.zh)}</span>` : '');
     } else if (job.status === 'needs_review') {
       now.innerHTML = 'Retrieval incomplete — needs review<span class="zh">检索不完整，需人工确认</span>';
     } else if (active) {

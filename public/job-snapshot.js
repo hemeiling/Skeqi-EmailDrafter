@@ -29,8 +29,84 @@
   ];
 
   const DONE_STATUSES = ['completed', 'completed_with_limitations'];
-  const DEAD_STATUSES = ['failed', 'interrupted', 'synthesis_failed'];
+  const DEAD_STATUSES = ['failed', 'interrupted', 'synthesis_failed', 'save_failed'];
   const LIVE_STATUSES = ['queued', 'running'];
+
+  /* WHY a run stopped, kept apart from the coarse done/error/running the
+     renderer needs for layout. Collapsing these lost the only thing the user
+     actually needed: `interrupted` means execution was lost, and saying
+     "Research failed during model" about it is false in both halves - the model
+     did not fail, and for the reconciled jobs it had already written a full
+     report. `save_failed` was missing from DEAD_STATUSES entirely, so a run
+     whose report could not be saved rendered as still running. */
+  const TERMINAL_COPY = {
+    completed: {
+      en: 'Research completed', zh: '研究完成', tone: 'ok', action: 'open' },
+    completed_with_limitations: {
+      en: 'Research completed with evidence limitations',
+      zh: '研究完成，证据有限', tone: 'ok', action: 'open' },
+    interrupted: {
+      en: 'Research execution was interrupted',
+      zh: '研究执行被中断', tone: 'warn', action: 'regenerate' },
+    synthesis_failed: {
+      en: 'Research evidence was collected, but final synthesis failed',
+      zh: '已收集研究证据，但最终生成失败', tone: 'warn', action: 'regenerate' },
+    save_failed: {
+      en: 'Research was generated, but the report could not be saved',
+      zh: '研究已生成，但报告保存失败', tone: 'warn', action: 'retry-save' },
+    failed: {
+      en: 'Research failed', zh: '研究失败', tone: 'bad', action: 'regenerate' },
+  };
+
+  /** What a terminal row should SAY, and what it should offer.
+   *
+   *  `hasArtifact` is the caller's answer to "does a saved report actually
+   *  resolve for this row" - an interrupted run that still has one is a stale
+   *  row to reconcile, not work to pay for again.
+   *
+   *  Synthesis-only retry is deliberately absent. The evidence package is
+   *  written into research_data only when a report is saved, so a run whose
+   *  synthesis failed leaves nothing to re-synthesise from; offering it would
+   *  silently re-run retrieval and charge for it. Regenerate is the truthful
+   *  action until evidence is persisted independently. */
+  function terminalCopy(status, hasArtifact) {
+    const base = TERMINAL_COPY[status];
+    if (!base) return null;
+    if (status === 'interrupted' && hasArtifact) {
+      return Object.assign({}, base, {
+        en: 'Research execution was interrupted; a saved report exists',
+        zh: '研究执行被中断；已有保存的报告', action: 'reconcile' });
+    }
+    return base;
+  }
+
+  /** Where execution last reported progress. Not a cause, and never phrased as
+   *  one: the stage a row stopped at is where the engine last checked in. */
+  function lastStageLabel(stage) {
+    return STAGE_LABELS[stage] || null;
+  }
+
+  const STAGE_LABELS = {
+    queued: { en: 'Queued', zh: '排队中' },
+    discover: { en: 'Validating company', zh: '确认公司' },
+    official: { en: 'Reading the official site', zh: '读取官网' },
+    listing: { en: 'Checking listing status', zh: '核查上市状态' },
+    queries: { en: 'Planning searches', zh: '规划检索' },
+    site: { en: 'Reading the official site', zh: '读取官网' },
+    search: { en: 'Searching the web', zh: '网络检索' },
+    verify: { en: 'Verifying sources', zh: '验证来源' },
+    financial: { en: 'Financial lookup', zh: '财务检索' },
+    apollo: { en: 'Contact enrichment', zh: '联系人补充' },
+    contacts: { en: 'Contact enrichment', zh: '联系人补充' },
+    dedupe: { en: 'Ranking sources', zh: '排序来源' },
+    evidence: { en: 'Building evidence set', zh: '构建证据' },
+    quality: { en: 'Assessing evidence', zh: '评估证据' },
+    model: { en: 'Generating research', zh: '生成研究报告' },
+    synthesis: { en: 'Generating research', zh: '生成研究报告' },
+    pdf: { en: 'Generating PDF', zh: '生成PDF' },
+    save: { en: 'Saving report', zh: '保存报告' },
+    completed: { en: 'Completed', zh: '已完成' },
+  };
 
   /** Engine stages strictly BEFORE the persisted one — those are finished.
    *  The persisted stage itself is left unmarked so it renders as the ACTIVE
@@ -50,6 +126,11 @@
       : Math.max(0, Math.min(100, Number(row.progress_percent) || 0));
     return {
       status: done ? 'done' : dead ? 'error' : 'running',
+      // The DURABLE status, kept beside the coarse one. `status` drives layout;
+      // `state` is what the run actually ended as, and is what the headline and
+      // the recommended action are derived from.
+      state: row.status || null,
+      has_artifact: !!row.report_id,
       phase: row.stage || 'retrieval',
       message: row.error || '',
       // Reconstructed from the persisted stage, NOT from warnings.
@@ -100,6 +181,7 @@
 
   return {
     ENGINE_STAGE_ORDER, DONE_STATUSES, DEAD_STATUSES, LIVE_STATUSES,
+    TERMINAL_COPY, STAGE_LABELS, terminalCopy, lastStageLabel,
     stagesUpTo, jobRowToSnapshot, stripLeadingTitle, normalizeHeading,
   };
 }));

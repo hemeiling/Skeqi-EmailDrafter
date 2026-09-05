@@ -154,6 +154,83 @@ ck('missing title is safe', J.stripLeadingTitle('## Sources\nbody', '') === '## 
 ck('heading-only content collapses to empty',
    J.stripLeadingTitle('## Sources', 'Sources') === '');
 
+console.log('\n[N] Terminal states say what actually happened\n');
+
+/* The defect: every non-done terminal state rendered as
+   "Research failed during model." For the Sept 5 jobs that was false twice
+   over - the model had already written a full report, and the run was lost to
+   an engine restart, not to a model failure. */
+const EXPECT = {
+  completed:                  'Research completed',
+  completed_with_limitations: 'Research completed with evidence limitations',
+  interrupted:                'Research execution was interrupted',
+  synthesis_failed:           'Research evidence was collected, but final synthesis failed',
+  save_failed:                'Research was generated, but the report could not be saved',
+  failed:                     'Research failed',
+};
+Object.keys(EXPECT).forEach((st) => {
+  const c = J.terminalCopy(st, false);
+  ck(st + ' has its own wording', !!c && c.en === EXPECT[st], c && c.en);
+  ck(st + ' has Chinese wording', !!c && !!c.zh && c.zh.length > 3);
+});
+
+ck('interrupted never blames the model',
+   !/model|synthesis|failed/i.test(J.terminalCopy('interrupted', false).en),
+   J.terminalCopy('interrupted', false).en);
+ck('only `failed` states a bare research failure',
+   J.terminalCopy('failed', false).en === 'Research failed');
+ck('save_failed does not claim the research failed',
+   /was generated/.test(J.terminalCopy('save_failed', false).en));
+ck('synthesis_failed credits the evidence that was collected',
+   /evidence was collected/.test(J.terminalCopy('synthesis_failed', false).en));
+
+console.log('\n[N+1] Recommended action is state-specific\n');
+const ACT = {
+  interrupted: 'regenerate', synthesis_failed: 'regenerate',
+  save_failed: 'retry-save', failed: 'regenerate',
+  completed: 'open', completed_with_limitations: 'open',
+};
+Object.keys(ACT).forEach((st) => {
+  ck(st + ' -> ' + ACT[st],
+     J.terminalCopy(st, false).action === ACT[st], J.terminalCopy(st, false).action);
+});
+ck('interrupted WITH a saved artifact -> reconcile, not regenerate',
+   J.terminalCopy('interrupted', true).action === 'reconcile',
+   J.terminalCopy('interrupted', true).action);
+ck('and it says a saved report exists',
+   /a saved report exists/.test(J.terminalCopy('interrupted', true).en));
+ck('synthesis-only retry is never offered',
+   !Object.keys(ACT).some((st) => /synth/.test(J.terminalCopy(st, false).action)));
+ck('an unknown status yields no copy at all', J.terminalCopy('nonsense', false) === null);
+
+console.log('\n[N+2] Stage is a location, not a cause\n');
+ck('model reads as Generating research',
+   J.lastStageLabel('model').en === 'Generating research', J.lastStageLabel('model').en);
+ck('synthesis reads the same', J.lastStageLabel('synthesis').en === 'Generating research');
+ck('site reads as reading the official site',
+   /official site/i.test(J.lastStageLabel('site').en));
+ck('no stage label contains the word failed',
+   !Object.keys(J.STAGE_LABELS).some((k) => /fail/i.test(J.STAGE_LABELS[k].en)));
+ck('an unknown stage yields no label', J.lastStageLabel('nope') === null);
+
+console.log('\n[N+3] The durable state survives the snapshot\n');
+const ROW = (st) => ({ job_id: 'j', company_name: 'X', status: st, stage: 'model',
+                       progress_percent: 85, warnings: [], model: 'm' });
+ck('save_failed no longer renders as a running job',
+   J.jobRowToSnapshot(ROW('save_failed')).status === 'error',
+   J.jobRowToSnapshot(ROW('save_failed')).status);
+ck('save_failed is in DEAD_STATUSES', J.DEAD_STATUSES.indexOf('save_failed') >= 0);
+Object.keys(EXPECT).forEach((st) => {
+  ck(st + ' is carried through as `state`', J.jobRowToSnapshot(ROW(st)).state === st);
+});
+ck('has_artifact is false without a report_id',
+   J.jobRowToSnapshot(ROW('interrupted')).has_artifact === false);
+ck('has_artifact is true with one',
+   J.jobRowToSnapshot(Object.assign(ROW('interrupted'), { report_id: 'r1' }))
+     .has_artifact === true);
+ck('a live row carries no terminal copy',
+   J.terminalCopy(J.jobRowToSnapshot(ROW('running')).state, false) === null);
+
 console.log('\n' + pass + ' passed, ' + fail.length + ' failed');
 fail.forEach((f) => console.log('  FAILED: ' + f));
 process.exit(fail.length ? 1 : 0);
