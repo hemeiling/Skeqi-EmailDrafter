@@ -34,7 +34,13 @@
      must never fall back to the batch table's selection, which the Reports tab
      does not show. */
   const librarySelection = new Set();
+  /* The workspace is one account at a time. `current` used to be a bare global
+     last-report cache keyed to nothing, so selecting Toyota repainted the session
+     list and progress while Apple's report stayed mounted underneath with nothing
+     saying whose it was. It is now only ever read through workspaceCompany. */
   let current = null;                  // { company, report }
+  let workspaceCompany = null;         // the account the whole workspace shows
+  let reportMode = 'current';          // 'current' | 'previous'
   let batchItems = [];
   let batchRows = [];
 
@@ -324,6 +330,7 @@
         if (!r.ok) throw new Error(`The report service returned ${r.status}.`);
         return r.json();
       });
+      if (workspaceCompany !== company) setWorkspace(company);
       current = { company, report: got.report };
       await renderReport();
     } catch (e) {
@@ -343,8 +350,27 @@
 
   /* The language view is rendered server-side from the stored record, so the
      selection logic lives in one place instead of being mirrored here. */
+  /* Switching accounts tears the workspace down before anything is rebuilt, so a
+     stale report can never survive the switch. */
+  function setWorkspace(company) {
+    if (workspaceCompany === company) return;
+    workspaceCompany = company || null;
+    current = null;
+    reportMode = 'current';
+    if ($('qr-report-card')) $('qr-report-card').style.display = 'none';
+    if ($('qr-prev-banner')) $('qr-prev-banner').hidden = true;
+    if ($('qr-prevrow')) $('qr-prevrow').hidden = true;
+  }
+
   async function renderReport() {
     if (!current) { $('qr-report-card').style.display = 'none'; return; }
+    // A report belongs to an account. If the workspace has moved on, it is not ours.
+    if (workspaceCompany && current.company !== workspaceCompany) {
+      $('qr-report-card').style.display = 'none';
+      return;
+    }
+    const prev = $('qr-prev-banner');
+    if (prev) prev.hidden = reportMode !== 'previous';
     const r = current.report;
     $('qr-report-card').style.display = '';
     $('qr-report-title').textContent = `${r.company} — ${r.model_label || r.model || ''}`;
@@ -489,91 +515,11 @@
 
 
 
-  /* ── Live incremental research output ────────────────────────────────────
-     Sections are read from Neon against the durable job id, so partial work
-     survives leaving the page, a refresh and a new browser session. Scoped to
-     one job at a time: two companies researching at once never mix. */
-
-  const LIVE_BADGE = {
-    pending:     ['Pending', '待生成'],
-    generating:  ['Generating…', '生成中…'],
-    partial:     ['Writing…', '生成中…'],
-    complete:    ['Complete', '已完成'],
-    unavailable: ['Limited evidence', '证据有限'],
-  };
-
-  let liveJobId = null;      // the job whose output is on screen
-  let liveTimer = null;
-  let liveSeq = 0;           // guards against a slow response for an old job
-
-  function relayoutLive() {
-    if (liveJobId) pollLive(liveJobId, liveSeq);
-  }
-
-  function liveSectionBody(sec) {
-    const en = sec.content_en || '';
-    const zh = sec.content_zh || '';
-    const l = getLang();
-    if (l === 'zh') return zh || en;
-    if (l === 'en') return en || zh;
-    return [en, zh].filter(Boolean).join('\n\n');
-  }
-
-  function renderLive(payload) {
-    const box = $('qr-live'); const body = $('qr-live-body');
-    if (!box || !body) return;
-    const secs = (payload && payload.sections) || [];
-    box.hidden = secs.length === 0;
-    if (!secs.length) { body.innerHTML = ''; return; }
-    const note = $('qr-live-note');
-    if (note) {
-      const done = secs.filter((x) => x.status === 'complete').length;
-      note.textContent = `${done} of ${secs.length} section(s) ready`;
-    }
-    body.innerHTML = secs.map((sec) => {
-      const [en, zh] = LIVE_BADGE[sec.status] || LIVE_BADGE.pending;
-      const title = getLang() === 'zh' ? (sec.section_title_zh || sec.section_title_en)
-                                       : (sec.section_title_en || sec.section_title_zh);
-      const evidence = sec.section_key === '_evidence';
-      const text = liveSectionBody(sec);
-      /* A section with no text yet still gets a row, so the reader can see it is
-         coming rather than wondering whether anything is happening. */
-      const inner = text
-        ? `<div class="qr-live-text">${md(text)}</div>`
-        : '<div class="qr-live-wait">Generating… 生成中…</div>';
-      return `<section class="qr-live-sec${evidence ? ' is-evidence' : ''}">
-        <h4>${esc(title || sec.section_key)}
-          <span class="qr-live-badge st-${esc(sec.status)}">${esc(en)}<span class="zh"> ${esc(zh)}</span></span>
-        </h4>${inner}</section>`;
-    }).join('');
-  }
-
-  async function pollLive(jobId, seq) {
-    if (seq !== liveSeq) return;
-    let payload = null;
-    try {
-      const r = await fetch(api(`/job/${encodeURIComponent(jobId)}/sections`));
-      payload = r.ok ? await r.json() : null;
-    } catch (e) { /* transient: keep what is on screen */ }
-    if (seq !== liveSeq) return;
-    if (payload) renderLive(payload);
-    const live = payload && ['queued', 'running'].includes(payload.status);
-    clearTimeout(liveTimer);
-    // Poll while the run is going; once it is finished the saved report takes over.
-    if (live) liveTimer = setTimeout(() => pollLive(jobId, seq), 2500);
-  }
-
-  /** Point the Live Research panel at one job — and only that job. */
-  function followLive(jobId) {
-    liveSeq += 1;
-    clearTimeout(liveTimer);
-    liveJobId = jobId || null;
-    const box = $('qr-live');
-    if (!jobId) { if (box) box.hidden = true; return; }
-    const body = $('qr-live-body');
-    if (body) body.innerHTML = '';        // never show the previous job's text
-    pollLive(jobId, liveSeq);
-  }
+  /* Live Research was removed from the UI: sections only began appearing during
+     final generation, which is too late to be worth the complexity. The BACKEND
+     is intact and dormant - the engine still publishes sections, the CRM still
+     stores and serves them - so this can be revisited without rebuilding it.
+     Nothing here polls /job/:id/sections any more. */
 
   /* ── Research Sessions ────────────────────────────────────────────────────
      The list is rendered from Neon, never from browser state, so a session
@@ -598,6 +544,9 @@
   let sessionTimer = null;
   let sessionFollowing = null;   // job_id the follower loop is polling
   let sessionsWired = false;
+  let sessionsExpanded = false;        // history: 5 by default, HISTORY_MAX expanded
+  const HISTORY_SHORT = 5;
+  const HISTORY_MAX = 25;
 
   const SESSION_STAGE = {
     queued: ['Queued', '排队中'], discover: ['Validating company', '识别公司'],
@@ -638,26 +587,56 @@
     const box = $('qr-sessions'); const list = $('qr-sess-list');
     if (!box || !list) return;
     box.hidden = sessions.length === 0;
-    const live = sessions.filter((x) => SESSION_LIVE.has(x.state)).length;
+    /* Every active session is always shown - those are the ones the user is
+       waiting on. History is bounded so the panel stops eating the page. This is
+       presentation only: nothing in Neon is filtered, deleted or altered. */
+    const active = sessions.filter((x) => SESSION_LIVE.has(x.state));
+    const history = sessions.filter((x) => !SESSION_LIVE.has(x.state));
+    const shown = sessionsExpanded ? HISTORY_MAX : HISTORY_SHORT;
+    const visibleHistory = history.slice(0, shown);
     const count = $('qr-sess-count');
     if (count) {
       count.textContent = sessions.length
-        ? `${live} running · ${sessions.length} recent` : '';
+        ? `${active.length} running · ${history.length} previous` : '';
     }
-    list.innerHTML = sessions.map((x) => {
+    const toggle = $('qr-sess-toggle');
+    if (toggle) {
+      const more = history.length > HISTORY_SHORT;
+      toggle.hidden = !more;
+      toggle.innerHTML = sessionsExpanded
+        ? 'Show Less <span class="i18n-zh">收起</span>'
+        : `Show More <span class="i18n-zh">展开更多</span> (${history.length - HISTORY_SHORT})`;
+    }
+    const rows = active.concat(visibleHistory);
+    list.innerHTML = rows.map((x, idx) => {
       const [en, zh, cls] = SESSION_STATE[x.state] || SESSION_STATE.failed;
       const [sen] = SESSION_STAGE[x.stage] || [x.stage || '—'];
       const pct = SESSION_HAS_REPORT.has(x.state) ? 100 : (x.progress_percent || 0);
       const host = (x.website || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
       const co = esc(x.company_name || '');
-      const acts = SESSION_HAS_REPORT.has(x.state) ? `
+      let acts = '';
+      if (SESSION_HAS_REPORT.has(x.state)) {
+        acts = `
           <div class="qr-sess-actions">
             <button data-qr-sess-view="${co}">View Report / 查看</button>
             <button data-qr-sess-pdf="${co}">PDF</button>
             <button data-qr-sess-regen="${co}" data-qr-sess-site="${esc(x.website || '')}">
               Regenerate / 重新生成</button>
-          </div>` : '';
-      return `<li class="qr-sess-row${x.job_id === sessionSel ? ' is-selected' : ''}"
+          </div>`;
+      } else if (!SESSION_LIVE.has(x.state) && libRowFor(x.company_name)) {
+        // The run produced nothing, but an earlier report survived it. Offer that
+        // one explicitly, labelled, rather than leaving the row a dead end.
+        acts = `
+          <div class="qr-sess-actions">
+            <button data-qr-sess-prev="${co}">View Previous Report / 查看上一版本</button>
+            <button data-qr-sess-regen="${co}" data-qr-sess-site="${esc(x.website || '')}">
+              Regenerate / 重新生成</button>
+          </div>`;
+      }
+      const divider = (idx === active.length && active.length && visibleHistory.length)
+        ? `<li class="qr-sess-head">Previous Research <span class="i18n-zh">历史研究</span></li>`
+        : '';
+      return `${divider}<li class="qr-sess-row${x.job_id === sessionSel ? ' is-selected' : ''}"
                   data-qr-sess="${esc(x.job_id)}">
         <div class="qr-sess-main">
           <div class="qr-sess-co">${co}</div>
@@ -714,9 +693,31 @@
 
   function selectSession(jobId) {
     sessionSel = jobId;
+    const row = sessionRow(jobId);
+    setWorkspace(row ? row.company_name : null);
     renderSessions();
     followSession(jobId);
-    followLive(jobId);
+    syncWorkspaceReport(row);
+  }
+
+  /* What belongs under the progress panel for this session.
+
+     While a run is live the saved report is NOT the output of that run, so it is
+     offered collapsed behind an explicit control instead of being mounted as if
+     it were. When the session is finished, its report is simply the report. */
+  function syncWorkspaceReport(row) {
+    const prevrow = $('qr-prevrow');
+    if (!row) { if (prevrow) prevrow.hidden = true; return; }
+    const live = SESSION_LIVE.has(row.state);
+    const hasSaved = !!libRowFor(row.company_name);
+    if (prevrow) prevrow.hidden = !(live && hasSaved);
+    if (live) {
+      reportMode = 'previous';
+      if ($('qr-report-card')) $('qr-report-card').style.display = 'none';
+      return;
+    }
+    reportMode = 'current';
+    if (hasSaved) openReport(row.company_name, true);
   }
 
   function wireSessions() {
@@ -724,11 +725,35 @@
     const list = $('qr-sess-list');
     if (!list) return;
     sessionsWired = true;
+    const openPrev = $('qr-prev-open');
+    if (openPrev) {
+      openPrev.addEventListener('click', () => {
+        const row = sessionRow(sessionSel);
+        if (!row) return;
+        reportMode = 'previous';       // banner, so it cannot read as this run's output
+        openReport(row.company_name, true);
+      });
+    }
+    const toggle = $('qr-sess-toggle');
+    if (toggle) {
+      toggle.addEventListener('click', () => {
+        sessionsExpanded = !sessionsExpanded;
+        renderSessions();
+      });
+    }
     list.addEventListener('click', (e) => {
       const view = e.target.closest('[data-qr-sess-view]');
       if (view) { e.stopPropagation(); return openReport(view.dataset.qrSessView, true); }
       const pdf = e.target.closest('[data-qr-sess-pdf]');
       if (pdf) { e.stopPropagation(); return openPdf(pdf.dataset.qrSessPdf); }
+      const prev = e.target.closest('[data-qr-sess-prev]');
+      if (prev) {
+        e.stopPropagation();
+        const co = prev.dataset.qrSessPrev;
+        setWorkspace(co);
+        reportMode = 'previous';
+        return openReport(co, true);
+      }
       const regen = e.target.closest('[data-qr-sess-regen]');
       if (regen) {
         e.stopPropagation();
@@ -859,9 +884,6 @@
     const l = getLang();
     document.querySelectorAll('#qr-lang button').forEach((b) =>
       b.classList.toggle('active', b.dataset.qrLang === l));
-    // Live sections are stored per language, so the panel follows the selector
-    // without re-running anything.
-    relayoutLive();
   }
 
   /* ── Existing-report lookup ──────────────────────────────────────────────
@@ -1105,6 +1127,25 @@
     return { st: 'todo' };
   }
 
+  /* The one percentage. Order of truth: a terminal state is 100 or its last
+     persisted value; otherwise the persisted progress_percent for this job;
+     otherwise the engine snapshot's own figure. Never recomputed from stages. */
+  function canonicalPct(job) {
+    if (!job) return 0;
+    if (job.status === 'done') return 100;
+    const row = job._durable || sessionRow(job._jobId || jobIdOf(job));
+    const p = row && row.progress_percent;
+    if (typeof p === 'number') return Math.max(0, Math.min(100, p));
+    if (typeof job._pct === 'number') return job._pct;
+    return 0;
+  }
+
+  function jobIdOf(job) { return (job && job._jobId) || sessionSel || null; }
+
+  function sessionRow(jobId) {
+    return jobId ? sessions.find((x) => x.job_id === jobId) || null : null;
+  }
+
   const PROG_MARK = { done: '✓', active: '→', failed: '✕', warned: '⚠', skipped: '○', todo: '○' };
 
   function fmtElapsed(sec) {
@@ -1118,9 +1159,12 @@
     if (!box) return;
     box.hidden = false;
     const states = PROG_STEPS.map((step) => ({ step, ...progState(job, step) }));
-    const settled = states.filter(
-      (x) => x.st === 'done' || x.st === 'skipped' || x.st === 'warned').length;
-    const pct = Math.round((settled / PROG_STEPS.length) * 100);
+    /* The step list stays - it is the useful part. The HEADLINE NUMBER does not
+       come from it. The engine reports a percentage for every stage and the CRM
+       writes it to Neon on each callback, so Neon is already authoritative; the
+       browser deriving its own figure over a different set of units (12 UI steps
+       vs the engine's 16) is what made Sessions and Progress disagree. */
+    const pct = canonicalPct(job);
     const running = job.status === 'running' || job.status === undefined;
     // The engine reports a stage as it FINISHES, so between two reports nothing
     // is explicitly active. The step the run must be working on is the first one
@@ -1142,8 +1186,7 @@
     /* A durable snapshot carries the percentage Neon recorded. Prefer it: the
        derived number counts settled steps, and a reconstructed run has only the
        stages we could infer from the last one persisted. */
-    const shownPct = job.status === 'done' ? 100
-                   : (typeof job._pct === 'number' ? job._pct : pct);
+    const shownPct = pct;
     fill.style.width = `${shownPct}%`;
     $('qr-prog-pct').textContent = `${shownPct}%`;
 
@@ -1258,7 +1301,13 @@
 
     // The lookup panel belongs to the idle state; the run owns the screen now.
     if ($('qr-lookup')) $('qr-lookup').hidden = true;
-    const hadReport = current && current.company === company ? current : null;
+    setWorkspace(company);
+    const hadReport = libRowFor(company) ? { company } : null;
+    // The saved report is NOT this run's output. Collapse it behind the control
+    // and label it if the user opens it.
+    reportMode = 'previous';
+    if ($('qr-report-card')) $('qr-report-card').style.display = 'none';
+    if ($('qr-prevrow')) $('qr-prevrow').hidden = !hadReport;
     const startedAt = Date.now();
     let last = null;
     $('qr-generate').disabled = true;
@@ -1287,7 +1336,6 @@
         // Show the run in Research Sessions immediately, and select it, so the
         // user can navigate away and still find it on the way back.
         refreshSessions().then(() => selectSession(jobId));
-        followLive(jobId);
       }
 
       while (true) {
@@ -1340,6 +1388,8 @@
         : `Research complete. 研究完成。 ${esc(progressSummary(last))}`,
         limited ? 'warn' : 'info');
       await loadLibrary();
+      reportMode = 'current';                 // the new report is the report now
+      if ($('qr-prevrow')) $('qr-prevrow').hidden = true;
       await openReport(company, true);
     } catch (e) {
       if (last) renderProgress({ ...last, status: 'error' }, startedAt);
@@ -1347,10 +1397,12 @@
       msg('qr-single-msg', `<strong>Research failed.</strong> 研究失败。<br><span>${esc(e.message)}</span>`
           + (hadReport ? '<div style="margin-top:6px;">The existing report is unchanged. '
                          + '现有报告未被修改。</div>' : ''), 'err');
-      // A regenerate that fails must leave the report that was on screen alone.
-      if (hadReport) { current = hadReport; await renderReport(); }
+      // A regenerate that fails leaves the saved report untouched and reachable,
+      // but it stays labelled as the previous version rather than this run's work.
+      if (hadReport && $('qr-prevrow')) $('qr-prevrow').hidden = false;
     } finally {
       $('qr-generate').disabled = false;
+      refreshSessions();
     }
   }
 
