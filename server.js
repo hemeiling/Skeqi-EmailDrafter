@@ -921,6 +921,34 @@ app.get('/api/account-research/config', (req, res) => {
    Recoverable degradation is NEVER reported as failure: a run that produced a
    report is completed_with_limitations, not failed. `failed` and `synthesis_failed`
    mean no report exists. */
+/* An engine that has forgotten a job it issued has restarted, and that run is
+   gone. The engine mints these ids, so "unknown job" is DEFINITIVE — there is no
+   reason to hold the row open for the 25-minute stale sweep while it blocks the
+   next attempt for that company.
+
+   A transport failure is NOT the same thing and must never close a live run, so
+   only an explicit 404 / "unknown job" counts. Everything persisted is kept:
+   company, job_id, last stage, last percentage, warnings and both timestamps. */
+async function reconcileOrphanJob(row) {
+  if (!row || !['queued', 'running'].includes(row.status)) return row;
+  let out;
+  try {
+    out = await qr.callEngine(`/api/job/${encodeURIComponent(row.job_id)}`);
+  } catch (e) {
+    return row;                       // engine unreachable: assume nothing
+  }
+  const err = out && out.data && out.data.error;
+  const unknown = out.status === 404
+    || (typeof err === 'string' && /unknown job/i.test(err));
+  if (!unknown) return row;
+  const updated = await jobsDb.failQwenJob(
+    row.job_id,
+    `Interrupted at ${row.progress_percent || 0}% during ${row.stage || 'retrieval'}: `
+    + 'the research service restarted and no longer holds this run.',
+    'interrupted');
+  return updated || { ...row, status: 'interrupted' };
+}
+
 function sessionState(row) {
   const stale = row.stale === true;
   switch (row.status) {
@@ -1157,9 +1185,14 @@ app.post('/api/aresearch/research', async (req, res) => {
        client-side check; a partial unique index does not. */
     const live = await jobsDb.activeQwenJob(body.company);
     if (live) {
-      return res.json({ job_id: live.job_id, attached: true,
-                        status: live.status, stage: live.stage,
-                        progress_percent: live.progress_percent });
+      // Still the database's decision, but an engine that has forgotten the run
+      // means there is nothing to attach to. Reconcile, then re-decide.
+      const checked = await reconcileOrphanJob(live).catch(() => live);
+      if (checked && ['queued', 'running'].includes(checked.status)) {
+        return res.json({ job_id: checked.job_id, attached: true,
+                          status: checked.status, stage: checked.stage,
+                          progress_percent: checked.progress_percent });
+      }
     }
 
     // Tell the engine where to report back to, and who it is.
@@ -1190,10 +1223,16 @@ app.get('/api/aresearch/job-for-company', async (req, res) => {
   try {
     const company = String(req.query.company || '').trim();
     if (!company) return res.json({ active: null, latest: null });
-    const [active, latest] = await Promise.all([
+    let [active, latest] = await Promise.all([
       jobsDb.activeQwenJob(company),
       jobsDb.latestQwenJob(company),
     ]);
+    if (active) {
+      const checked = await reconcileOrphanJob(active).catch(() => active);
+      // Orphaned: keep it visible as history, but it is no longer ACTIVE and it
+      // must stop blocking the next run for this company.
+      if (checked && checked.status !== active.status) { latest = checked; active = null; }
+    }
     res.json({ active: active || null, latest: latest || null });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1208,7 +1247,13 @@ app.get('/api/aresearch/job-for-company', async (req, res) => {
 app.get('/api/aresearch/sessions', async (req, res) => {
   try {
     const rows = await jobsDb.listRecentQwenJobs(req.query.limit || 25);
-    res.json(rows.map((r) => ({ ...r, state: sessionState(r) })));
+    /* Reconcile anything still marked live before reporting it as running. A row
+       whose engine has forgotten it is interrupted, and must say so here rather
+       than showing a frozen percentage that will never advance. */
+    const checked = await Promise.all(rows.map((r) =>
+      (['queued', 'running'].includes(r.status) ? reconcileOrphanJob(r) : Promise.resolve(r))
+        .catch(() => r)));
+    res.json(checked.map((r) => ({ ...r, state: sessionState(r) })));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
