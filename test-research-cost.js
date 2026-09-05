@@ -174,6 +174,42 @@ ck('research is a line under the platform total, not a separate feature',
    Object.keys(all.by_feature).includes('account_research')
    && !Object.keys(all.by_feature).includes('qwen_research'));
 
+console.log('\n[G2] Historical synthesis cost is shown, and labelled apart\n');
+// Mirrors costViewFor() in server.js.
+function costView(report, runUsage) {
+  if (runUsage && runUsage.total_tokens != null) {
+    return { kind: 'total', cost_usd: runUsage.estimated_cost_usd,
+             estimated: runUsage.cost_estimated !== false };
+  }
+  const u = (report && report.token_usage) || {};
+  const input = Number(u.input) || 0, output = Number(u.output) || 0;
+  if (!input && !output) return null;
+  const model = report.model_used || report.model;
+  if (!model) return null;
+  const d = usage.costDetail(model, input, output, 0, 0, 'bailian');
+  return { kind: 'synthesis', cost_usd: d.cost, estimated: true,
+           note: 'retrieval_not_captured' };
+}
+
+// 红旗's real numbers: synthesis survived, retrieval was discarded.
+const hq = { model: F, token_usage: { input: 62961, output: 10410, total: 73371 } };
+const hv = costView(hq, null);
+ck('a historical report DOES get a cost now', hv && hv.cost_usd > 0, JSON.stringify(hv));
+ck('priced from the versioned card, synthesis only',
+   Math.abs(hv.cost_usd - ((62961 / 1e6) * 0.19 + (10410 / 1e6) * 1.13)) < 1e-9,
+   String(hv.cost_usd));
+ck('labelled synthesis, NOT a total', hv.kind === 'synthesis');
+ck('carries the retrieval-not-captured note', hv.note === 'retrieval_not_captured');
+ck('always estimated', hv.estimated === true);
+
+const full = costView(hq, { total_tokens: 90000, estimated_cost_usd: 0.05, cost_estimated: true });
+ck('an instrumented run is labelled total', full.kind === 'total');
+ck('and uses the stored generation-time cost', full.cost_usd === 0.05);
+ck('a report with no usage at all yields nothing',
+   costView({ model: F, token_usage: {} }, null) === null);
+ck('a report with usage but no model yields nothing',
+   costView({ token_usage: { input: 10, output: 2 } }, null) === null);
+
 console.log('\n[I] Aggregation invariants\n');
 usage.resetUsage(); persisted.length = 0;
 const mixed = [

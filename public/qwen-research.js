@@ -331,7 +331,8 @@
         return r.json();
       });
       if (workspaceCompany !== company) setWorkspace(company);
-      current = { company, report: got.report, runUsage: got.run_usage || null };
+      current = { company, report: got.report, runUsage: got.run_usage || null,
+                  costView: got.cost_view || null };
       await renderReport();
     } catch (e) {
       current = null;
@@ -376,10 +377,12 @@
     $('qr-report-card').style.display = '';
     $('qr-report-title').textContent = `${r.company} — ${r.model_label || r.model || ''}`;
     const u = r.token_usage || {};
-    /* Cost comes from the JOB, calculated once at generation time. A report with
-       no job usage is left blank rather than priced today: runs from before the
-       instrumentation discarded their retrieval tokens, so any figure would be a
-       synthesis-only number wearing a full-run label. */
+    /* Two labels, because they are two different numbers. A fully instrumented
+       run has every retrieval call and every synthesis attempt priced at
+       generation time - that is the Account Research cost. A historical run only
+       has its synthesis usage, so we price that and say so, rather than either
+       hiding it or passing it off as the total. */
+    const cv = current.costView;
     const ru = current.runUsage;
     const tokens = ru ? ru.total_tokens : (u.total ?? null);
     const meta = [
@@ -388,18 +391,21 @@
       ['Model / 模型', r.model_label || r.model || '—'],
       ['Tokens / 令牌', tokens == null ? '—' : Number(tokens).toLocaleString()],
     ];
-    if (ru) {
-      meta.push([ru.cost_estimated ? 'Est. AI Cost / 预估 AI 成本' : 'AI Cost / AI 成本',
-                 '$' + Number(ru.estimated_cost_usd).toFixed(4)]);
+    if (cv && cv.kind === 'total') {
+      meta.push([cv.estimated ? 'Est. AI Cost / 预估 AI 成本' : 'AI Cost / AI 成本',
+                 '$' + Number(cv.cost_usd).toFixed(4)]);
+    } else if (cv && cv.kind === 'synthesis') {
+      meta.push(['Est. Synthesis Cost / 预估生成成本',
+                 { text: '$' + Number(cv.cost_usd).toFixed(4),
+                   title: 'Retrieval cost was not captured for this historical run.\n'
+                        + '此历史任务未记录检索阶段成本。' }]);
+      meta.push(['', { text: 'Retrieval cost was not captured for this historical run. / '
+                             + '此历史任务未记录检索阶段成本。', title: '' }]);
     } else {
-      /* Historical runs discarded their retrieval usage, so a synthesis-only
-         figure would misrepresent the full research cost. Say why rather than
-         showing a dash. */
       meta.push(['Est. AI Cost / 预估 AI 成本',
                  { text: 'Not available / 暂不可用',
-                   title: 'Cost unavailable because retrieval usage was not '
-                        + 'captured for this historical run.\n'
-                        + '该历史研究任务未记录检索阶段用量，因此无法计算完整成本。' }]);
+                   title: 'No token usage was recorded for this run.\n'
+                        + '该任务未记录任何用量。' }]);
     }
     meta.push(['Latency / 耗时', (r.latency_seconds ?? '—') + ' s'],
               ['Researched / 研究时间', (r.timestamp || '').slice(0, 16).replace('T', ' ')]);

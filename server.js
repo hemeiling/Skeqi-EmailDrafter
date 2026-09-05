@@ -60,6 +60,7 @@ const {
 const { contactsToCsv, contactsToXml, contactsToXlsx, safeFilename } = require('./export');
 const { parseCompanyFile } = require('./companyImport');
 const { normalizeFileToImages } = require('./cardBatch');
+const { costDetail } = require('./usage');
 const { getUsage, resetUsage, recordAiEvent, setPersist, setPricingTable,
   setPricingLoader, refreshPricing, pricingStatus } = require('./usage');
 const { activeEmailModel } = require('./emailModel');
@@ -997,6 +998,40 @@ function recordResearchUsage(jobId, calls, meta = {}) {
            calls: rows.length };
 }
 
+/* What cost, if any, we can honestly show for a report.
+
+   Two different things wear two different labels:
+
+   COMPLETE  the run was instrumented, so every retrieval call and every
+             synthesis attempt was priced at generation time and summed on the
+             job. That is the full Account Research cost.
+   SYNTHESIS a historical run, from before retrieval was counted. We still have
+             the provider's actual synthesis input/output, so we price THAT and
+             say plainly that retrieval is missing. Showing the part we know
+             beats showing nothing, as long as it is not called a total.
+
+   The historical figure necessarily uses the CURRENT active price row: no cost
+   was stored when those runs happened, so there is no generation-time rate to
+   honour. New runs store theirs and are never repriced. */
+function costViewFor(report, runUsage) {
+  if (runUsage && runUsage.total_tokens != null) {
+    return { kind: 'total',
+             cost_usd: Number(runUsage.estimated_cost_usd) || 0,
+             estimated: runUsage.cost_estimated !== false,
+             total_tokens: runUsage.total_tokens };
+  }
+  const u = (report && report.token_usage) || {};
+  const input = Number(u.input) || 0;
+  const output = Number(u.output) || 0;
+  if (!input && !output) return null;
+  const model = (report && (report.model_used || report.model)) || null;
+  if (!model) return null;
+  const d = costDetail(model, input, output, 0, 0, 'bailian');
+  return { kind: 'synthesis', cost_usd: d.cost, estimated: true,
+           total_tokens: Number(u.total) || (input + output),
+           note: 'retrieval_not_captured' };
+}
+
 function sessionState(row) {
   const stale = row.stale === true;
   switch (row.status) {
@@ -1038,7 +1073,8 @@ app.get('/api/aresearch/company/:company', async (req, res) => {
   try {
     const got = await qr.getReportForCompany(req.params.company);
     if (!got) return res.status(404).json({ error: 'no report for that company' });
-    res.json(got);
+    await refreshPricing();                 // price from the live card, not a stale one
+    res.json({ ...got, cost_view: costViewFor(got.report, got.run_usage) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
