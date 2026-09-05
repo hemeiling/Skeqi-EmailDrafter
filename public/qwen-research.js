@@ -1048,8 +1048,13 @@
     const fill = $('qr-prog-fill');
     const indeterminate = !!(active && active.indeterminate) && !finished;
     fill.classList.toggle('is-indeterminate', indeterminate);
-    fill.style.width = `${job.status === 'done' ? 100 : pct}%`;
-    $('qr-prog-pct').textContent = job.status === 'done' ? '100%' : `${pct}%`;
+    /* A durable snapshot carries the percentage Neon recorded. Prefer it: the
+       derived number counts settled steps, and a reconstructed run has only the
+       stages we could infer from the last one persisted. */
+    const shownPct = job.status === 'done' ? 100
+                   : (typeof job._pct === 'number' ? job._pct : pct);
+    fill.style.width = `${shownPct}%`;
+    $('qr-prog-pct').textContent = `${shownPct}%`;
 
     const now = $('qr-prog-now');
     if (job.status === 'done') {
@@ -1141,21 +1146,12 @@
 
   /* When the engine no longer knows the job — it restarted — the durable row is
      still enough to draw the panel, so the user sees state rather than nothing. */
-  const DONE_STATUSES = ['completed', 'completed_with_limitations'];
-  const DEAD_STATUSES = ['failed', 'interrupted', 'synthesis_failed'];
-
-  function jobRowToSnapshot(row) {
-    return {
-      status: DONE_STATUSES.includes(row.status) ? 'done'
-            : DEAD_STATUSES.includes(row.status) ? 'error' : 'running',
-      phase: row.stage || 'retrieval',
-      message: row.error || '',
-      stages: (row.warnings || []).map((w, i) => ({ at: i, stage: 'contacts', message: w })),
-      sources: [], search_queries: [],
-      models: { [row.model || 'model']: { label: row.model || 'Model', status: 'generating' } },
-      _durable: row,
-    };
-  }
+  /* Reconstruction lives in job-snapshot.js so the same code the page runs is
+     the code the tests exercise. It rebuilds the step list from the PERSISTED
+     stage and takes the percentage from the PERSISTED progress_percent. */
+  const DONE_STATUSES = JobSnapshot.DONE_STATUSES;
+  const DEAD_STATUSES = JobSnapshot.DEAD_STATUSES;
+  const jobRowToSnapshot = JobSnapshot.jobRowToSnapshot;
 
   function reviewReasons(job) {
     const q = job.quality || {};
