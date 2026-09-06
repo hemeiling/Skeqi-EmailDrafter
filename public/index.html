@@ -331,9 +331,13 @@
                     color:var(--color-text-secondary);
                     border-top:1px solid var(--color-border); }
     .qr-sess-done[hidden] { display:none; }
+    /* flex:0 0 auto is load-bearing. The header is a flex row with
+       space-between, so without it the button shrank to zero width and rendered
+       as present-but-invisible: correct text, correct count, no way to click. */
     .qr-sess-filter, .qr-sess-morebtn { font:inherit; font-size:11px; cursor:pointer;
       border:1px solid var(--color-border,#d5d7de); background:transparent;
-      color:var(--color-text-muted,#6b7280); border-radius:4px; padding:2px 8px; }
+      color:var(--color-text-muted,#6b7280); border-radius:4px; padding:2px 8px;
+      flex:0 0 auto; white-space:nowrap; }
     .qr-sess-filter[aria-pressed="true"] { background:var(--color-primary,#5b5bd6);
       border-color:var(--color-primary,#5b5bd6); color:#fff; }
     .qr-sess-filter[hidden], .qr-sess-morebtn[hidden] { display:none; }

@@ -168,6 +168,18 @@ ck('an empty array is not an error', readSessionsResponse([]).rows.length === 0)
      readSessionsResponse(bad) === null);
 });
 
+/* The filter control must be CLICKABLE, not merely present. It shipped once with
+   the correct label and count while collapsed to zero width inside the flex
+   header, which reads as "the feature is missing" and no DOM-presence check
+   would have caught it. */
+console.log('\n[6c] The filter control is laid out, not just rendered\n');
+const CSS = require('fs').readFileSync('public/index.html', 'utf8');
+const rule = (CSS.match(/\.qr-sess-filter,\s*\.qr-sess-morebtn\s*\{[^}]*\}/) || [''])[0];
+ck('the control opts out of flex shrink', /flex\s*:\s*0\s+0\s+auto/.test(rule), rule.slice(0, 80));
+ck('and does not wrap to zero width', /white-space\s*:\s*nowrap/.test(rule));
+ck('the hidden attribute still wins when there is nothing to filter',
+   /\.qr-sess-filter\[hidden\][^}]*display\s*:\s*none/.test(CSS));
+
 (async function main() {
   console.log('\n[7] Deleting a terminal session removes job + sections atomically\n');
   const c = fakeClient({ job_id: 'j2', status: 'interrupted' });
