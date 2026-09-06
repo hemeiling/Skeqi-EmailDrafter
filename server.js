@@ -1474,14 +1474,53 @@ app.get('/api/aresearch/job-for-company', async (req, res) => {
    `state` is computed here so the browser never has to infer it. */
 app.get('/api/aresearch/sessions', async (req, res) => {
   try {
-    const rows = await jobsDb.listRecentQwenJobs(req.query.limit || 25);
+    /* Session history: every status, newest first, keyset-paged. Needs Attention
+       is a count and a filter over these rows, never what decides membership. */
+    const rows = await jobsDb.listQwenSessions({
+      limit: req.query.limit || 25,
+      beforeStartedAt: req.query.before || null,
+      beforeJobId: req.query.before_id || null,
+    });
     /* Reconcile anything still marked live before reporting it as running. A row
        whose engine has forgotten it is interrupted, and must say so here rather
        than showing a frozen percentage that will never advance. */
     const checked = await Promise.all(rows.map((r) =>
       (['queued', 'running'].includes(r.status) ? reconcileOrphanJob(r) : Promise.resolve(r))
         .catch(() => r)));
-    res.json(checked.map((r) => ({ ...r, state: sessionState(r) })));
+    const out = checked.map((r) => ({ ...r, state: sessionState(r) }));
+    const last = out.length ? out[out.length - 1] : null;
+    res.json({
+      sessions: out,
+      // The cursor for the next page. Null when this page was not full, so the
+      // client stops rather than paging forever against a shrinking table.
+      next: last && out.length >= Number(req.query.limit || 25)
+        ? { before: last.started_at, before_id: last.job_id } : null,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* Permanent deletion of one session. Deliberately NOT a report deletion: the
+   saved report belongs to the company and outlives any single run. */
+app.delete('/api/aresearch/job/:id', async (req, res) => {
+  try {
+    const out = await jobsDb.deleteQwenSession(req.params.id);
+    if (out.ok) {
+      logCrmActivity({ actor: reqUser(req), action: 'aresearch.session.delete',
+                       metadata: { job_id: req.params.id, company: out.company_name,
+                                   sections_deleted: out.sections_deleted } });
+      return res.json(out);
+    }
+    if (out.reason === 'not_found') return res.status(404).json({ error: 'unknown session' });
+    if (out.reason === 'not_terminal') {
+      return res.status(409).json({
+        error: 'This session is still running. Wait for it to finish, or for it to '
+             + 'be marked interrupted, before deleting it.',
+        status: out.status,
+      });
+    }
+    return res.status(400).json({ error: 'could not delete session' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

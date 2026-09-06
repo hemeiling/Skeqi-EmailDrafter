@@ -4552,6 +4552,95 @@ async function listRecentQwenJobs(limit = 25) {
   `, [Math.max(1, Math.min(100, Number(limit) || 25))]);
 }
 
+/* Session HISTORY, not a work queue.
+
+   The previous query returned live jobs plus anything completed in the last 24
+   hours, so a run that finished yesterday was not collapsed in the UI - it was
+   never returned at all. It also sorted live rows above everything regardless of
+   age, which is what made the surface read as a queue.
+
+   Ordering is started_at DESC and nothing else. started_at is the only timestamp
+   that is always set and never moves: completed_at is null while a job runs, and
+   updated_at changes on every heartbeat, which would make a running job jump the
+   list every few seconds.
+
+   Keyset pagination rather than OFFSET, because rows arrive while a user pages
+   and an offset would skip or repeat them. job_id breaks ties for rows that
+   started in the same instant. */
+async function listQwenSessions({ limit = 25, beforeStartedAt = null, beforeJobId = null } = {}) {
+  const n = Math.max(1, Math.min(100, Number(limit) || 25));
+  return await q(`
+    SELECT job_id, company_name, company_key, website, model, job_type,
+           status, stage, progress_percent, warnings, error, report_id,
+           created_by, started_at, updated_at, completed_at, execution_manifest,
+           input_tokens, output_tokens, total_tokens,
+           estimated_cost_usd, cost_estimated,
+           (status IN ${JOB_LIVE}
+            AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale,
+           EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW()) - started_at)) AS elapsed_seconds
+    FROM account_research_qwen_jobs
+    WHERE $2::timestamptz IS NULL
+       OR (started_at, job_id) < ($2::timestamptz, $3::text)
+    ORDER BY started_at DESC, job_id DESC
+    LIMIT $1
+  `, [n, beforeStartedAt, beforeJobId]);
+}
+
+/* Permanent deletion of ONE session.
+
+   A session owns its own execution; it does not own the company's knowledge. So
+   this removes the job row and the sections keyed to it, and deliberately
+   touches neither the saved report nor ai_usage_events:
+
+     the report is stored one row per COMPANY and upserted, so a session's
+     report_id is a historical pointer that may already resolve to nothing;
+
+     usage events are billing history, and removing them would both falsify past
+     spend and break the idempotency guarantee, since a replayed callback for a
+     deleted job could then look like new spend.
+
+   There is no ON DELETE CASCADE on the sections table - its job_id is a plain
+   column - so the sections must be removed explicitly or they orphan silently.
+
+   The terminal check is re-asserted INSIDE the transaction and the row is locked,
+   so a job that started running between the click and the commit is rejected
+   rather than deleted out from under a live worker. That matters because single
+   job cancellation does not exist: the engine would keep upserting sections and
+   recreate orphans after the delete. */
+async function deleteQwenSession(jobId) {
+  if (!jobId) return { ok: false, reason: 'not_found' };
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT job_id, status, company_name, started_at
+         FROM account_research_qwen_jobs
+        WHERE job_id = $1
+        FOR UPDATE`, [jobId]);
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return { ok: false, reason: 'not_found' };      // idempotent: already gone
+    }
+    const job = rows[0];
+    if (!JOB_TERMINAL.includes(job.status)) {
+      await client.query('ROLLBACK');
+      return { ok: false, reason: 'not_terminal', status: job.status };
+    }
+    const sec = await client.query(
+      'DELETE FROM account_research_qwen_job_sections WHERE job_id = $1', [jobId]);
+    const del = await client.query(
+      'DELETE FROM account_research_qwen_jobs WHERE job_id = $1', [jobId]);
+    await client.query('COMMIT');
+    return { ok: true, job_id: jobId, company_name: job.company_name,
+             sections_deleted: sec.rowCount || 0, jobs_deleted: del.rowCount || 0 };
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* noop */ }
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 async function listActiveQwenJobs() {
   return await q(`
     SELECT job_id, company_name, status, stage, progress_percent, started_at, updated_at
@@ -5086,7 +5175,8 @@ module.exports = {
   contactsForResearch,
   claimQwenJob, activeQwenJob, getQwenJob, latestQwenJob, updateQwenJob,
   completeQwenJob, failQwenJob, sweepStaleQwenJobs, listActiveQwenJobs,
-  listRecentQwenJobs, isTerminalStatus, resolveIdentity, JOB_TERMINAL,
+  listRecentQwenJobs,
+  listQwenSessions, deleteQwenSession, isTerminalStatus, resolveIdentity, JOB_TERMINAL,
   setQwenJobUsage,
   setQwenJobManifest,
   getQwenJobManifest,

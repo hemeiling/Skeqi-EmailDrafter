@@ -331,6 +331,36 @@
                     color:var(--color-text-secondary);
                     border-top:1px solid var(--color-border); }
     .qr-sess-done[hidden] { display:none; }
+    .qr-sess-filter, .qr-sess-morebtn { font:inherit; font-size:11px; cursor:pointer;
+      border:1px solid var(--color-border,#d5d7de); background:transparent;
+      color:var(--color-text-muted,#6b7280); border-radius:4px; padding:2px 8px; }
+    .qr-sess-filter[aria-pressed="true"] { background:var(--color-primary,#5b5bd6);
+      border-color:var(--color-primary,#5b5bd6); color:#fff; }
+    .qr-sess-filter[hidden], .qr-sess-morebtn[hidden] { display:none; }
+    /* Destructive confirmation. Not a browser confirm(): the whole point is to
+       show what is KEPT, which a native dialog cannot express. */
+    .qr-del-back { position:fixed; inset:0; background:rgba(15,17,21,.45);
+      display:flex; align-items:center; justify-content:center; z-index:9000; }
+    .qr-del-back[hidden] { display:none; }
+    .qr-del { background:var(--color-surface,#fff); color:var(--color-text,#1f2430);
+      border-radius:8px; max-width:min(30rem,92vw); padding:1.15rem 1.3rem;
+      box-shadow:0 12px 40px rgba(0,0,0,.28); }
+    .qr-del h4 { margin:0 0 .1rem; font-size:1rem; }
+    .qr-del .qr-del-sub { color:var(--color-text-muted,#6b7280); font-size:12px;
+      margin:0 0 .8rem; }
+    .qr-del .qr-del-who { font-weight:600; font-size:13px; margin:0 0 .9rem; }
+    .qr-del-cols { display:grid; grid-template-columns:1fr 1fr; gap:.9rem; font-size:12px; }
+    .qr-del-cols h5 { margin:0 0 .3rem; font-size:11px; text-transform:uppercase;
+      letter-spacing:.05em; color:var(--color-text-muted,#6b7280); }
+    .qr-del-cols ul { margin:0; padding-left:1rem; }
+    .qr-del-cols li { margin:.15rem 0; }
+    .qr-del-warn { margin:.9rem 0 0; font-size:12px; color:#b4232a; }
+    .qr-del-acts { display:flex; justify-content:flex-end; gap:.5rem; margin-top:1rem; }
+    .qr-del-acts button { font:inherit; font-size:12px; padding:5px 12px; border-radius:5px;
+      cursor:pointer; border:1px solid var(--color-border,#d5d7de); background:transparent;
+      color:var(--color-text,#1f2430); }
+    .qr-del-acts .qr-del-go { background:#b4232a; border-color:#b4232a; color:#fff; }
+    @media (max-width:520px){ .qr-del-cols { grid-template-columns:1fr; } }
     .qr-sess-done b { color:var(--color-text); font-weight:600; }
     .qr-sess-done a { color:var(--color-primary,#5b5bd6); cursor:pointer; white-space:nowrap; }
     .qr-menuinfo { padding:6px 10px; font-size:11px; color:var(--color-text-secondary);
@@ -3367,13 +3397,49 @@
                so a session survives navigation, refresh and a closed browser. -->
           <div id="qr-sessions" class="qr-sessions" hidden>
             <div class="qr-sess-head">
-              <span class="qr-sess-title">Research Sessions <span class="i18n-zh">研究任务</span></span>
+              <span class="qr-sess-title">Recent Sessions <span class="i18n-zh">最近任务</span></span>
               <span class="qr-sess-count" id="qr-sess-count"></span>
+              <button type="button" class="qr-sess-filter" id="qr-sess-filter"
+                      aria-pressed="false" hidden></button>
             </div>
             <ul class="qr-sess-list" id="qr-sess-list"></ul>
-            <div class="qr-sess-done" id="qr-sess-done" hidden>
-              <span id="qr-sess-done-text"></span>
+            <div class="qr-sess-done" id="qr-sess-done">
+              <button type="button" class="qr-sess-morebtn" id="qr-sess-more" hidden>
+                Show older <span class="i18n-zh">显示更早</span></button>
               <a id="qr-sess-all" role="button" tabindex="0">View all reports <span class="i18n-zh">查看所有报告</span> →</a>
+            </div>
+          </div>
+
+          <div class="qr-del-back" id="qr-del-back" hidden>
+            <div class="qr-del" role="dialog" aria-modal="true" aria-labelledby="qr-del-title">
+              <h4 id="qr-del-title">Delete this session permanently?</h4>
+              <p class="qr-del-sub">永久删除此任务？</p>
+              <p class="qr-del-who" id="qr-del-who"></p>
+              <div class="qr-del-cols">
+                <div>
+                  <h5>Will delete <span class="i18n-zh">将删除</span></h5>
+                  <ul>
+                    <li>This research session <span class="i18n-zh">此研究任务</span></li>
+                    <li id="qr-del-secs">Its stored sections <span class="i18n-zh">其已存章节</span></li>
+                    <li>Its execution log, warnings and errors
+                        <span class="i18n-zh">其执行记录与告警</span></li>
+                  </ul>
+                </div>
+                <div>
+                  <h5>Will keep <span class="i18n-zh">将保留</span></h5>
+                  <ul>
+                    <li id="qr-del-keep-report"></li>
+                    <li>AI usage and cost history <span class="i18n-zh">AI 用量与成本记录</span></li>
+                    <li>The company record <span class="i18n-zh">公司记录</span></li>
+                  </ul>
+                </div>
+              </div>
+              <p class="qr-del-warn">This cannot be undone. <span class="i18n-zh">此操作无法撤销。</span></p>
+              <div class="qr-del-acts">
+                <button type="button" id="qr-del-cancel">Cancel <span class="i18n-zh">取消</span></button>
+                <button type="button" class="qr-del-go" id="qr-del-go">Delete permanently
+                  <span class="i18n-zh">永久删除</span></button>
+              </div>
             </div>
           </div>
 

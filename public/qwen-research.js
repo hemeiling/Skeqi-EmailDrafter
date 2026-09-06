@@ -708,24 +708,34 @@
 
   async function fetchSessions() {
     try {
-      const r = await fetch(api('/sessions')).then((x) => x.json());
-      return Array.isArray(r) ? r : null;
+      const r = await fetch(api('/sessions?limit=25')).then((x) => x.json());
+      if (Array.isArray(r)) return { rows: r, next: null };   // pre-paging shape
+      return r && Array.isArray(r.sessions) ? { rows: r.sessions, next: r.next } : null;
     } catch (e) {
       return null;                  // transient: keep whatever is on screen
     }
   }
 
-  /* Rendered by URGENCY, in three tiers.
+  /* Session HISTORY, newest first, every status in one list.
 
-     NOW and NEEDS ATTENTION are the page's actual job: what is running and what
-     is stuck. Completed sessions collapse to one line, because listing them
-     rebuilds the Reports library one tab away - and if this list ever needs a
-     search box, it has become Reports again.
+     This was three tiers ordered by urgency, with completed runs folded into a
+     summary line. Two things were wrong with that. The collapse hid the answer
+     to "did I already run this company", which is the question the surface is
+     actually asked; and underneath it the query only returned live jobs plus the
+     last 24 hours, so older runs were not collapsed at all - they were gone.
 
-     The left rail carries state, so the old percentage-plus-chip pair is gone.
-     Each blocked row offers exactly ONE inline action; everything else lives in
-     the same ⋯ menu the report table already uses. Nothing is removed. */
+     Ordering is started_at DESC and nothing else. A live job no longer jumps
+     above a newer completed one, and it does not reorder itself on every
+     heartbeat, because started_at never moves.
+
+     Needs Attention survives as a COUNT and a FILTER over these rows. It no
+     longer decides which rows exist.
+
+     The left rail still carries state, each row still offers exactly one inline
+     action, and everything else lives in the same ⋯ menu the report table uses. */
   const SECTION_COUNTS = new Map();      // job_id -> stored section count
+  let sessionFilter = 'all';             // 'all' | 'attention'
+  let sessionNext = null;                // keyset cursor for the next page
 
   function railClass(state) {
     if (SESSION_LIVE.has(state)) return 'st-active';
@@ -734,19 +744,32 @@
   }
 
   /* state + the ONE number that matters + the primary action, per state. */
+  /* To the minute. Tesla has five sessions; a date alone cannot tell them apart. */
+  function sessionWhen(x) {
+    const t = x.started_at ? new Date(x.started_at) : null;
+    if (!t || isNaN(t)) return '';
+    const today = new Date().toDateString() === t.toDateString();
+    return today
+      ? t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : t.toLocaleString([], { month: 'short', day: 'numeric',
+                               hour: '2-digit', minute: '2-digit' });
+  }
+
   function rowContent(x) {
     const co = esc(x.company_name || '');
     const site = esc(x.website || '');
     const [stageEn] = SESSION_STAGE[x.stage] || [x.stage || ''];
     const pct = x.progress_percent == null ? null : x.progress_percent;
+    const when = esc(sessionWhen(x));
     if (SESSION_LIVE.has(x.state)) {
-      return { state: esc(stageEn), ctx: (pct == null ? '' : pct + '% · ') + esc(sessionElapsed(x)),
-               action: '' };
+      return { state: esc(stageEn),
+               ctx: `${when} · ${pct == null ? '' : pct + '% · '}${esc(sessionElapsed(x))}`,
+               action: `<button data-qr-sess-open="${esc(x.job_id)}">View / 查看</button>` };
     }
     if (x.state === 'save_failed') {
       const n = SECTION_COUNTS.get(x.job_id);
       return { state: 'Generated · save failed',
-               ctx: n == null ? 'sections stored' : `${n} sections stored`,
+               ctx: `${when} · ${n == null ? 'sections stored' : n + ' sections stored'}`,
                action: `<button data-qr-sess-retry="${esc(x.job_id)}">Retry Save / 重新保存</button>` };
     }
     if (SESSION_NEEDS_ATTENTION.has(x.state)) {
@@ -757,14 +780,19 @@
                       failed: 'Failed' };
       const stale = x.state === 'interrupted' && !!x.report_id;
       return { state: stale ? 'Interrupted · report saved' : (LABEL[x.state] || 'Failed'),
-               ctx: esc(stageEn),
+               ctx: `${when} · ${esc(stageEn)}`,
                action: stale
                  ? '<button data-qr-sess-reconcile disabled title="A saved report exists for'
                    + ' this run; its row needs reconciling, not regenerating.">Reconcile /'
                    + ' 待校正</button>'
                  : `<button data-qr-sess-regen="${co}" data-qr-sess-site="${site}">Regenerate / 重新生成</button>` };
     }
-    return { state: 'Completed', ctx: esc(sessionElapsed(x)), action: '' };
+    if (x.state === 'completed' || x.state === 'completed_with_limitations') {
+      return { state: x.state === 'completed' ? 'Completed' : 'Completed · limitations',
+               ctx: `${when} · ${esc(sessionElapsed(x))}`,
+               action: `<button data-qr-sess-view="${co}">Open / 打开</button>` };
+    }
+    return { state: 'Completed', ctx: `${when} · ${esc(sessionElapsed(x))}`, action: '' };
   }
 
   function rowMenu(x) {
@@ -783,6 +811,15 @@
     if (!SESSION_LIVE.has(x.state)) {
       items.push(`<button data-qr-sess-regen="${co}" data-qr-sess-site="${site}">Regenerate / 重新生成</button>`);
     }
+    items.push('<div class="qr-menusep"></div>');
+    if (SESSION_LIVE.has(x.state)) {
+      items.push('<button class="qr-danger" disabled title="A running session cannot be '
+        + 'deleted: single-job cancellation does not exist, so the engine would keep '
+        + 'writing to it.">Delete permanently / 永久删除</button>');
+    } else {
+      items.push(`<button class="qr-danger" data-qr-sess-del="${esc(x.job_id)}">`
+        + 'Delete permanently / 永久删除</button>');
+    }
     // Host and model belong here, not competing with the company name.
     items.push('<div class="qr-menusep"></div>');
     items.push(`<div class="qr-menuinfo">${host || '—'} · ${esc(x.model || '—')}</div>`);
@@ -795,17 +832,29 @@
     if (!box || !list) return;
     const active = sessions.filter((x) => SESSION_LIVE.has(x.state));
     const attention = sessions.filter((x) => SESSION_NEEDS_ATTENTION.has(x.state));
-    const done = sessions.filter((x) => !SESSION_LIVE.has(x.state)
-                                     && !SESSION_NEEDS_ATTENTION.has(x.state));
     box.hidden = sessions.length === 0;
 
+    // The count is a summary of the SAME rows, not a different set.
     const count = $('qr-sess-count');
     if (count) {
       const bits = [];
       if (active.length) bits.push(`${active.length} running`);
       if (attention.length) bits.push(`${attention.length} need attention`);
+      bits.push(`${sessions.length} shown`);
       count.textContent = bits.join(' · ');
     }
+
+    const filterBtn = $('qr-sess-filter');
+    if (filterBtn) {
+      filterBtn.hidden = attention.length === 0;
+      filterBtn.setAttribute('aria-pressed', sessionFilter === 'attention' ? 'true' : 'false');
+      filterBtn.textContent = sessionFilter === 'attention'
+        ? 'Show all / 显示全部' : `Needs attention (${attention.length}) / 需要处理`;
+    }
+
+    const shown = sessionFilter === 'attention'
+      ? sessions.filter((x) => SESSION_NEEDS_ATTENTION.has(x.state))
+      : sessions;
 
     const render = (x) => {
       const c = rowContent(x);
@@ -819,31 +868,20 @@
       </li>`;
     };
 
-    let html = '';
-    if (active.length) {
-      html += `<li class="qr-sess-group">Now <span class="i18n-zh">进行中</span></li>`;
-      html += active.map(render).join('');
-    }
-    if (attention.length) {
-      html += `<li class="qr-sess-group">Needs Attention <span class="i18n-zh">需要处理</span></li>`;
-      html += attention.map(render).join('');
-    }
-    if (!active.length && !attention.length) {
-      html += `<li class="qr-sess-empty">No research running. <span class="i18n-zh">当前没有进行中的研究。</span></li>`;
+    /* One list, already ordered newest-first by the server. The client does not
+       re-sort: the order is a property of the query, and re-deriving it here
+       would let the two disagree. */
+    let html = shown.map(render).join('');
+    if (!shown.length) {
+      html = `<li class="qr-sess-empty">${sessionFilter === 'attention'
+        ? 'Nothing needs attention. <span class="i18n-zh">没有需要处理的任务。</span>'
+        : 'No research sessions yet. <span class="i18n-zh">暂无研究任务。</span>'}</li>`;
     }
     list.innerHTML = html;
 
-    /* Completed work gets one line and a route, never a list. */
-    const doneRow = $('qr-sess-done');
-    const doneText = $('qr-sess-done-text');
-    if (doneRow && doneText) {
-      doneRow.hidden = done.length === 0;
-      if (done.length) {
-        const names = done.slice(0, 3).map((x) => x.company_name).join(', ');
-        doneText.innerHTML = `✓ <b>${done.length}</b> completed recently · ${esc(names)}`
-          + (done.length > 3 ? ' …' : '');
-      }
-    }
+    const more = $('qr-sess-more');
+    if (more) more.hidden = !sessionNext || sessionFilter === 'attention';
+
     // save_failed rows show how much was salvaged; fetched once, only for those.
     attention.filter((x) => x.state === 'save_failed' && !SECTION_COUNTS.has(x.job_id))
       .forEach((x) => {
@@ -864,9 +902,10 @@
   }
 
   async function refreshSessions() {
-    const rows = await fetchSessions();
-    if (rows) {
-      sessions = rows;
+    const page = await fetchSessions();
+    if (page) {
+      sessions = page.rows;
+      sessionNext = page.next || null;
       if (sessionSel && !sessions.some((x) => x.job_id === sessionSel)) sessionSel = null;
       renderSessions();
     }
@@ -980,9 +1019,126 @@
         // one; duplicate protection is enforced again in Neon behind it.
         return regenerateSession(regen.dataset.qrSessRegen, regen.dataset.qrSessSite);
       }
+      const del = e.target.closest('[data-qr-sess-del]');
+      if (del) {
+        e.stopPropagation();
+        return askDeleteSession(del.dataset.qrSessDel);
+      }
+      const open = e.target.closest('[data-qr-sess-open]');
+      if (open) { e.stopPropagation(); return selectSession(open.dataset.qrSessOpen); }
       const row = e.target.closest('[data-qr-sess]');
       if (row) selectSession(row.dataset.qrSess);
     });
+
+    const filt = $('qr-sess-filter');
+    if (filt) filt.addEventListener('click', () => {
+      sessionFilter = sessionFilter === 'attention' ? 'all' : 'attention';
+      renderSessions();
+    });
+
+    const more = $('qr-sess-more');
+    if (more) more.addEventListener('click', loadOlderSessions);
+
+    const cancel = $('qr-del-cancel');
+    if (cancel) cancel.addEventListener('click', closeDeleteDialog);
+    const back = $('qr-del-back');
+    if (back) back.addEventListener('click', (e) => {
+      if (e.target === back) closeDeleteDialog();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && back && !back.hidden) closeDeleteDialog();
+    });
+    const go = $('qr-del-go');
+    if (go) go.addEventListener('click', confirmDeleteSession);
+  }
+
+  /* ---- permanent deletion -------------------------------------------------
+     Deleting a SESSION is not deleting the company's report. The dialog states
+     both halves, because the list can hold five runs of the same company and the
+     guarantee is the only thing that makes the action safe to offer here. */
+  let pendingDelete = null;
+
+  function askDeleteSession(jobId) {
+    const x = sessions.find((s2) => s2.job_id === jobId);
+    if (!x) return;
+    if (SESSION_LIVE.has(x.state)) return;          // guarded server-side too
+    pendingDelete = x;
+    const who = $('qr-del-who');
+    if (who) {
+      who.textContent = `${x.company_name || '—'} · ${sessionStateLabel(x)} · ${sessionWhen(x)}`;
+    }
+    const secs = $('qr-del-secs');
+    const n = SECTION_COUNTS.get(jobId);
+    if (secs) {
+      secs.innerHTML = (typeof n === 'number' && n > 0)
+        ? `Its ${n} stored sections <span class="i18n-zh">其 ${n} 个已存章节</span>`
+        : 'Its stored sections <span class="i18n-zh">其已存章节</span>';
+    }
+    // Say what is kept either way: silence would read as "there is nothing".
+    const keep = $('qr-del-keep-report');
+    if (keep) {
+      keep.innerHTML = libRowFor(x.company_name)
+        ? `The saved report for ${esc(x.company_name)} <span class="i18n-zh">已保存的报告</span>`
+        : 'No saved report is affected <span class="i18n-zh">不影响任何已保存报告</span>';
+    }
+    const back = $('qr-del-back');
+    if (back) back.hidden = false;
+    const cancel = $('qr-del-cancel');
+    if (cancel) cancel.focus();          // destructive action is never default focus
+  }
+
+  function closeDeleteDialog() {
+    pendingDelete = null;
+    const back = $('qr-del-back');
+    if (back) back.hidden = true;
+  }
+
+  function sessionStateLabel(x) {
+    return (rowContent(x).state || '').replace(/<[^>]*>/g, '');
+  }
+
+  async function confirmDeleteSession() {
+    const x = pendingDelete;
+    if (!x) return;
+    const go = $('qr-del-go');
+    if (go) go.disabled = true;
+    try {
+      const r = await fetch(api(`/job/${encodeURIComponent(x.job_id)}`), { method: 'DELETE' });
+      if (r.status === 409) {
+        const d = await r.json().catch(() => ({}));
+        msg('qr-single-msg', `<strong>Not deleted.</strong> ${esc(d.error || 'Session is running.')}`);
+      } else if (!r.ok && r.status !== 404) {
+        msg('qr-single-msg', '<strong>Could not delete that session.</strong>');
+      }
+      // 404 means it was already gone: the outcome the user wanted, so it is
+      // reported as success rather than as an error.
+      if (sessionSel === x.job_id) sessionSel = null;
+      sessions = sessions.filter((s2) => s2.job_id !== x.job_id);
+      SECTION_COUNTS.delete(x.job_id);
+      renderSessions();
+    } catch (e) {
+      msg('qr-single-msg', '<strong>Could not delete that session.</strong>');
+    } finally {
+      if (go) go.disabled = false;
+      closeDeleteDialog();
+      refreshSessions();
+    }
+  }
+
+  async function loadOlderSessions() {
+    if (!sessionNext) return;
+    try {
+      const qs = `?limit=25&before=${encodeURIComponent(sessionNext.before)}`
+               + `&before_id=${encodeURIComponent(sessionNext.before_id)}`;
+      const r = await fetch(api('/sessions' + qs)).then((x) => x.json());
+      const rows = Array.isArray(r) ? r : (r && r.sessions) || [];
+      // Append, de-duplicating by job_id: a row can arrive on two pages if the
+      // table changed underneath the cursor.
+      const seen = new Set(sessions.map((x) => x.job_id));
+      sessions = sessions.concat(rows.filter((x) => !seen.has(x.job_id)));
+      sessionNext = (r && r.next) || null;
+      renderSessions();
+    } catch (e) { /* transient: leave what is on screen */ }
   }
 
   async function regenerateSession(company, website) {
