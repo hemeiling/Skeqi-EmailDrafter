@@ -4987,8 +4987,19 @@ app.get('/api/email/test-history', async (req, res) => {
 // Usage tracking
 // =========================================================================
 
-app.get('/api/usage', (req, res) => {
-  res.json(getUsage());
+app.get('/api/usage', async (req, res) => {
+  const out = getUsage();
+  /* Retrieval-tool usage is DURABLE, not session state: it is read from the
+     execution manifests, so it does not reset with the session bar and is
+     labelled with its own scope in the UI. It carries no cost, because none is
+     known - see retrievalToolUsage(). A failure here must not blank the usage
+     bar, so the model figures are returned either way. */
+  try {
+    out.retrieval_tools = await jobsDb.retrievalToolUsage();
+  } catch (e) {
+    out.retrieval_tools = null;
+  }
+  res.json(out);
 });
 
 app.post('/api/usage/reset', (req, res) => {

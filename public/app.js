@@ -222,8 +222,10 @@ function initAppShell() {
        which reassigns, which retriggers — an infinite loop that pegs the main
        thread and hangs the page. Only writing on an actual change breaks it. */
     function refresh() {
+      // .u-cost is the MODEL cost only. Tavily's span is .u-cost-na precisely so
+      // it can never be selected here: it is not a dollar figure.
       const cost = bar.querySelector(".u-cost");
-      const next = cost ? `AI ${cost.textContent.trim()}` : "AI";
+      const next = cost ? `AI Model ${cost.textContent.trim()}` : "AI Model";
       if (summary.textContent !== next) summary.textContent = next;
     }
     refresh();
@@ -2727,6 +2729,13 @@ async function refreshUsage() {
     set("u-cost", "$" + Number(ai.cost_usd || 0).toFixed(4));
     set("u-saved-tokens", fmtTokens(ai.saved_total));
     set("u-saved-cost", "$" + Number(ai.saved_cost_usd || 0).toFixed(2));
+    /* Retrieval tools. Counts only - no cost is displayed, because none is
+       known. Rendering $0.00 here would read as "these searches were free",
+       which is a claim about Alibaba's billing that we cannot make. */
+    const rt = (d.retrieval_tools || {}).tavily;
+    set("u-tavily-provider", rt ? rt.provider_searches : 0);
+    set("u-tavily-general", rt ? rt.general_searches : 0);
+    set("u-tavily-total", rt ? rt.total_searches : 0);
   } catch (e) { /* silent */ }
 }
 

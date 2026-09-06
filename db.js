@@ -4418,6 +4418,49 @@ async function completeQwenJob(jobId, reportId, outcome = 'completed') {
    terminal row's manifest still accepts writes: the final manifest is written
    by the same callback that terminalises the job, and a retry-save legitimately
    completes the record afterwards. */
+/* Retrieval-tool usage, read from the durable execution manifests.
+
+   Deliberately NOT from ai_usage_events. Those rows carry a priced cost, and
+   Tavily has no price we know: the MCP exposes no usage, credit or quota field,
+   and ai_model_pricing has only per-token dimensions. Writing a zero-cost event
+   would put a fabricated number into billing history to make a UI look complete.
+
+   So the counts come from where they were actually recorded, and the cost is
+   reported as unavailable rather than as zero. */
+async function retrievalToolUsage() {
+  const rows = await q(`
+    SELECT
+      COALESCE(SUM((execution_manifest->'retrieval'->'tavily_provider'->>'searches')::int), 0)::int
+        AS provider_searches,
+      COALESCE(SUM((execution_manifest->'retrieval'->'tavily_general'->>'searches')::int), 0)::int
+        AS general_searches,
+      COALESCE(SUM((execution_manifest->'retrieval'->'tavily_provider'->>'extracts')::int), 0)::int
+        + COALESCE(SUM((execution_manifest->'retrieval'->'tavily_general'->>'extracts')::int), 0)::int
+        AS extracts,
+      COUNT(*) FILTER (
+        WHERE (execution_manifest->'retrieval'->'tavily_provider'->>'used')::boolean
+           OR (execution_manifest->'retrieval'->'tavily_general'->>'used')::boolean
+      )::int AS runs
+    FROM account_research_qwen_jobs
+    WHERE execution_manifest IS NOT NULL
+  `);
+  const r = rows[0] || {};
+  const provider = r.provider_searches || 0;
+  const general = r.general_searches || 0;
+  return {
+    tavily: {
+      provider_searches: provider,
+      general_searches: general,
+      total_searches: provider + general,
+      extracts: r.extracts || 0,
+      runs: r.runs || 0,
+      // No price is known, so none is asserted. See the comment above.
+      cost_usd: null,
+      cost_available: false,
+    },
+  };
+}
+
 async function setQwenJobManifest(jobId, manifest) {
   if (!manifest) return null;
   const rows = await q(`
@@ -5178,6 +5221,7 @@ module.exports = {
   listRecentQwenJobs,
   listQwenSessions, deleteQwenSession, isTerminalStatus, resolveIdentity, JOB_TERMINAL,
   setQwenJobUsage,
+  retrievalToolUsage,
   setQwenJobManifest,
   getQwenJobManifest,
   upsertQwenJobSection, listQwenJobSections, clearQwenJobSections, SECTION_STATES,

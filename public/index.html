@@ -341,6 +341,10 @@
     .qr-sess-filter[aria-pressed="true"] { background:var(--color-primary,#5b5bd6);
       border-color:var(--color-primary,#5b5bd6); color:#fff; }
     .qr-sess-filter[hidden], .qr-sess-morebtn[hidden] { display:none; }
+    /* Not a dollar figure, and deliberately not .u-cost: the sidebar
+       summary selects the first .u-cost and must keep finding the model
+       cost, not this. */
+    .u-cost-na { color: var(--color-text-muted,#6b7280); font-style: italic; }
     /* Destructive confirmation. Not a browser confirm(): the whole point is to
        show what is KEPT, which a native dialog cannot express. */
     .qr-del-back { position:fixed; inset:0; background:rgba(15,17,21,.45);
@@ -3949,9 +3953,25 @@
     <span class="u-sep">·</span>
     Total: <span id="u-total">0</span>
     <span class="u-sep">·</span>
+    <span class="u-label">AI Model Cost <span class="i18n-zh">AI 模型成本</span></span>
     <span class="u-cost" id="u-cost">$0.000000</span>
     <span class="u-sep">·</span>
     <span style="color:#34d399;">Saved: <span id="u-saved-tokens">0</span> (<span id="u-saved-cost">$0.00</span>)</span>
+  </span>
+  <span class="u-sep">|</span>
+  <!-- Retrieval tools. Counts are DURABLE (from the execution manifests), so
+       they do not reset with the session bar. No cost is shown because none is
+       known: the MCP exposes no usage or credit field and the pricing table has
+       only per-token dimensions. "Cost unavailable" is the honest value; $0.00
+       would be a claim we cannot support. -->
+  <span><span class="u-label">Tavily Usage (All Time) <span class="i18n-zh">Tavily 使用量（累计）</span></span>
+    <span id="u-tavily-provider">0</span> provider
+    <span class="u-sep">·</span>
+    <span id="u-tavily-general">0</span> fallback
+    <span class="u-sep">·</span>
+    Total: <span id="u-tavily-total">0</span>
+    <span class="u-sep">·</span>
+    <span class="u-cost-na" id="u-tavily-cost" title="All-time totals from the durable execution manifests. These do not reset with the session bar. Alibaba exposes no per-search usage or pricing through this MCP endpoint, so no cost is asserted.">Cost unavailable <span class="i18n-zh">暂无成本信息</span></span>
   </span>
   <button class="u-reset" id="usage-details-btn" title="Detailed AI usage & budgets">Details</button>
   <button class="u-reset" id="usage-reset-btn">Reset session</button>
