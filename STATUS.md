@@ -1,11 +1,12 @@
 # SKQ CRM — Project Status
 
-> Last updated: 2026-09-05
+> Last updated: 2026-09-06
 > Updated by: Claude
 > Scope of this document: **Current Account Research (Qwen-based)** inside the CRM.
 > Branch: `account-research-qwen`
-> Current phase: **PRODUCTION** — Research Sessions redesign deployed (`31ec355`),
-> asset parity confirmed under authentication, 14/14 production smoke checks green
+> Current phase: **PRODUCTION** — durable queue (P0-A) live; company-key identity
+> repaired across all historical rows; report-open fix committed at `52673be` and
+> pushed, **deploy not yet confirmed**
 
 `HANDOFF.md` remains the week-of-2026-08-23 handoff for the wider CRM (Booth Map
 re-key, chat, exhibitor sync). It is untracked and was not touched.
@@ -1214,17 +1215,82 @@ does not have to guess.
 
 ---
 
+## 2l. Company-key identity repair (2026-09-06) — DONE, VERIFIED
+
+**The defect.** A job and the report it produced could be written under different
+company keys, because the engine derived its own key from the company name while
+the CRM derived one through `resolveIdentity`. A completed session then offered
+**Open**, the client sent a company NAME, the server resolved that name back
+through the key, and found nothing. Comau LLC was the reported case.
+
+**The fix, in two parts.**
+
+1. *Code* (commit `52673be`). A session opens the report it actually produced,
+   **by id**. The row button, the overflow menu, the PDF button and every later
+   render of an open report all carry `report_id`; opening the right row and then
+   re-resolving the markdown by name would have shown a different report.
+   `Open` is now offered because a report EXISTS, not because a job reached a
+   terminal state — a terminal job with no `report_id` shows `no report saved`.
+   `getQwenReport` gained the job join `getQwenReportForCompany` already had, so
+   both lookups answer with one shape; by-id used to drop the run's cost from the
+   report card.
+
+2. *Data* (one transaction, `repair-keys.js`, applied 2026-09-06). Every job and
+   report key re-derived from its own company name.
+
+| what | count |
+| --- | --- |
+| jobs re-keyed | 20 |
+| reports re-keyed | 4 |
+| jobs repointed to the merged AMADA row | 1 |
+| superseded report rows deleted | 1 |
+
+**Only the key moved on those jobs.** Status, error text, timestamps, attempts and
+accounting were never in any UPDATE. The 17 jobs killed while still queued still
+read exactly as before: `interrupted`, no start time, no report, error preserved.
+
+**One CJK job carried an empty key.** `红旗` job `d9e9fd9677b0` had
+`company_key = ''` — the engine's old normaliser erased the name. It is now `红旗`.
+The current `resolveIdentity` cannot produce this; the regression test in
+`test-identity-state.js` covers it.
+
+**AMADA collision.** Two report rows existed. The canonical row
+(`…__20260906153511`, keyed `amada weld tech`) kept its id and took the NEWER
+content from the mis-keyed row, version `19 → 20`, researched `19:08:40`,
+80,184 bytes, 16 sources. Note the newer content is SMALLER than the v19 content
+it replaced (98,427 bytes); that is the run's own output, not a truncation. The
+mis-keyed row was deleted after verification. No foreign key referenced report
+ids, so the delete was safe.
+
+**Four jobs still reference a report row that no longer exists** — ACRO
+Automation Systems, BYD, Torus, and one AMADA job. This is PRE-EXISTING damage
+from before report persistence was reliable, NOT caused by the repair, and it is
+not repaired. The report-open fix makes it harmless: those rows now say
+`no report saved` instead of offering a button that fails.
+
+**Integrity checks** (`integrity-check.js`, all green): key derivation on 69 jobs
+and 31 reports, one report per key, job/report identity agreement, the 17 queued
+jobs unchanged, the AMADA merge, no new dangling reference, and name lookup still
+resolving for all 22 companies that have a report.
+
+Snapshot of every touched row before the repair:
+`scratchpad/pre-repair-snapshot.json` (267 KB) — the repair is reversible from it.
+
+---
+
 ## 6. NEXT ACTIONS
 
-1. **P0 — target-website integrity.** A validated user-supplied domain must not
-   be silently replaced by auto-discovery. Diagnosis complete (§2j); the
-   correction is NOT yet implemented.
-2. **P1 — persist bounded rejected-candidate diagnostics** (candidate, query,
-   URL/host, rejection reason, identity/provenance outcome).
-3. Add the source-concentration diagnostic (§2j) as a **report-level warning**,
-   explicitly not a fail-fast gate.
-4. Record the real Render hostnames in `DEPLOY.md`, replacing the placeholders.
-5. Open a PR for `account-research-qwen` and merge to `main`.
+1. **Confirm `52673be` is live on the CRM.** Pushed, not verified — the Render
+   hostname is not recorded anywhere in either repository (see item 2), so the
+   deploy could not be checked from a shell.
+2. **Record the real Render hostnames in `DEPLOY.md`**, replacing the
+   placeholders. This blocked deploy verification today.
+3. **Requeue the 17 jobs killed while queued** — deliberately deferred by the
+   user; they are identity-repaired and ready.
+4. **Content-quality pass**: reports still emit scaffolding prose
+   (`SOURCE OF TRUTH`, `N/A per discovery`) into user-visible sections.
+5. **P0 — target-website integrity** (§2j, diagnosed, not implemented) and
+   **P1 — bounded rejected-candidate diagnostics** (paused by the user).
 
 **Deliberately NOT scheduled** (user decision, 2026-09-04): supplier/integrator
 discovery expansion, distributor discovery, new competitor retrieval, prompt
@@ -1235,15 +1301,26 @@ NOT WORTH THE ADDED RETRIEVAL.
 
 ## 7. Session handoff
 
-**Current state:** commit `31ec355` on `account-research-qwen`, pushed to
-`origin`, deployed to the production CRM. The Research Sessions redesign is
-**IMPLEMENTED, DEPLOYED and TESTED**; the user has closed that UX issue.
+**Current state:** commit `52673be` on `account-research-qwen`, pushed to
+`origin`. Engine production revision `627a80a`. The queue is IDLE — zero jobs
+queued or running. No paid research has been started.
 
-**Last successful operation:** production smoke of the redesign — 29 browser
-checks green against live Neon plus a 6-check stub run for `save_failed`, with
-no research POST issued by any check. Asset parity was confirmed by comparing
-SHA-256 of `qwen-research.js`, `job-snapshot.js` and `index.html` fetched **with
-HTTP Basic credentials** against the working tree; all three matched.
+**Exact stopping point.** The company-key repair is APPLIED and VERIFIED against
+live Neon (§2l). The report-open fix is COMMITTED and PUSHED but its deploy is
+**UNCONFIRMED**: `skeqi-emaildrafter.onrender.com` now returns 404 at the edge, and
+no other Render hostname is recorded in either repository or in local `.env`.
+Get the live hostname from the Render dashboard, put it in `DEPLOY.md`, then
+confirm the asset carries `data-qr-sess-report`.
+
+**Last successful operation:** `integrity-check.js` — every check green, including
+proof from the repair script's own source that no job UPDATE touched anything but
+`company_key`.
+
+**Untracked, deliberately not committed:** `repair-keys.js`, `integrity-check.js`,
+`check-amada.js`, `observe-amada.js` (one-off operational scripts), and
+`researchConfidence.js`, `researchSections.js`, `skqCapabilities.js`,
+`reconcile-historical-jobs.js`, `test-reconcile.js` — none of which any module in
+the running server requires. Verify that before assuming they are dead.
 
 > **Deploy-verification trap, twice hit:** every CRM route except `/healthz` and
 > the engine callback is behind HTTP Basic. An unauthenticated `curl` of a static
