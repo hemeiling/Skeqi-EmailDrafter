@@ -1079,9 +1079,14 @@ async function initDb() {
      platform aggregation; these are a projection, never a second event stream.
      The cost is stored AS CALCULATED AT GENERATION TIME so a later price change
      cannot silently reprice history. */
+  /* What the run ACTUALLY executed: which models were attempted, which
+     retrieval providers ran, what each contributed. Distinct from usage_detail,
+     which is only tokens. Versioned, absolute-valued and merged rather than
+     appended, so a retried callback cannot inflate it. */
   for (const col of ['input_tokens INTEGER', 'output_tokens INTEGER',
                      'total_tokens INTEGER', 'estimated_cost_usd NUMERIC(12,6)',
-                     'cost_estimated BOOLEAN', 'usage_detail JSONB']) {
+                     'cost_estimated BOOLEAN', 'usage_detail JSONB',
+                     'execution_manifest JSONB']) {
     await pool.query(`ALTER TABLE account_research_qwen_jobs
                         ADD COLUMN IF NOT EXISTS ${col}`);
   }
@@ -4406,6 +4411,29 @@ async function completeQwenJob(jobId, reportId, outcome = 'completed') {
   return rows[0] || null;
 }
 
+/* Merge an execution event into the job's manifest.
+
+   Read-modify-write inside one statement so concurrent callbacks cannot lose an
+   update, and ABSOLUTE values throughout so replaying one cannot double it. A
+   terminal row's manifest still accepts writes: the final manifest is written
+   by the same callback that terminalises the job, and a retry-save legitimately
+   completes the record afterwards. */
+async function setQwenJobManifest(jobId, manifest) {
+  if (!manifest) return null;
+  const rows = await q(`
+    UPDATE account_research_qwen_jobs
+    SET execution_manifest = $2::jsonb, updated_at = updated_at
+    WHERE job_id = $1 RETURNING job_id, execution_manifest
+  `, [jobId, JSON.stringify(manifest)]);
+  return rows[0] || null;
+}
+
+async function getQwenJobManifest(jobId) {
+  const rows = await q('SELECT execution_manifest FROM account_research_qwen_jobs WHERE job_id=$1',
+                       [jobId]);
+  return rows.length ? rows[0].execution_manifest : null;
+}
+
 async function failQwenJob(jobId, error, status = 'failed') {
   const rows = await q(`
     UPDATE account_research_qwen_jobs
@@ -5060,6 +5088,8 @@ module.exports = {
   completeQwenJob, failQwenJob, sweepStaleQwenJobs, listActiveQwenJobs,
   listRecentQwenJobs, isTerminalStatus, resolveIdentity, JOB_TERMINAL,
   setQwenJobUsage,
+  setQwenJobManifest,
+  getQwenJobManifest,
   upsertQwenJobSection, listQwenJobSections, clearQwenJobSections, SECTION_STATES,
   queryContactsPage, countContacts, contactFacets, listContactsByIds,
   logCompanyActivity, listCompanyActivity,

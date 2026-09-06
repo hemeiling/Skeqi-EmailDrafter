@@ -1,5 +1,6 @@
 const config = require('./config');
 const qr = require('./qwenResearch.js');
+const EM = require('./public/execution-manifest.js');
 
 const crypto = require('crypto');
 const express = require('express');
@@ -963,6 +964,21 @@ async function reconcileOrphanJob(row) {
    the table has a unique index with ON CONFLICT DO NOTHING. A retried callback,
    a replay, or a retry-save therefore records nothing new - and retry-save
    makes no model call at all, so there is nothing to record. */
+/* Fold an execution event into the job's durable manifest.
+
+   Only ever called with facts the engine actually reported. Absolute values, so
+   a retried callback is a no-op rather than a doubling, and a failure here can
+   never change the outcome of a run - the manifest is a record, not a gate. */
+async function updateManifest(jobId, patch, finalize = null) {
+  try {
+    const current = await jobsDb.getQwenJobManifest(jobId);
+    let next = EM.apply(current, patch);
+    if (finalize) next = EM.finalize(next, finalize);
+    await jobsDb.setQwenJobManifest(jobId, next);
+    return next;
+  } catch (e) { return null; }
+}
+
 function recordResearchUsage(jobId, calls, meta = {}) {
   const rows = Array.isArray(calls) ? calls : [];
   let input = 0, output = 0, total = 0, cost = 0, estimated = false;
@@ -1211,6 +1227,12 @@ app.post('/api/qwen-research/callback', express.json({ limit: '25mb' }), async (
   if (!jobId) return res.status(400).json({ error: 'job_id is required' });
   try {
     if (b.event === 'progress') {
+      // The live view of execution: what is running RIGHT NOW, reported by the
+      // engine rather than guessed from the stage or the percentage.
+      if (b.execution || b.active) {
+        await updateManifest(jobId, Object.assign({}, b.execution || {},
+          b.active ? { active: b.active } : {}));
+      }
       // A heartbeat. Also what keeps the job from being swept as stale.
       await jobsDb.updateQwenJob(jobId, { status: 'running', stage: b.stage,
                                       progress: b.progress_percent, warning: b.warning });
@@ -1263,6 +1285,15 @@ app.post('/api/qwen-research/callback', express.json({ limit: '25mb' }), async (
           model: b.model || (failedJob && failedJob.model),
         });
         if (u.calls) await jobsDb.setQwenJobUsage(jobId, u);
+        await updateManifest(jobId, Object.assign({}, b.execution || {}, {
+          usage: { model_calls: u.calls || 0, input_tokens: u.input_tokens || 0,
+                   output_tokens: u.output_tokens || 0,
+                   estimated_cost_usd: u.estimated_cost_usd == null
+                     ? null : String(u.estimated_cost_usd),
+                   cost_estimated: !!u.cost_estimated },
+        }), { accountingComplete: !!(u.detail && u.detail.synthesis
+                                     && u.detail.synthesis.calls > 0),
+              synthesisFailed: true });
       } catch (e) { /* accounting must never change the outcome of a run */ }
       await jobsDb.failQwenJob(jobId, b.error || 'Synthesis failed after all fallbacks.',
                                'synthesis_failed');
@@ -1306,6 +1337,17 @@ app.post('/api/qwen-research/callback', express.json({ limit: '25mb' }), async (
           model: b.model,
         });
         if (u.calls) await jobsDb.setQwenJobUsage(jobId, u);
+        /* accounting_complete is asserted only when synthesis actually produced
+           an accounted call. A run whose synthesis went unrecorded - every run
+           before P0-D - must not claim a whole cost. */
+        await updateManifest(jobId, Object.assign({}, b.execution || {}, {
+          usage: { model_calls: u.calls || 0, input_tokens: u.input_tokens || 0,
+                   output_tokens: u.output_tokens || 0,
+                   estimated_cost_usd: u.estimated_cost_usd == null
+                     ? null : String(u.estimated_cost_usd),
+                   cost_estimated: !!u.cost_estimated },
+        }), { accountingComplete: !!(u.detail && u.detail.synthesis
+                                     && u.detail.synthesis.calls > 0) });
       } catch (e) { /* accounting must never fail a save */ }
       await jobsDb.completeQwenJob(jobId, saved.id, b.outcome);
       return res.json({ ok: true, report_id: saved.id, version: saved.version });
