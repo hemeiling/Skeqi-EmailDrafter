@@ -146,7 +146,21 @@ ck('providersUsed grows by exactly one',
    M.providersUsed(withTavily).length === M.providersUsed(base).length + 1);
 
 console.log('\n[10] The record stays compact and robust\n');
-ck('no rejected candidates are stored', !JSON.stringify(withTavily).includes('rejected'));
+/* P1 is the storage of rejected CANDIDATES - urls, titles, reasons. A rejection
+   COUNT is the opposite: it is what lets the record stay small while still
+   saying how much was thrown away. So assert the shape, not the substring. */
+ck('no rejected candidates are stored', (function () {
+  const walk = (v) => {
+    if (Array.isArray(v)) return v.every(walk);
+    if (v && typeof v === 'object') {
+      return Object.keys(v).every((k) =>
+        (/rejected/i.test(k) ? typeof v[k] === 'number' : true) && walk(v[k]));
+    }
+    return true;
+  };
+  return walk(withTavily) && walk(M.apply(M.empty(),
+    { competitor_discovery: { searches: 2, rejected_same_industry: 7 } }));
+}()));
 ck('a full manifest stays small', JSON.stringify(withTavily).length < 1400,
    String(JSON.stringify(withTavily).length));
 ck('an unknown key from a newer engine is ignored',
@@ -157,6 +171,54 @@ ck('a manifest of an unknown version is rebuilt, not trusted',
 ck('an unversioned object is not accepted as existing state',
    M.apply({ retrieval: { current: { retained: 99 } } }, {}).retrieval.current.retained === 0,
    'a patch must never be mistaken for a manifest');
+
+console.log('\n[11] Target-competitor discovery is counted like any other work\n');
+
+const noComp = M.empty();
+ck('an empty manifest has run no competitor discovery',
+   noComp.competitor_discovery.used === false
+   && noComp.competitor_discovery.searches === 0);
+ck('and it is not listed as a used provider',
+   !M.providersUsed(noComp).includes('competitor_discovery'));
+
+const skipped = M.apply(M.empty(), { competitor_discovery: {
+  searches: 0, skip_reason: 'insufficient profile evidence: capabilities' } });
+ck('a skipped discovery stays unused', skipped.competitor_discovery.used === false);
+ck('and says why', skipped.competitor_discovery.skip_reason.indexOf('capabilities') > -1);
+ck('a skip is not a provider use',
+   !M.providersUsed(skipped).includes('competitor_discovery'));
+
+const ran = M.apply(M.empty(), { competitor_discovery: {
+  searches: 4, batches: 2, candidates: 18, verified_organizations: 7,
+  retained_competitors: 3, direct: 1, partial: 2, adjacent: 0,
+  rejected_same_industry: 4, distinct_domains: 3,
+  profile_confidence: { capabilities: 'high' } } });
+ck('a search makes it used', ran.competitor_discovery.used === true);
+ck('it then appears in providersUsed',
+   M.providersUsed(ran).includes('competitor_discovery'));
+ck('replaying the same callback changes nothing',
+   JSON.stringify(M.apply(ran, { competitor_discovery: { searches: 4, candidates: 18 } })
+     .competitor_discovery) === JSON.stringify(ran.competitor_discovery),
+   'counters are absolute, never incremental');
+ck('a later callback overwrites rather than adds',
+   M.apply(ran, { competitor_discovery: { searches: 6 } })
+     .competitor_discovery.searches === 6);
+ck('competitor numbers never touch retrieval accounting',
+   JSON.stringify(ran.retrieval) === JSON.stringify(M.empty().retrieval));
+ck('no monetary field exists',
+   !Object.keys(ran.competitor_discovery).some((k) => /cost|price|usd/i.test(k)));
+
+/* A job whose manifest was written before this block existed. Dropping the
+   incoming numbers would silently lose the work that just ran. */
+const older = M.empty();
+delete older.competitor_discovery;
+ck('an older manifest gains the block instead of losing the data',
+   M.apply(older, { competitor_discovery: { searches: 2 } })
+     .competitor_discovery.searches === 2);
+ck('finalize preserves it',
+   M.finalize(ran, { accountingComplete: true }).competitor_discovery.searches === 4);
+ck('a legacy job reports no competitor discovery',
+   M.forLegacyJob({ model: 'q', report_id: 1 }).competitor_discovery.used === false);
 
 console.log('\n' + pass + ' passed, ' + fail.length + ' failed');
 fail.forEach((f) => console.log('  FAILED: ' + f));

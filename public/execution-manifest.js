@@ -47,6 +47,16 @@
         tavily_general: Object.assign({ used: false, searches: 0, extracts: 0,
                                         reason_codes: [] }, CONTRIB),
       },
+      /* Competitors OF THE TARGET ACCOUNT, not of us. Kept beside retrieval
+         rather than inside it because it is a distinct capability with its own
+         search budget, and because its counters answer a different question:
+         how many real organisations survived competitive verification. */
+      competitor_discovery: {
+        used: false, searches: 0, batches: 0, candidates: 0,
+        verified_organizations: 0, retained_competitors: 0,
+        direct: 0, partial: 0, adjacent: 0, rejected_same_industry: 0,
+        distinct_domains: 0, profile_confidence: null, skip_reason: null,
+      },
       fallbacks: [],
       usage: { model_calls: 0, input_tokens: 0, output_tokens: 0,
                estimated_cost_usd: null, cost_estimated: null,
@@ -95,6 +105,10 @@
   function apply(existing, patch) {
     const m = existing && existing.version === VERSION
       ? JSON.parse(JSON.stringify(existing)) : empty();
+    // A manifest stored before a block existed simply lacks it. Backfill the
+    // slot rather than dropping the incoming numbers on the floor.
+    const base = empty();
+    for (const k of Object.keys(base)) if (!(k in m)) m[k] = base[k];
     mergeInto(m, patch || {});
     // A provider that reports any real work is used; one that reports nothing
     // stays unused, so a configured-but-unused provider never appears as used.
@@ -104,6 +118,10 @@
     }
     m.retrieval.current.used = m.retrieval.current.used
       || m.retrieval.current.model_calls > 0 || m.retrieval.current.queries > 0;
+    // used means work happened. A ready profile that never issued a search is
+    // not "used", and a skip is not a use.
+    const c = m.competitor_discovery;
+    c.used = c.used || c.searches > 0;
     m.synthesis.calls = Math.max(m.synthesis.calls, m.synthesis.models_attempted.length);
     m.synthesis.fallback_attempts = Math.max(0, m.synthesis.calls
       - (m.synthesis.successful_model ? 1 : 0));
@@ -163,6 +181,7 @@
     if (m.retrieval && m.retrieval.official_site.attempted) out.push('official_site');
     if (m.retrieval && m.retrieval.tavily_provider.used) out.push('tavily_provider');
     if (m.retrieval && m.retrieval.tavily_general.used) out.push('tavily_general');
+    if (m.competitor_discovery && m.competitor_discovery.used) out.push('competitor_discovery');
     if (m.synthesis && m.synthesis.calls > 0) out.push('synthesis');
     return out;
   }
