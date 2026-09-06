@@ -1110,6 +1110,14 @@ async function initDb() {
                       ADD COLUMN IF NOT EXISTS attempts         INTEGER NOT NULL DEFAULT 0,
                       ADD COLUMN IF NOT EXISTS payload          JSONB,
                       ADD COLUMN IF NOT EXISTS runtime_state    JSONB`);
+  /* started_at means "when a worker first claimed this", not "when the request
+     arrived" - queued_at is that. The column was created with DEFAULT now(), so
+     every enqueued row was stamped as started before any worker had seen it and
+     queue wait read as zero. Dropping the default is the fix; existing rows keep
+     the values they have, because rewriting history to say something it did not
+     record would be worse than an imprecise old number. */
+  await pool.query(`ALTER TABLE account_research_qwen_jobs
+                      ALTER COLUMN started_at DROP DEFAULT`);
   /* The claim scan: queued, oldest first. Partial, so it only ever touches rows
      that are actually claimable. */
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_claimable

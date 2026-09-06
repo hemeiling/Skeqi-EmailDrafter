@@ -297,6 +297,17 @@ ck('it still catches a run no worker holds',
 ck('and says that, rather than blaming a restart',
    /no worker has held this run/.test(SWEEP));
 
+console.log('\n[N4] started_at means first claim, not enqueue\n');
+
+ck('initDb drops the default that contradicted that',
+   /ALTER COLUMN started_at DROP DEFAULT/.test(DB2),
+   'DEFAULT now() stamped every enqueued row as started before any worker saw it');
+ck('and says why history is left alone',
+   /existing rows keep\s+the values they have/.test(DB2),
+   'the comment wraps between "keep" and "the", so the assertion must too');
+ck('nothing re-adds a default to the column',
+   !/started_at[^,;]*DEFAULT now\(\)/.test(DB2));
+
 console.log('\n' + pass + ' passed, ' + fail.length + ' failed');
   fail.forEach((f) => console.log('  FAILED: ' + f));
   process.exit(fail.length ? 1 : 0);
