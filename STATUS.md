@@ -1265,3 +1265,45 @@ with delete and regenerate.
 **Browser tests** need an explicit Chromium path; the venv's bundled revision is
 stale. Use
 `~/Library/Caches/ms-playwright/chromium_headless_shell-1228/chrome-headless-shell-mac-arm64/chrome-headless-shell`.
+
+---
+
+## 2k. Research Sessions history + permanent deletion (2026-09-05) — DEPLOYED
+
+Commits `fb3c4eb` (Sessions) and `2ecf435` (defensive CSS), on top of the
+approved `d3e7981` (P0-D CRM) and `845a678` (manifest CRM). Deployed and
+validated in production.
+
+Sessions is now a **history**, not a work queue. Every status appears regardless
+of age, ordered `started_at DESC` with `job_id` breaking ties, keyset-paged.
+Needs Attention is a count and a filter over the same rows and no longer decides
+membership. Permanent per-session deletion removes the job and its sections in
+one transaction, re-asserting the terminal check inside the lock.
+
+> **Correction on `2ecf435`.** It was initially attributed to a flex visibility
+> bug found during smoke testing. That diagnosis was **wrong**. The actual issue
+> was in the smoke harness: it had not opened the Account Research tab, so the
+> pane sat inside a `display:none` view container and every visibility assertion
+> was meaningless. **The filter itself was never broken.** The defensive
+> `flex:0 0 auto` rule is harmless and is retained. The lesson is in the harness:
+> count and text queries succeed on hidden elements, so a smoke test must assert
+> the pane is visible before trusting any visibility result.
+
+### Final production validation
+
+| Check | Result |
+|---|---|
+| Recent history across >24h | verified — 3 dates, 5 rows older than 24h |
+| `started_at` ordering | verified — strictly newest-first, DOM matches API |
+| Needs Attention filter | verified — 22 rows narrow to 8 and restore |
+| Completed Open action | verified — 14 completed rows, each individual |
+| Terminal deletion | verified — job + 2 sections removed, re-delete 404 |
+| Report preservation | verified — library unchanged at 44 |
+| Zero orphaned sections | verified — 0 orphans after deletion |
+| Pagination | **not production-exercised** — 21 sessions < 25 page size |
+| Running deletion blocked | **not production-exercised** — no active job; unit-tested |
+| Research / synthesis | none initiated |
+
+Production after validation: 21 jobs, 44 reports, 197 sections, 0 orphans. All
+smoke fixtures were disposable and are cleaned up.
+
