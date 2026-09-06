@@ -1403,6 +1403,18 @@ app.post('/api/aresearch/research', async (req, res) => {
                         progress_percent: live.progress_percent });
     }
 
+    /* Identity is resolved HERE and travels with the request. The engine writes
+       the durable job row now, and when it computed its own key the two
+       normalisations diverged: "ACRO Automation Systems" became
+       "acro automation systems" here and "acroautomationsystems" there, so
+       every company-keyed lookup - the company table, Existing Report, the
+       duplicate guard, the report upsert - stopped finding the newer job. One
+       normaliser, and this is it. */
+    const ident = jobsDb.resolveIdentity({
+      companyName: body.company, website: body.website });
+    body.company_key = ident.key;
+    body.identity_source = ident.source;
+
     // Tell the engine where to report back to, and who it is.
     body.callback_url = process.env.CRM_CALLBACK_URL
       || `${req.protocol}://${req.get('host')}/api/qwen-research/callback`;

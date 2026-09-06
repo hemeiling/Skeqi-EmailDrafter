@@ -4381,7 +4381,7 @@ async function activeQwenJob(companyName) {
     SELECT *, (updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale
     FROM account_research_qwen_jobs
     WHERE company_key = $1 AND status IN ${JOB_LIVE}
-    ORDER BY started_at DESC LIMIT 1
+    ORDER BY COALESCE(started_at, queued_at) DESC, queued_at DESC LIMIT 1
   `, [key]);
   if (!rows.length) return null;
   if (rows[0].stale) {
@@ -4399,12 +4399,16 @@ async function getQwenJob(jobId) {
 }
 
 /** Latest job for a company whatever its state — used to restore the UI. */
+/* Newest first, and deliberately so. A QUEUED job has no started_at since the
+   durable queue landed, so ordering by started_at alone put it wherever the
+   planner felt like; two historical jobs sharing a timestamp were equally
+   arbitrary. Enqueue time breaks both ties. */
 async function latestQwenJob(companyName) {
   const key = normalizeNameKey(companyName || '');
   if (!key) return null;
   const rows = await q(`
     SELECT * FROM account_research_qwen_jobs WHERE company_key = $1
-    ORDER BY started_at DESC LIMIT 1
+    ORDER BY COALESCE(started_at, queued_at) DESC, queued_at DESC LIMIT 1
   `, [key]);
   return rows[0] || null;
 }
