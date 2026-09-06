@@ -56,6 +56,7 @@
         verified_organizations: 0, retained_competitors: 0,
         direct: 0, partial: 0, adjacent: 0, rejected_same_industry: 0,
         distinct_domains: 0, profile_confidence: null, skip_reason: null,
+        failed: false,
       },
       /* Who sells ON BEHALF OF the account. channel_entities counts stated
          representation only; an integrator or technology partner is counted as
@@ -66,7 +67,7 @@
         verified_organizations: 0, channel_entities: 0, authorized: 0,
         partners: 0, rejected_no_representation: 0, distinct_domains: 0,
         go_to_market_model: null, go_to_market_confidence: null,
-        skip_reason: null,
+        skip_reason: null, failed: false,
       },
       fallbacks: [],
       usage: { model_calls: 0, input_tokens: 0, output_tokens: 0,

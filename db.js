@@ -4428,30 +4428,53 @@ async function completeQwenJob(jobId, reportId, outcome = 'completed') {
    So the counts come from where they were actually recorded, and the cost is
    reported as unavailable rather than as zero. */
 async function retrievalToolUsage() {
+  /* Tavily is spent by FOUR paths now, not two. Provider discovery and the
+     general fallback live under `retrieval`; target-competitor and channel
+     discovery are top-level blocks, because each is a distinct capability with
+     its own budget. Summing only the first two under a label that says "Tavily
+     Usage" under-reported real usage by up to ten searches per run.
+
+     Still no price. Counting searches is not pricing them, and the MCP exposes
+     neither a usage nor a credit field. */
   const rows = await q(`
     SELECT
       COALESCE(SUM((execution_manifest->'retrieval'->'tavily_provider'->>'searches')::int), 0)::int
         AS provider_searches,
       COALESCE(SUM((execution_manifest->'retrieval'->'tavily_general'->>'searches')::int), 0)::int
         AS general_searches,
+      COALESCE(SUM((execution_manifest->'competitor_discovery'->>'searches')::int), 0)::int
+        AS competitor_searches,
+      COALESCE(SUM((execution_manifest->'channel_discovery'->>'searches')::int), 0)::int
+        AS channel_searches,
       COALESCE(SUM((execution_manifest->'retrieval'->'tavily_provider'->>'extracts')::int), 0)::int
         + COALESCE(SUM((execution_manifest->'retrieval'->'tavily_general'->>'extracts')::int), 0)::int
         AS extracts,
       COUNT(*) FILTER (
         WHERE (execution_manifest->'retrieval'->'tavily_provider'->>'used')::boolean
            OR (execution_manifest->'retrieval'->'tavily_general'->>'used')::boolean
+           OR (execution_manifest->'competitor_discovery'->>'used')::boolean
+           OR (execution_manifest->'channel_discovery'->>'used')::boolean
       )::int AS runs
     FROM account_research_qwen_jobs
     WHERE execution_manifest IS NOT NULL
   `);
   const r = rows[0] || {};
+  /* A manifest written before a block existed simply has no such key, and
+     ->>'searches' on a missing object is NULL, which COALESCE reads as zero.
+     A legacy job therefore contributes its real provider and fallback counts
+     and nothing else - it is not skipped, and it does not invent a zero it
+     never earned. */
   const provider = r.provider_searches || 0;
   const general = r.general_searches || 0;
+  const competitor = r.competitor_searches || 0;
+  const channel = r.channel_searches || 0;
   return {
     tavily: {
       provider_searches: provider,
       general_searches: general,
-      total_searches: provider + general,
+      competitor_searches: competitor,
+      channel_searches: channel,
+      total_searches: provider + general + competitor + channel,
       extracts: r.extracts || 0,
       runs: r.runs || 0,
       // No price is known, so none is asserted. See the comment above.

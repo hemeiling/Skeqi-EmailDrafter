@@ -60,7 +60,53 @@ ck('the aggregation queries the jobs table, not the events table',
 ck('provider and fallback are counted separately',
    AGG.includes("'tavily_provider'->>'searches'")
    && AGG.includes("'tavily_general'->>'searches'"));
-ck('the total is the sum of the two', /provider \+ general/.test(DB));
+/* Four paths spend Tavily now. Counting two of them under a label that reads
+   "Tavily Usage" under-reported real usage by up to ten searches per run. */
+ck('competitor discovery is counted too',
+   AGG.includes("'competitor_discovery'->>'searches'"));
+ck('channel discovery is counted too',
+   AGG.includes("'channel_discovery'->>'searches'"));
+ck('the total is the sum of all four',
+   /provider \+ general \+ competitor \+ channel/.test(DB));
+ck('a run counts as a Tavily run if ANY path used it',
+   AGG.includes("'competitor_discovery'->>'used'")
+   && AGG.includes("'channel_discovery'->>'used'"));
+ck('every component is COALESCEd, so a legacy manifest contributes what it has',
+   (AGG.match(/COALESCE\(SUM\(/g) || []).length >= 6,
+   'a missing block reads as NULL, and NULL must become 0 rather than void the row');
+ck('the aggregation still selects only from the jobs table',
+   (AGG.match(/FROM /g) || []).length === 1);
+
+/* Reconciliation, arithmetic only: the total must equal its parts, including
+   the case where the two newer blocks are absent from a stored manifest. */
+const rollup = (rows) => {
+  const sum = (k) => rows.reduce((a, r) => a + (r[k] || 0), 0);
+  const provider = sum('provider'), general = sum('general');
+  const competitor = sum('competitor'), channel = sum('channel');
+  return { provider, general, competitor, channel,
+           total: provider + general + competitor + channel };
+};
+const modern = rollup([{ provider: 8, general: 4, competitor: 6, channel: 4 }]);
+ck('a modern run reconciles', modern.total === 22
+   && modern.total === modern.provider + modern.general
+                     + modern.competitor + modern.channel);
+const legacy = rollup([{ provider: 8, general: 4 }]);
+ck('a legacy manifest with neither new block reconciles',
+   legacy.total === 12 && legacy.competitor === 0 && legacy.channel === 0);
+const mixed = rollup([{ provider: 8, general: 4 },
+                      { provider: 2, general: 0, competitor: 6, channel: 4 }]);
+ck('a mix of legacy and modern reconciles', mixed.total === 24
+   && mixed.total === mixed.provider + mixed.general
+                    + mixed.competitor + mixed.channel);
+ck('the UI shows all four components',
+   HTML.includes('id="u-tavily-provider"') && HTML.includes('id="u-tavily-general"')
+   && HTML.includes('id="u-tavily-competitor"') && HTML.includes('id="u-tavily-channel"'));
+ck('and the client fills all four',
+   APP.includes('u-tavily-competitor') && APP.includes('u-tavily-channel'));
+ck('a response without the newer fields renders zero, not NaN',
+   /rt\.competitor_searches \|\| 0/.test(APP) && /rt\.channel_searches \|\| 0/.test(APP));
+ck('the label and its scope are unchanged',
+   HTML.includes('Tavily Usage (All Time)') && HTML.includes('Tavily 使用量（累计）'));
 
 console.log('\n[3] No fabricated monetary value\n');
 ck('the aggregation reports cost as null', /cost_usd:\s*null/.test(DB));

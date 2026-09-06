@@ -2733,8 +2733,12 @@ async function refreshUsage() {
        known. Rendering $0.00 here would read as "these searches were free",
        which is a claim about Alibaba's billing that we cannot make. */
     const rt = (d.retrieval_tools || {}).tavily;
+    // Four paths spend Tavily, and the breakdown says which. A total with no
+    // components cannot be checked against anything.
     set("u-tavily-provider", rt ? rt.provider_searches : 0);
     set("u-tavily-general", rt ? rt.general_searches : 0);
+    set("u-tavily-competitor", rt ? rt.competitor_searches || 0 : 0);
+    set("u-tavily-channel", rt ? rt.channel_searches || 0 : 0);
     set("u-tavily-total", rt ? rt.total_searches : 0);
   } catch (e) { /* silent */ }
 }
