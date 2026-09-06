@@ -266,6 +266,50 @@ ck('a manifest without the block gains it',
    M.apply(olderStill, { channel_discovery: { searches: 1 } })
      .channel_discovery.searches === 1);
 
+console.log('\n[13] Synthesis payload diagnostics\n');
+
+const noPay = M.empty();
+ck('an empty manifest reports no payload', noPay.synthesis_payload.synthesis_payload_bytes === 0);
+ck('and no compaction', noPay.synthesis_payload.synthesis_compaction_applied === false);
+
+const paid = M.apply(M.empty(), { synthesis_payload: {
+  synthesis_payload_bytes: 46109, synthesis_estimated_input_tokens: 12080,
+  synthesis_budget_bytes: 48000, synthesis_compaction_applied: true,
+  synthesis_emergency_compaction: false,
+  synthesis_evidence_items_before: 16, synthesis_evidence_items_after: 16,
+  synthesis_evidence_bytes_before: 59925, synthesis_evidence_bytes_after: 30600,
+  synthesis_sources_preserved: 16, synthesis_domains_preserved: 7 } });
+ck('sizes are recorded', paid.synthesis_payload.synthesis_payload_bytes === 46109);
+ck('the request is under its own budget',
+   paid.synthesis_payload.synthesis_payload_bytes
+     < paid.synthesis_payload.synthesis_budget_bytes);
+ck('no source was lost to the budget',
+   paid.synthesis_payload.synthesis_evidence_items_after
+     === paid.synthesis_payload.synthesis_evidence_items_before);
+ck('replaying it changes nothing',
+   JSON.stringify(M.apply(paid, { synthesis_payload: { synthesis_payload_bytes: 46109 } })
+     .synthesis_payload) === JSON.stringify(paid.synthesis_payload));
+ck('an emergency retry is distinguishable from a normal compaction',
+   M.apply(M.empty(), { synthesis_payload: { synthesis_emergency_compaction: true } })
+     .synthesis_payload.synthesis_emergency_compaction === true);
+ck('no prompt body can be stored here',
+   Object.keys(paid.synthesis_payload).every((k) =>
+     typeof paid.synthesis_payload[k] === 'number'
+     || typeof paid.synthesis_payload[k] === 'boolean'),
+   'every field is a size, a count or a flag');
+const olderPay = M.empty();
+delete olderPay.synthesis_payload;
+ck('a manifest without the block gains it',
+   M.apply(olderPay, { synthesis_payload: { synthesis_payload_bytes: 5 } })
+     .synthesis_payload.synthesis_payload_bytes === 5);
+ck('finalize keeps it',
+   M.finalize(paid, { accountingComplete: true }).synthesis_payload
+     .synthesis_payload_bytes === 46109);
+ck('payload diagnostics never touch retrieval or discovery counters',
+   JSON.stringify(paid.retrieval) === JSON.stringify(M.empty().retrieval)
+   && JSON.stringify(paid.competitor_discovery)
+      === JSON.stringify(M.empty().competitor_discovery));
+
 console.log('\n' + pass + ' passed, ' + fail.length + ' failed');
 fail.forEach((f) => console.log('  FAILED: ' + f));
 process.exit(fail.length ? 1 : 0);

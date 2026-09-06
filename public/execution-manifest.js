@@ -69,6 +69,16 @@
         go_to_market_model: null, go_to_market_confidence: null,
         skip_reason: null, failed: false,
       },
+      /* What the preflight budget did to the synthesis request. Sizes and
+         counts only: a record that stored the payload would be the payload. */
+      synthesis_payload: {
+        synthesis_payload_bytes: 0, synthesis_estimated_input_tokens: 0,
+        synthesis_budget_bytes: 0, synthesis_compaction_applied: false,
+        synthesis_emergency_compaction: false,
+        synthesis_evidence_items_before: 0, synthesis_evidence_items_after: 0,
+        synthesis_evidence_bytes_before: 0, synthesis_evidence_bytes_after: 0,
+        synthesis_sources_preserved: 0, synthesis_domains_preserved: 0,
+      },
       fallbacks: [],
       usage: { model_calls: 0, input_tokens: 0, output_tokens: 0,
                estimated_cost_usd: null, cost_estimated: null,
