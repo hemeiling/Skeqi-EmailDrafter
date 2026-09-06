@@ -229,7 +229,34 @@ ck('the hidden attribute still wins when there is nothing to filter',
   const rn = await deleteSession(fakeClient(null), null);
   ck('a missing id is handled', rn.ok === false && rn.reason === 'not_found');
 
-  console.log('\n' + pass + ' passed, ' + fail.length + ' failed');
+  console.log('\n[N] The CRM owns the durable-queue schema\n');
+
+const DB = require('fs').readFileSync(__dirname + '/db.js', 'utf8');
+const SRV2 = require('fs').readFileSync(__dirname + '/server.js', 'utf8');
+for (const col of ['queued_at', 'worker_id', 'heartbeat_at', 'lease_expires_at',
+                   'attempts', 'payload', 'runtime_state']) {
+  ck('initDb creates ' + col,
+     new RegExp('ADD COLUMN IF NOT EXISTS\\s+' + col).test(DB));
+}
+ck('the claim index is created here',
+   /CREATE INDEX IF NOT EXISTS idx_arq_claimable/.test(DB));
+ck('the lease index is created here',
+   /CREATE INDEX IF NOT EXISTS idx_arq_leases/.test(DB));
+ck('both are partial, so they only cover claimable or leased rows',
+   /idx_arq_claimable[\s\S]{0,160}WHERE status = 'queued'/.test(DB)
+   && /idx_arq_leases[\s\S]{0,160}WHERE status = 'running'/.test(DB));
+ck('the duplicate guard is unchanged',
+   /uq_arq_jobs_active[\s\S]{0,200}WHERE status IN \('queued','running'\)/.test(DB));
+
+/* Recovery is the worker's lease now, not an inference from a 404. */
+ck('reconcileOrphanJob is gone', !/reconcileOrphanJob/.test(SRV2));
+ck('and nothing still calls it', !/reconcileOrphanJob\(/.test(SRV2));
+ck('the reason it went is recorded where it lived',
+   /Recovery belongs to the worker's lease now/.test(SRV2));
+ck('a live row is treated as live',
+   /A live row means a live job/.test(SRV2));
+
+console.log('\n' + pass + ' passed, ' + fail.length + ' failed');
   fail.forEach((f) => console.log('  FAILED: ' + f));
   process.exit(fail.length ? 1 : 0);
 }());

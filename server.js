@@ -923,33 +923,15 @@ app.get('/api/account-research/config', (req, res) => {
    Recoverable degradation is NEVER reported as failure: a run that produced a
    report is completed_with_limitations, not failed. `failed` and `synthesis_failed`
    mean no report exists. */
-/* An engine that has forgotten a job it issued has restarted, and that run is
-   gone. The engine mints these ids, so "unknown job" is DEFINITIVE — there is no
-   reason to hold the row open for the 25-minute stale sweep while it blocks the
-   next attempt for that company.
+/* Recovery used to be inferred from here: the CRM asked the engine about a job,
+   read a 404 as "the research service restarted", and closed the row as
+   interrupted. That inference produced 24 of the first 46 rows, and it is no
+   longer true - the engine reads jobs from this same database, so a job that
+   exists is never unknown to it.
 
-   A transport failure is NOT the same thing and must never close a live run, so
-   only an explicit 404 / "unknown job" counts. Everything persisted is kept:
-   company, job_id, last stage, last percentage, warnings and both timestamps. */
-async function reconcileOrphanJob(row) {
-  if (!row || !['queued', 'running'].includes(row.status)) return row;
-  let out;
-  try {
-    out = await qr.callEngine(`/api/job/${encodeURIComponent(row.job_id)}`);
-  } catch (e) {
-    return row;                       // engine unreachable: assume nothing
-  }
-  const err = out && out.data && out.data.error;
-  const unknown = out.status === 404
-    || (typeof err === 'string' && /unknown job/i.test(err));
-  if (!unknown) return row;
-  const updated = await jobsDb.failQwenJob(
-    row.job_id,
-    `Interrupted at ${row.progress_percent || 0}% during ${row.stage || 'retrieval'}: `
-    + 'the research service restarted and no longer holds this run.',
-    'interrupted');
-  return updated || { ...row, status: 'interrupted' };
-}
+   Recovery belongs to the worker's lease now. A lapsed lease is reclaimed by
+   another worker within one lease interval, and only a job that has exhausted
+   its attempts is failed, by the reaper, with the count in the error text. */
 
 /* THE ONE ACCOUNTING BOUNDARY for Qwen Account Research.
 
@@ -1412,15 +1394,13 @@ app.post('/api/aresearch/research', async (req, res) => {
        A refresh, a second tab or a closed-and-reopened session all pass a
        client-side check; a partial unique index does not. */
     const live = await jobsDb.activeQwenJob(body.company);
-    if (live) {
-      // Still the database's decision, but an engine that has forgotten the run
-      // means there is nothing to attach to. Reconcile, then re-decide.
-      const checked = await reconcileOrphanJob(live).catch(() => live);
-      if (checked && ['queued', 'running'].includes(checked.status)) {
-        return res.json({ job_id: checked.job_id, attached: true,
-                          status: checked.status, stage: checked.stage,
-                          progress_percent: checked.progress_percent });
-      }
+    /* A live row means a live job. The worker's lease is what keeps it alive,
+       and a lapsed lease is reclaimed by another worker rather than judged dead
+       from this side. */
+    if (live && ['queued', 'running'].includes(live.status)) {
+      return res.json({ job_id: live.job_id, attached: true,
+                        status: live.status, stage: live.stage,
+                        progress_percent: live.progress_percent });
     }
 
     // Tell the engine where to report back to, and who it is.
@@ -1455,12 +1435,8 @@ app.get('/api/aresearch/job-for-company', async (req, res) => {
       jobsDb.activeQwenJob(company),
       jobsDb.latestQwenJob(company),
     ]);
-    if (active) {
-      const checked = await reconcileOrphanJob(active).catch(() => active);
-      // Orphaned: keep it visible as history, but it is no longer ACTIVE and it
-      // must stop blocking the next run for this company.
-      if (checked && checked.status !== active.status) { latest = checked; active = null; }
-    }
+    // No reconciliation step: a row in a live state IS live, because a worker's
+    // lease is what holds it there and a lapsed one is reclaimed, not orphaned.
     res.json({ active: active || null, latest: latest || null });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1484,10 +1460,7 @@ app.get('/api/aresearch/sessions', async (req, res) => {
     /* Reconcile anything still marked live before reporting it as running. A row
        whose engine has forgotten it is interrupted, and must say so here rather
        than showing a frozen percentage that will never advance. */
-    const checked = await Promise.all(rows.map((r) =>
-      (['queued', 'running'].includes(r.status) ? reconcileOrphanJob(r) : Promise.resolve(r))
-        .catch(() => r)));
-    const out = checked.map((r) => ({ ...r, state: sessionState(r) }));
+    const out = rows.map((r) => ({ ...r, state: sessionState(r) }));
     const last = out.length ? out[out.length - 1] : null;
     res.json({
       sessions: out,

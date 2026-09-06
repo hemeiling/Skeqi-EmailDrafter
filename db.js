@@ -1094,6 +1094,31 @@ async function initDb() {
                       ON account_research_qwen_jobs(company_key)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_jobs_updated
                       ON account_research_qwen_jobs(updated_at DESC)`);
+  /* Durable research queue. The engine's workers CLAIM rows from this table and
+     hold a lease on them; the CRM owns the schema, as it owns every other table
+     here, and the workers verify these columns exist at startup rather than
+     issuing DDL of their own. One migration owner, not two.
+
+     A run used to live in a Python process's memory and 24 of the first 46 jobs
+     died with it. worker_id + attempts is the fencing token: a worker whose
+     lease lapsed matches no row and can no longer write to the job. */
+  await pool.query(`ALTER TABLE account_research_qwen_jobs
+                      ADD COLUMN IF NOT EXISTS queued_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+                      ADD COLUMN IF NOT EXISTS worker_id        TEXT,
+                      ADD COLUMN IF NOT EXISTS heartbeat_at     TIMESTAMPTZ,
+                      ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ,
+                      ADD COLUMN IF NOT EXISTS attempts         INTEGER NOT NULL DEFAULT 0,
+                      ADD COLUMN IF NOT EXISTS payload          JSONB,
+                      ADD COLUMN IF NOT EXISTS runtime_state    JSONB`);
+  /* The claim scan: queued, oldest first. Partial, so it only ever touches rows
+     that are actually claimable. */
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_claimable
+                      ON account_research_qwen_jobs(queued_at)
+                      WHERE status = 'queued'`);
+  /* The reaper scan: running rows whose lease has lapsed. */
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_arq_leases
+                      ON account_research_qwen_jobs(lease_expires_at)
+                      WHERE status = 'running'`);
   /* At most ONE live job per company. This is the duplicate guard, enforced by
      the database rather than by whoever happens to click first — a browser-side
      check cannot survive a refresh, and two tabs would both pass it. */
