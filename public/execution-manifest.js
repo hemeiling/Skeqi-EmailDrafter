@@ -87,6 +87,13 @@
         synthesis_evidence_bytes_before: 0, synthesis_evidence_bytes_after: 0,
         synthesis_sources_preserved: 0, synthesis_domains_preserved: 0,
       },
+      /* Structural bilingual completeness. Counts and section names only: a
+         model that writes 表格同上 instead of translating a table produces a
+         report that is complete in English and hollow in Chinese, and nobody
+         reading English would ever notice. */
+      bilingual: {
+        checked: false, warnings: 0, sections: [], reasons: [],
+      },
       fallbacks: [],
       usage: { model_calls: 0, input_tokens: 0, output_tokens: 0,
                estimated_cost_usd: null, cost_estimated: null,

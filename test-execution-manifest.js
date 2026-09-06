@@ -359,6 +359,36 @@ ck('payload diagnostics never touch retrieval or discovery counters',
    && JSON.stringify(paid.competitor_discovery)
       === JSON.stringify(M.empty().competitor_discovery));
 
+console.log('\n[14] Bilingual completeness diagnostics\n');
+
+const noBi = M.empty();
+ck('an empty manifest reports no bilingual check',
+   noBi.bilingual.checked === false && noBi.bilingual.warnings === 0);
+const bi = M.apply(M.empty(), { bilingual: {
+  checked: true, warnings: 2,
+  sections: ['Existing Automation Providers / 现有自动化供应商'],
+  reasons: ['chinese_cross_reference', 'missing_chinese_table'] } });
+ck('counts and reasons survive the merge',
+   bi.bilingual.warnings === 2 && bi.bilingual.reasons.length === 2);
+ck('the affected section is named', /Providers/.test(bi.bilingual.sections[0]));
+ck('a clean run records that it was checked with zero warnings',
+   M.apply(M.empty(), { bilingual: { checked: true, warnings: 0 } })
+     .bilingual.checked === true);
+ck('replaying it changes nothing',
+   JSON.stringify(M.apply(bi, { bilingual: { warnings: 2 } }).bilingual)
+     === JSON.stringify(bi.bilingual));
+ck('no report text can be stored here',
+   bi.bilingual.sections.every((s) => s.length < 200)
+   && !Object.keys(bi.bilingual).some((k) => /body|report|text|content/i.test(k)));
+const olderBi = M.empty();
+delete olderBi.bilingual;
+ck('a manifest predating the block gains it',
+   M.apply(olderBi, { bilingual: { warnings: 1 } }).bilingual.warnings === 1);
+ck('it does not disturb the payload or discovery blocks',
+   JSON.stringify(bi.synthesis_payload) === JSON.stringify(M.empty().synthesis_payload)
+   && JSON.stringify(bi.competitor_discovery)
+      === JSON.stringify(M.empty().competitor_discovery));
+
 console.log('\n' + pass + ' passed, ' + fail.length + ' failed');
 fail.forEach((f) => console.log('  FAILED: ' + f));
 process.exit(fail.length ? 1 : 0);
