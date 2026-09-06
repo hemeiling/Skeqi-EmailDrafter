@@ -57,6 +57,17 @@
         direct: 0, partial: 0, adjacent: 0, rejected_same_industry: 0,
         distinct_domains: 0, profile_confidence: null, skip_reason: null,
       },
+      /* Who sells ON BEHALF OF the account. channel_entities counts stated
+         representation only; an integrator or technology partner is counted as
+         a partner, because calling one a distributor is the error the role
+         model exists to prevent. */
+      channel_discovery: {
+        used: false, searches: 0, batches: 0, candidates: 0,
+        verified_organizations: 0, channel_entities: 0, authorized: 0,
+        partners: 0, rejected_no_representation: 0, distinct_domains: 0,
+        go_to_market_model: null, go_to_market_confidence: null,
+        skip_reason: null,
+      },
       fallbacks: [],
       usage: { model_calls: 0, input_tokens: 0, output_tokens: 0,
                estimated_cost_usd: null, cost_estimated: null,
@@ -122,6 +133,8 @@
     // not "used", and a skip is not a use.
     const c = m.competitor_discovery;
     c.used = c.used || c.searches > 0;
+    const h = m.channel_discovery;
+    h.used = h.used || h.searches > 0;
     m.synthesis.calls = Math.max(m.synthesis.calls, m.synthesis.models_attempted.length);
     m.synthesis.fallback_attempts = Math.max(0, m.synthesis.calls
       - (m.synthesis.successful_model ? 1 : 0));
@@ -182,6 +195,7 @@
     if (m.retrieval && m.retrieval.tavily_provider.used) out.push('tavily_provider');
     if (m.retrieval && m.retrieval.tavily_general.used) out.push('tavily_general');
     if (m.competitor_discovery && m.competitor_discovery.used) out.push('competitor_discovery');
+    if (m.channel_discovery && m.channel_discovery.used) out.push('channel_discovery');
     if (m.synthesis && m.synthesis.calls > 0) out.push('synthesis');
     return out;
   }

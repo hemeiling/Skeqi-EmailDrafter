@@ -161,7 +161,11 @@ ck('no rejected candidates are stored', (function () {
   return walk(withTavily) && walk(M.apply(M.empty(),
     { competitor_discovery: { searches: 2, rejected_same_industry: 7 } }));
 }()));
-ck('a full manifest stays small', JSON.stringify(withTavily).length < 1400,
+/* The bound exists to stop candidate LISTS from creeping in, not to freeze the
+   number of counters. Two discovery blocks were added deliberately; each is a
+   fixed set of scalars, so the record still fits on a screen. Raise this only
+   alongside another block of counters, never to accommodate stored candidates. */
+ck('a full manifest stays small', JSON.stringify(withTavily).length < 2000,
    String(JSON.stringify(withTavily).length));
 ck('an unknown key from a newer engine is ignored',
    !('nonsense' in M.apply(null, { nonsense: 1 })));
@@ -219,6 +223,48 @@ ck('finalize preserves it',
    M.finalize(ran, { accountingComplete: true }).competitor_discovery.searches === 4);
 ck('a legacy job reports no competitor discovery',
    M.forLegacyJob({ model: 'q', report_id: 1 }).competitor_discovery.used === false);
+
+console.log('\n[12] Channel discovery is counted apart from competitors\n');
+
+const noChan = M.empty();
+ck('an empty manifest has run no channel discovery',
+   noChan.channel_discovery.used === false && noChan.channel_discovery.searches === 0);
+ck('and it is not listed as a used provider',
+   !M.providersUsed(noChan).includes('channel_discovery'));
+
+const chanSkip = M.apply(M.empty(), { channel_discovery: {
+  searches: 0, go_to_market_model: 'DIRECT', go_to_market_confidence: 'high',
+  skip_reason: 'go-to-market corroborated as DIRECT (explicit statement)' } });
+ck('a corroborated direct model skips and stays unused',
+   chanSkip.channel_discovery.used === false);
+ck('and the model travels with the skip',
+   chanSkip.channel_discovery.go_to_market_confidence === 'high');
+
+const chanRan = M.apply(M.empty(), { channel_discovery: {
+  searches: 2, batches: 1, candidates: 9, verified_organizations: 4,
+  channel_entities: 2, authorized: 1, partners: 1,
+  rejected_no_representation: 2, distinct_domains: 2,
+  go_to_market_model: 'DIRECT', go_to_market_confidence: 'medium' } });
+ck('a search makes it used', chanRan.channel_discovery.used === true);
+ck('it appears in providersUsed',
+   M.providersUsed(chanRan).includes('channel_discovery'));
+ck('replaying it changes nothing',
+   JSON.stringify(M.apply(chanRan, { channel_discovery: { searches: 2, candidates: 9 } })
+     .channel_discovery) === JSON.stringify(chanRan.channel_discovery));
+ck('partners are counted apart from channel entities',
+   chanRan.channel_discovery.channel_entities === 2
+   && chanRan.channel_discovery.partners === 1,
+   'an integrator is not a distributor');
+ck('channel numbers never touch competitor numbers',
+   JSON.stringify(chanRan.competitor_discovery)
+     === JSON.stringify(M.empty().competitor_discovery));
+ck('no monetary field exists',
+   !Object.keys(chanRan.channel_discovery).some((k) => /cost|price|usd/i.test(k)));
+const olderStill = M.empty();
+delete olderStill.channel_discovery;
+ck('a manifest without the block gains it',
+   M.apply(olderStill, { channel_discovery: { searches: 1 } })
+     .channel_discovery.searches === 1);
 
 console.log('\n' + pass + ' passed, ' + fail.length + ' failed');
 fail.forEach((f) => console.log('  FAILED: ' + f));
