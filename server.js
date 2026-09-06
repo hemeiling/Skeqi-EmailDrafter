@@ -1247,6 +1247,23 @@ app.post('/api/qwen-research/callback', express.json({ limit: '25mb' }), async (
        could synthesise. Kept distinct from 'failed' so the UI can offer "retry
        synthesis" rather than implying the whole run has to be paid for again. */
     if (b.event === 'synthesis_failed') {
+      /* A failed run is not a free run. Retrieval executed and every synthesis
+         attempt reached a model, so both were billed; recording nothing here
+         made the most expensive outcome look like the cheapest. Same
+         deterministic request_ids as the success path, so a later retry that
+         completes re-sends the identical retrieval rows and they de-duplicate. */
+      try {
+        // `job` is bound further down, inside the completed branch, so it must be
+        // fetched here rather than closed over - a ReferenceError inside this
+        // try would be swallowed and reproduce the very silence being fixed.
+        const failedJob = await jobsDb.getQwenJob(jobId);
+        const u = recordResearchUsage(jobId, b.ai_usage, {
+          companyId: failedJob && failedJob.company_id,
+          userId: b.created_by || 'engine',
+          model: b.model || (failedJob && failedJob.model),
+        });
+        if (u.calls) await jobsDb.setQwenJobUsage(jobId, u);
+      } catch (e) { /* accounting must never change the outcome of a run */ }
       await jobsDb.failQwenJob(jobId, b.error || 'Synthesis failed after all fallbacks.',
                                'synthesis_failed');
       return res.json({ ok: true });
