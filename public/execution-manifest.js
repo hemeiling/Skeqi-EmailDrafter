@@ -49,25 +49,33 @@
       },
       /* Competitors OF THE TARGET ACCOUNT, not of us. Kept beside retrieval
          rather than inside it because it is a distinct capability with its own
-         search budget, and because its counters answer a different question:
-         how many real organisations survived competitive verification. */
+         budget, and because its counters answer a different question: how many
+         organisations the model proposed, and what the guardrails refused.
+
+         These names mirror the engine's discovery block exactly. mergeInto
+         ignores keys it does not declare, so a slot missing here is a counter
+         silently thrown away on arrival - which is what happened when discovery
+         moved to the model and the field names changed underneath. */
       competitor_discovery: {
-        used: false, searches: 0, batches: 0, candidates: 0,
-        verified_organizations: 0, retained_competitors: 0,
-        direct: 0, partial: 0, adjacent: 0, rejected_same_industry: 0,
-        distinct_domains: 0, profile_confidence: null, skip_reason: null,
-        failed: false,
+        used: false, failed: false,
+        model_calls: 0, searches: 0, targeted_queries: 0, candidates_named: 0,
+        pages_fetched: 0, sources_offered: 0, rows_proposed: 0,
+        retained_competitors: 0, direct: 0, partial: 0, adjacent: 0,
+        dropped_self: 0, dropped_placeholder: 0, dropped_uncited: 0,
+        dropped_unsupported: 0, dropped_duplicate: 0, dropped_schema: 0,
+        distinct_domains: 0, skip_reason: null,
       },
-      /* Who sells ON BEHALF OF the account. channel_entities counts stated
-         representation only; an integrator or technology partner is counted as
-         a partner, because calling one a distributor is the error the role
-         model exists to prevent. */
+      /* Who sells ON BEHALF OF the account. Every published row cites evidence
+         that states the representation, so there is no partner bucket here any
+         more; what a page could not establish is counted under dropped_*. */
       channel_discovery: {
-        used: false, searches: 0, batches: 0, candidates: 0,
-        verified_organizations: 0, channel_entities: 0, authorized: 0,
-        partners: 0, rejected_no_representation: 0, distinct_domains: 0,
-        go_to_market_model: null, go_to_market_confidence: null,
-        skip_reason: null, failed: false,
+        used: false, failed: false,
+        model_calls: 0, searches: 0, targeted_queries: 0, candidates_named: 0,
+        pages_fetched: 0, sources_offered: 0, rows_proposed: 0,
+        channel_entities: 0, authorized: 0,
+        dropped_self: 0, dropped_placeholder: 0, dropped_uncited: 0,
+        dropped_unsupported: 0, dropped_duplicate: 0, dropped_schema: 0,
+        distinct_domains: 0, go_to_market_model: null, skip_reason: null,
       },
       /* What the preflight budget did to the synthesis request. Sizes and
          counts only: a record that stored the payload would be the payload. */

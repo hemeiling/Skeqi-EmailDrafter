@@ -162,11 +162,20 @@ ck('no rejected candidates are stored', (function () {
     { competitor_discovery: { searches: 2, rejected_same_industry: 7 } }));
 }()));
 /* The bound exists to stop candidate LISTS from creeping in, not to freeze the
-   number of counters. Two discovery blocks were added deliberately; each is a
-   fixed set of scalars, so the record still fits on a screen. Raise this only
-   alongside another block of counters, never to accommodate stored candidates. */
-ck('a full manifest stays small', JSON.stringify(withTavily).length < 2000,
+   number of counters. The discovery blocks now carry a refusal counter per
+   guardrail, which is the whole point of them; each is still a fixed set of
+   scalars, so the record fits on a screen. Raise this only alongside another
+   block of counters, never to accommodate stored candidates. */
+ck('a full manifest stays small', JSON.stringify(withTavily).length < 2600,
    String(JSON.stringify(withTavily).length));
+ck('and it stores no list of any kind', (function () {
+  const walk = (v) => {
+    if (Array.isArray(v)) return v.every((x) => typeof x === 'string' && x.length < 60);
+    if (v && typeof v === 'object') return Object.keys(v).every((k) => walk(v[k]));
+    return true;
+  };
+  return walk(withTavily);
+}()), 'counters and short labels only; never a candidate record');
 ck('an unknown key from a newer engine is ignored',
    !('nonsense' in M.apply(null, { nonsense: 1 })));
 ck('a null patch does not throw', M.apply(null, null).version === M.VERSION);
@@ -176,95 +185,135 @@ ck('an unversioned object is not accepted as existing state',
    M.apply({ retrieval: { current: { retained: 99 } } }, {}).retrieval.current.retained === 0,
    'a patch must never be mistaken for a manifest');
 
-console.log('\n[11] Target-competitor discovery is counted like any other work\n');
+console.log('\n[11] The discovery blocks match the engine field for field\n');
 
-const noComp = M.empty();
-ck('an empty manifest has run no competitor discovery',
-   noComp.competitor_discovery.used === false
-   && noComp.competitor_discovery.searches === 0);
-ck('and it is not listed as a used provider',
-   !M.providersUsed(noComp).includes('competitor_discovery'));
+/* The exact keys the engine emits, from app._competitor_facts and
+   app._channel_facts. mergeInto ignores keys the manifest does not declare, so
+   a slot missing here is a counter silently discarded on arrival. That is not
+   hypothetical: the discovery rewrite renamed these fields and twelve of
+   twenty-one were being dropped before this test existed. */
+const ENGINE_COMPETITOR = {
+  used: true, failed: false, model_calls: 2, searches: 4, targeted_queries: 2,
+  candidates_named: 2, pages_fetched: 6, sources_offered: 6, rows_proposed: 9,
+  retained_competitors: 2, direct: 1, partial: 1, adjacent: 0,
+  dropped_self: 3, dropped_placeholder: 2, dropped_uncited: 1,
+  dropped_unsupported: 1, dropped_duplicate: 0, dropped_schema: 0,
+  distinct_domains: 2, skip_reason: null,
+};
+const ENGINE_CHANNEL = {
+  used: true, failed: false, model_calls: 2, searches: 4, targeted_queries: 1,
+  candidates_named: 1, pages_fetched: 6, sources_offered: 6, rows_proposed: 1,
+  channel_entities: 0, authorized: 0,
+  dropped_self: 0, dropped_placeholder: 0, dropped_uncited: 0,
+  dropped_unsupported: 1, dropped_duplicate: 0, dropped_schema: 0,
+  distinct_domains: 0, go_to_market_model: 'UNKNOWN', skip_reason: null,
+};
 
+const disco = M.apply(M.empty(), { competitor_discovery: ENGINE_COMPETITOR,
+                                  channel_discovery: ENGINE_CHANNEL });
+const survives = (sent, stored) => Object.keys(sent).filter(
+  (k) => !(k in stored) || (sent[k] !== null && JSON.stringify(stored[k]) !== JSON.stringify(sent[k])));
+
+ck('every competitor field the engine sends survives the merge',
+   survives(ENGINE_COMPETITOR, disco.competitor_discovery).length === 0,
+   survives(ENGINE_COMPETITOR, disco.competitor_discovery).join(', '));
+ck('every channel field the engine sends survives the merge',
+   survives(ENGINE_CHANNEL, disco.channel_discovery).length === 0,
+   survives(ENGINE_CHANNEL, disco.channel_discovery).join(', '));
+ck('the manifest declares no competitor slot the engine stopped sending',
+   Object.keys(M.empty().competitor_discovery)
+     .filter((k) => !(k in ENGINE_COMPETITOR)).length === 0,
+   Object.keys(M.empty().competitor_discovery)
+     .filter((k) => !(k in ENGINE_COMPETITOR)).join(', '));
+ck('nor a channel slot it stopped sending',
+   Object.keys(M.empty().channel_discovery)
+     .filter((k) => !(k in ENGINE_CHANNEL)).length === 0,
+   Object.keys(M.empty().channel_discovery)
+     .filter((k) => !(k in ENGINE_CHANNEL)).join(', '));
+
+/* The refusal counters are the point of the rewrite: they are how anyone sees
+   what the guardrails threw away. They must not be collapsed into one number. */
+for (const k of ['dropped_self', 'dropped_placeholder', 'dropped_uncited',
+                 'dropped_unsupported', 'dropped_duplicate', 'dropped_schema']) {
+  ck(k + ' is carried on both blocks',
+     k in disco.competitor_discovery && k in disco.channel_discovery);
+}
+ck('uncited and unsupported stay separate numbers',
+   disco.competitor_discovery.dropped_uncited === 1
+   && disco.competitor_discovery.dropped_unsupported === 1,
+   'one had no evidence; the other had evidence that did not support the claim');
+ck('the model calls are recorded', disco.competitor_discovery.model_calls === 2);
+ck('targeted queries are distinguishable from the total',
+   disco.competitor_discovery.targeted_queries === 2
+   && disco.competitor_discovery.searches === 4);
+ck('proposals are distinguishable from publications',
+   disco.competitor_discovery.rows_proposed === 9
+   && disco.competitor_discovery.retained_competitors === 2,
+   'nine were proposed and seven were refused');
+
+console.log('\n[11b] used, skips and failures\n');
+ck('an empty manifest has run no discovery',
+   M.empty().competitor_discovery.used === false
+   && M.empty().channel_discovery.used === false);
+ck('and neither appears in providersUsed',
+   !M.providersUsed(M.empty()).includes('competitor_discovery')
+   && !M.providersUsed(M.empty()).includes('channel_discovery'));
 const skipped = M.apply(M.empty(), { competitor_discovery: {
-  searches: 0, skip_reason: 'insufficient profile evidence: capabilities' } });
-ck('a skipped discovery stays unused', skipped.competitor_discovery.used === false);
-ck('and says why', skipped.competitor_discovery.skip_reason.indexOf('capabilities') > -1);
-ck('a skip is not a provider use',
-   !M.providersUsed(skipped).includes('competitor_discovery'));
-
-const ran = M.apply(M.empty(), { competitor_discovery: {
-  searches: 4, batches: 2, candidates: 18, verified_organizations: 7,
-  retained_competitors: 3, direct: 1, partial: 2, adjacent: 0,
-  rejected_same_industry: 4, distinct_domains: 3,
-  profile_confidence: { capabilities: 'high' } } });
-ck('a search makes it used', ran.competitor_discovery.used === true);
+  searches: 0, skip_reason: 'research returned no readable sources' } });
+ck('a skipped path stays unused', skipped.competitor_discovery.used === false);
+ck('and keeps its reason',
+   skipped.competitor_discovery.skip_reason.indexOf('readable') > -1);
+ck('a search makes it used', disco.competitor_discovery.used === true);
 ck('it then appears in providersUsed',
-   M.providersUsed(ran).includes('competitor_discovery'));
+   M.providersUsed(disco).includes('competitor_discovery')
+   && M.providersUsed(disco).includes('channel_discovery'));
+ck('a stage that broke says so',
+   M.apply(M.empty(), { competitor_discovery: { failed: true } })
+     .competitor_discovery.failed === true);
+ck('no monetary field exists on either block',
+   !Object.keys(disco.competitor_discovery).some((k) => /cost|price|usd/i.test(k))
+   && !Object.keys(disco.channel_discovery).some((k) => /cost|price|usd/i.test(k)));
+
+console.log('\n[12] Replay and history\n');
 ck('replaying the same callback changes nothing',
-   JSON.stringify(M.apply(ran, { competitor_discovery: { searches: 4, candidates: 18 } })
-     .competitor_discovery) === JSON.stringify(ran.competitor_discovery),
+   JSON.stringify(M.apply(disco, { competitor_discovery: ENGINE_COMPETITOR,
+                                  channel_discovery: ENGINE_CHANNEL }))
+     === JSON.stringify(disco),
    'counters are absolute, never incremental');
 ck('a later callback overwrites rather than adds',
-   M.apply(ran, { competitor_discovery: { searches: 6 } })
+   M.apply(disco, { competitor_discovery: { searches: 6 } })
      .competitor_discovery.searches === 6);
-ck('competitor numbers never touch retrieval accounting',
-   JSON.stringify(ran.retrieval) === JSON.stringify(M.empty().retrieval));
-ck('no monetary field exists',
-   !Object.keys(ran.competitor_discovery).some((k) => /cost|price|usd/i.test(k)));
-
-/* A job whose manifest was written before this block existed. Dropping the
-   incoming numbers would silently lose the work that just ran. */
-const older = M.empty();
-delete older.competitor_discovery;
-ck('an older manifest gains the block instead of losing the data',
-   M.apply(older, { competitor_discovery: { searches: 2 } })
+/* Three shapes of history have to survive: a manifest with no discovery blocks
+   at all, and one carrying the OLD field names from before the rewrite. */
+const noBlocks = M.empty();
+delete noBlocks.competitor_discovery;
+delete noBlocks.channel_discovery;
+ck('a manifest predating the blocks gains them',
+   M.apply(noBlocks, { competitor_discovery: { searches: 2 } })
      .competitor_discovery.searches === 2);
-ck('finalize preserves it',
-   M.finalize(ran, { accountingComplete: true }).competitor_discovery.searches === 4);
-ck('a legacy job reports no competitor discovery',
+const legacyNames = M.apply(M.empty(), {});
+legacyNames.competitor_discovery.batches = 2;
+legacyNames.competitor_discovery.verified_organizations = 34;
+legacyNames.competitor_discovery.rejected_same_industry = 11;
+const merged = M.apply(legacyNames, { competitor_discovery: ENGINE_COMPETITOR });
+ck('retired field names do not break parsing',
+   merged.competitor_discovery.searches === 4);
+ck('and are left as the history they are, never merged onto',
+   merged.competitor_discovery.batches === 2,
+   'a stored number is not rewritten by a schema that no longer declares it');
+ck('a legacy job still reports no discovery',
    M.forLegacyJob({ model: 'q', report_id: 1 }).competitor_discovery.used === false);
+ck('finalize preserves both blocks',
+   M.finalize(disco, { accountingComplete: true }).competitor_discovery.searches === 4
+   && M.finalize(disco, { accountingComplete: true }).channel_discovery.searches === 4);
 
-console.log('\n[12] Channel discovery is counted apart from competitors\n');
-
-const noChan = M.empty();
-ck('an empty manifest has run no channel discovery',
-   noChan.channel_discovery.used === false && noChan.channel_discovery.searches === 0);
-ck('and it is not listed as a used provider',
-   !M.providersUsed(noChan).includes('channel_discovery'));
-
-const chanSkip = M.apply(M.empty(), { channel_discovery: {
-  searches: 0, go_to_market_model: 'DIRECT', go_to_market_confidence: 'high',
-  skip_reason: 'go-to-market corroborated as DIRECT (explicit statement)' } });
-ck('a corroborated direct model skips and stays unused',
-   chanSkip.channel_discovery.used === false);
-ck('and the model travels with the skip',
-   chanSkip.channel_discovery.go_to_market_confidence === 'high');
-
-const chanRan = M.apply(M.empty(), { channel_discovery: {
-  searches: 2, batches: 1, candidates: 9, verified_organizations: 4,
-  channel_entities: 2, authorized: 1, partners: 1,
-  rejected_no_representation: 2, distinct_domains: 2,
-  go_to_market_model: 'DIRECT', go_to_market_confidence: 'medium' } });
-ck('a search makes it used', chanRan.channel_discovery.used === true);
-ck('it appears in providersUsed',
-   M.providersUsed(chanRan).includes('channel_discovery'));
-ck('replaying it changes nothing',
-   JSON.stringify(M.apply(chanRan, { channel_discovery: { searches: 2, candidates: 9 } })
-     .channel_discovery) === JSON.stringify(chanRan.channel_discovery));
-ck('partners are counted apart from channel entities',
-   chanRan.channel_discovery.channel_entities === 2
-   && chanRan.channel_discovery.partners === 1,
-   'an integrator is not a distributor');
-ck('channel numbers never touch competitor numbers',
-   JSON.stringify(chanRan.competitor_discovery)
-     === JSON.stringify(M.empty().competitor_discovery));
-ck('no monetary field exists',
-   !Object.keys(chanRan.channel_discovery).some((k) => /cost|price|usd/i.test(k)));
-const olderStill = M.empty();
-delete olderStill.channel_discovery;
-ck('a manifest without the block gains it',
-   M.apply(olderStill, { channel_discovery: { searches: 1 } })
-     .channel_discovery.searches === 1);
+/* The Tavily rollup reads `searches` from four paths. Renaming everything else
+   must not disturb the one field it depends on. */
+ck('the Tavily rollup still has the field it sums',
+   'searches' in disco.competitor_discovery && 'searches' in disco.channel_discovery);
+ck('and the four paths still add up',
+   disco.retrieval.tavily_provider.searches + disco.retrieval.tavily_general.searches
+   + disco.competitor_discovery.searches + disco.channel_discovery.searches === 8);
 
 console.log('\n[13] Synthesis payload diagnostics\n');
 
