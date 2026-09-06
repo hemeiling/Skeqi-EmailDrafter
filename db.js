@@ -4377,20 +4377,24 @@ async function claimQwenJob({ jobId, companyName, companyKey, website, model,
 async function activeQwenJob(companyName) {
   const key = normalizeNameKey(companyName || '');
   if (!key) return null;
+  /* A PURE READ. This used to mark any live job interrupted once its updated_at
+     was 25 minutes old, and a QUEUED job's updated_at never advances while it
+     waits - so viewing a company page was enough to cancel a healthy job that
+     was simply behind others in the queue. Seventeen were destroyed that way.
+
+     Recovery belongs to the lease: an expired lease is reclaimed by the next
+     worker, and only the sweeper, as the last resort when no worker is alive at
+     all, writes a terminal state. Nothing on a read path may change a job. */
   const rows = await q(`
-    SELECT *, (updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale
+    SELECT *, (status = 'running'
+            AND (lease_expires_at IS NULL
+                 OR lease_expires_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes')
+            AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale
     FROM account_research_qwen_jobs
     WHERE company_key = $1 AND status IN ${JOB_LIVE}
     ORDER BY COALESCE(started_at, queued_at) DESC, queued_at DESC LIMIT 1
   `, [key]);
-  if (!rows.length) return null;
-  if (rows[0].stale) {
-    // Its worker is gone. Say so rather than letting it block new runs forever.
-    await failQwenJob(rows[0].job_id,
-      'Interrupted: the research service restarted or stopped responding.', 'interrupted');
-    return null;
-  }
-  return rows[0];
+  return rows[0] || null;
 }
 
 async function getQwenJob(jobId) {
@@ -4672,7 +4676,9 @@ async function listRecentQwenJobs(limit = 25) {
            created_by, started_at, updated_at, completed_at,
            input_tokens, output_tokens, total_tokens,
            estimated_cost_usd, cost_estimated,
-           (status IN ${JOB_LIVE}
+           (status = 'running'
+            AND (lease_expires_at IS NULL
+                 OR lease_expires_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes')
             AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale,
            EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW())
                                - COALESCE(started_at, queued_at))) AS elapsed_seconds
@@ -4707,7 +4713,9 @@ async function listQwenSessions({ limit = 25, beforeStartedAt = null, beforeJobI
            created_by, started_at, updated_at, completed_at, execution_manifest,
            input_tokens, output_tokens, total_tokens,
            estimated_cost_usd, cost_estimated,
-           (status IN ${JOB_LIVE}
+           (status = 'running'
+            AND (lease_expires_at IS NULL
+                 OR lease_expires_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes')
             AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale,
            EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW())
                                - COALESCE(started_at, queued_at))) AS elapsed_seconds
