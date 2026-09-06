@@ -4228,25 +4228,15 @@ async function listQwenReports(search) {
   `, params);
 }
 
-async function getQwenReport(id) {
-  const rows = await q(
-    `SELECT research_data, version FROM account_research_qwen_reports WHERE id = $1`, [id]);
-  if (!rows.length) return null;
-  return { report: rows[0].research_data, version: rows[0].version };
-}
+/* One report row, however it was found.
 
-/* Latest report for a company, optionally for one model. This is what the
-   library opens and what a PDF is rendered from. */
-/* The company's current report, or null. There is only ever one row, so this
-   is a lookup rather than a "pick the newest" query. */
-async function getQwenReportForCompany(company) {
-  /* The run's accounting lives on the JOB that produced this report, not in the
-     record, because cost is calculated once at generation time and must not be
-     recomputed later at a different rate. Joined here so the report card can show
-     it without a second round trip. Older reports have no job row and simply
-     report no usage - which is correct: their retrieval tokens were discarded
-     before instrumentation and inventing a figure would be worse than none. */
-  const rows = await q(`
+   The run's accounting lives on the JOB that produced the report, not in the
+   record, because cost is calculated once at generation time and must not be
+   recomputed later at a different rate. Joined here so the report card can show
+   it without a second round trip. Older reports have no job row and simply
+   report no usage - which is correct: their retrieval tokens were discarded
+   before instrumentation, and inventing a figure would be worse than none. */
+const REPORT_SELECT = `
     SELECT r.id, r.research_data, r.version,
            j.total_tokens, j.input_tokens, j.output_tokens,
            j.estimated_cost_usd, j.cost_estimated, j.usage_detail
@@ -4254,11 +4244,10 @@ async function getQwenReportForCompany(company) {
       LEFT JOIN LATERAL (
         SELECT * FROM account_research_qwen_jobs
          WHERE report_id = r.id ORDER BY completed_at DESC NULLS LAST LIMIT 1
-      ) j ON TRUE
-     WHERE r.company_key = $1 LIMIT 1
-  `, [normalizeNameKey(String(company || ''))]);
-  if (!rows.length) return null;
-  const x = rows[0];
+      ) j ON TRUE`;
+
+function shapeReport(x) {
+  if (!x) return null;
   return { id: x.id, report: x.research_data, version: x.version,
            run_usage: x.total_tokens == null ? null : {
              input_tokens: x.input_tokens, output_tokens: x.output_tokens,
@@ -4266,6 +4255,23 @@ async function getQwenReportForCompany(company) {
              estimated_cost_usd: Number(x.estimated_cost_usd) || 0,
              cost_estimated: x.cost_estimated !== false,
              detail: x.usage_detail || {} } };
+}
+
+/* By id. This is exact, and it is what a session uses to open the report it
+   actually produced - a name has to go back through the company key, which is
+   the indirection that left completed sessions unable to open their own work. */
+async function getQwenReport(id) {
+  const rows = await q(`${REPORT_SELECT} WHERE r.id = $1 LIMIT 1`, [id]);
+  return shapeReport(rows[0]);
+}
+
+/* The company's current report, or null. There is only ever one row per key, so
+   this is a lookup rather than a "pick the newest" query. This is what the
+   library card opens; a library card has no job behind it and so has no id. */
+async function getQwenReportForCompany(company) {
+  const rows = await q(`${REPORT_SELECT} WHERE r.company_key = $1 LIMIT 1`,
+                       [normalizeNameKey(String(company || ''))]);
+  return shapeReport(rows[0]);
 }
 
 /* Existing-report detection is a boolean, not a version scan. */

@@ -1069,7 +1069,15 @@ app.get('/api/aresearch/reports/:id', async (req, res) => {
 // The company's current report, or 404. This is also existing-report detection.
 app.get('/api/aresearch/company/:company', async (req, res) => {
   try {
-    const got = await qr.getReportForCompany(req.params.company);
+    /* A session knows which report it produced, so it sends report_id and this
+       opens THAT report. Resolving by company name re-derives identity through
+       the company key, and when a job and its report were written under a key
+       the CRM could not match, a completed session offered Open and the lookup
+       came back empty. The id is exact; the name is the fallback for a library
+       card, which has no job behind it. */
+    const got = req.query.report_id
+      ? await qr.getReport(String(req.query.report_id))
+      : await qr.getReportForCompany(req.params.company);
     if (!got) return res.status(404).json({ error: 'no report for that company' });
     await refreshPricing();                 // price from the live card, not a stale one
     res.json({ ...got, cost_view: costViewFor(got.report, got.run_usage) });
@@ -1114,8 +1122,9 @@ app.get('/api/aresearch/render', async (req, res) => {
   const lang = req.query.lang || 'bilingual';
   const format = req.query.format === 'pdf' ? 'pdf' : 'markdown';
   try {
-    const got = req.query.id
-      ? await qr.getReport(req.query.id)
+    // report_id is exact and is what a session sends; company is the fallback.
+    const got = (req.query.id || req.query.report_id)
+      ? await qr.getReport(String(req.query.id || req.query.report_id))
       : await qr.getReportForCompany(req.query.company || '');
     if (!got) return res.status(404).json({ error: 'no stored report' });
     if (format === 'markdown') {

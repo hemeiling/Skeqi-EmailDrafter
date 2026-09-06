@@ -308,6 +308,69 @@ ck('and says why history is left alone',
 ck('nothing re-adds a default to the column',
    !/started_at[^,;]*DEFAULT now\(\)/.test(DB2));
 
+console.log('\n[N5] Open opens the session\'s own report\n');
+
+const QR = require('fs').readFileSync(__dirname + '/public/qwen-research.js', 'utf8');
+ck('the Open button carries the report id',
+   /data-qr-sess-report="\$\{esc\(x\.report_id\)\}"/.test(QR),
+   'it used to carry only the company name');
+ck('the click handler passes it through',
+   /openReport\(view\.dataset\.qrSessView, true, view\.dataset\.qrSessReport\)/.test(QR));
+ck('openReport asks by id when it has one',
+   /reportId \? `\?report_id=\$\{encodeURIComponent\(reportId\)\}`/.test(QR));
+ck('Open is not offered when no report was saved',
+   /if \(!x\.report_id\) \{[\s\S]{0,220}action: ''/.test(QR),
+   'a terminal job is not the same as a stored report');
+ck('and the row says so instead of offering a dead button',
+   /no report saved/.test(QR));
+
+const SRV3 = require('fs').readFileSync(__dirname + '/server.js', 'utf8');
+const companyEp = SRV3.slice(SRV3.indexOf("app.get('/api/aresearch/company/:company'"),
+                             SRV3.indexOf("app.get('/api/aresearch/exists'"));
+ck('the company endpoint prefers report_id',
+   /req\.query\.report_id[\s\S]{0,80}qr\.getReport\(/.test(companyEp));
+ck('and falls back to the company lookup',
+   /getReportForCompany\(req\.params\.company\)/.test(companyEp));
+const renderEp = SRV3.slice(SRV3.indexOf("app.get('/api/aresearch/render'"),
+                            SRV3.indexOf("app.get('/api/aresearch/render'") + 900);
+ck('render accepts report_id as well as id',
+   /req\.query\.id \|\| req\.query\.report_id/.test(renderEp));
+ck('render still falls back to company', /getReportForCompany\(req\.query\.company/.test(renderEp));
+ck('the reason is recorded where the next reader will look',
+   /a completed session offered Open and the lookup\s+came back empty/.test(SRV3));
+
+/* Opening by id has to hold for the whole report, not just the first fetch.
+   Every later render - markdown, PDF preview, download - used to re-resolve by
+   company name, which would have put a different row on screen than the one the
+   session opened. */
+ck('the overflow menu offers a report only when one exists',
+   /const hasReport = !!x\.report_id \|\| !!libRowFor\(x\.company_name\)/.test(QR),
+   'the menu still trusted the job state alone');
+ck('the menu buttons carry the report id',
+   /data-qr-sess-view="\$\{co\}"\$\{rid\}/.test(QR)
+   && /data-qr-sess-pdf="\$\{co\}"\$\{rid\}/.test(QR));
+ck('the PDF handler passes the id through',
+   /openPdf\(pdf\.dataset\.qrSessPdf, pdf\.dataset\.qrSessReport\)/.test(QR));
+ck('a PDF is rendered from the id when there is one',
+   /reportId\s*\n?\s*\? `report_id=\$\{encodeURIComponent\(reportId\)\}`/.test(QR));
+ck('the open report remembers which row it is',
+   /current = \{ company, id: got\.id \|\| reportId \|\| null,/.test(QR));
+ck('and the markdown view stays on that row',
+   /const which = current\.id\s*\n?\s*\? `report_id=\$\{encodeURIComponent\(current\.id\)\}`/.test(QR));
+ck('so do the PDF preview and the download',
+   /openPdf\(current\.company, current\.id\)/.test(QR)
+   && /pdfUrl\(current\.company, false, current\.id\)/.test(QR));
+
+/* Both lookups have to answer with the same thing, or opening by id would
+   silently drop the run's cost from the report card. */
+const DBSRC = require('fs').readFileSync(__dirname + '/db.js', 'utf8');
+ck('by-id and by-company reports share one shape',
+   /getQwenReport\(id\) \{[\s\S]{0,200}REPORT_SELECT\} WHERE r\.id = \$1/.test(DBSRC)
+   && /getQwenReportForCompany\(company\) \{[\s\S]{0,200}REPORT_SELECT\} WHERE r\.company_key = \$1/.test(DBSRC));
+ck('and both carry the run accounting',
+   /function shapeReport\(x\) \{[\s\S]{0,600}run_usage:/.test(DBSRC),
+   'by-id used to return only the record and its version');
+
 console.log('\n' + pass + ' passed, ' + fail.length + ' failed');
   fail.forEach((f) => console.log('  FAILED: ' + f));
   process.exit(fail.length ? 1 : 0);

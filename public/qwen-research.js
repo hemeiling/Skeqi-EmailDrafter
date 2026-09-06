@@ -316,12 +316,13 @@
   /** keepProgress: true only when this call follows the run that produced the
    *  report, so the completed panel stays above it. Opening any other report
    *  clears it — a panel from an earlier run must not sit above someone else's. */
-  async function openReport(company, keepProgress) {
+  async function openReport(company, keepProgress, reportId) {
     msg('qr-single-msg', '');
     if (!keepProgress && $('qr-progress')) $('qr-progress').hidden = true;
     showSub('single');
     try {
-      const got = await fetch(api(`/company/${encodeURIComponent(company)}`)).then((r) => {
+      const byId = reportId ? `?report_id=${encodeURIComponent(reportId)}` : '';
+      const got = await fetch(api(`/company/${encodeURIComponent(company)}${byId}`)).then((r) => {
         if (r.status === 404) {
           const miss = new Error('No saved report for this company yet. 该公司暂无已保存报告。');
           miss.notFound = true;
@@ -331,7 +332,8 @@
         return r.json();
       });
       if (workspaceCompany !== company) setWorkspace(company);
-      current = { company, report: got.report, runUsage: got.run_usage || null,
+      current = { company, id: got.id || reportId || null,
+                  report: got.report, runUsage: got.run_usage || null,
                   costView: got.cost_view || null };
       await renderReport();
     } catch (e) {
@@ -430,7 +432,10 @@
       </tbody></table></div>` : '';
 
     try {
-      const d = await fetch(api(`/render?company=${encodeURIComponent(current.company)}&lang=${getLang()}`))
+      const which = current.id
+        ? `report_id=${encodeURIComponent(current.id)}`
+        : `company=${encodeURIComponent(current.company)}`;
+      const d = await fetch(api(`/render?${which}&lang=${getLang()}`))
         .then((x) => x.json());
       $('qr-report').innerHTML = md(d.markdown || '');
     } catch (e) {
@@ -445,14 +450,18 @@
   }
 
   /* ── PDF preview: a PDF in a frame, not an application in a frame ── */
-  function pdfUrl(company, inline) {
-    return api(`/render?company=${encodeURIComponent(company)}&lang=${getLang()}&format=pdf${inline ? '&inline=1' : ''}`);
+  function pdfUrl(company, inline, reportId) {
+    // A session renders ITS report by id; the library card has only a name.
+    const which = reportId
+      ? `report_id=${encodeURIComponent(reportId)}`
+      : `company=${encodeURIComponent(company)}`;
+    return api(`/render?${which}&lang=${getLang()}&format=pdf${inline ? '&inline=1' : ''}`);
   }
-  function openPdf(company) {
+  function openPdf(company, reportId) {
     $('qr-pdfname').textContent = company;
-    $('qr-pdfopen').href = pdfUrl(company, true);
-    $('qr-pdfdl').href = pdfUrl(company, false);
-    $('qr-pdfframe').src = pdfUrl(company, true);
+    $('qr-pdfopen').href = pdfUrl(company, true, reportId);
+    $('qr-pdfdl').href = pdfUrl(company, false, reportId);
+    $('qr-pdfframe').src = pdfUrl(company, true, reportId);
     $('qr-pdfcard').style.display = '';
     $('qr-pdfcard').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
@@ -665,7 +674,6 @@
     failed:                     ['Failed', '失败', 'st-failed'],
   };
   const SESSION_LIVE = new Set(['queued', 'researching', 'generating']);
-  const SESSION_HAS_REPORT = new Set(['completed', 'completed_with_limitations']);
 
   let sessions = [];
   let sessionSel = null;         // job_id whose detail is on screen
@@ -788,9 +796,18 @@
                  : `<button data-qr-sess-regen="${co}" data-qr-sess-site="${site}">Regenerate / 重新生成</button>` };
     }
     if (x.state === 'completed' || x.state === 'completed_with_limitations') {
-      return { state: x.state === 'completed' ? 'Completed' : 'Completed · limitations',
+      /* Open is offered because a report EXISTS, not because the job finished.
+         A terminal job with no report_id has nothing to open, and offering the
+         button anyway produced "no stored report" when the reader clicked it. */
+      const label = x.state === 'completed' ? 'Completed' : 'Completed · limitations';
+      if (!x.report_id) {
+        return { state: `${label} · no report saved`,
+                 ctx: `${when} · ${esc(sessionElapsed(x))}`, action: '' };
+      }
+      return { state: label,
                ctx: `${when} · ${esc(sessionElapsed(x))}`,
-               action: `<button data-qr-sess-view="${co}">Open / 打开</button>` };
+               action: `<button data-qr-sess-view="${co}" `
+                       + `data-qr-sess-report="${esc(x.report_id)}">Open / 打开</button>` };
     }
     return { state: 'Completed', ctx: `${when} · ${esc(sessionElapsed(x))}`, action: '' };
   }
@@ -799,13 +816,16 @@
     const co = esc(x.company_name || '');
     const site = esc(x.website || '');
     const host = esc(String(x.website || '').replace(/^https?:\/\//, '').replace(/\/$/, ''));
-    const hasReport = SESSION_HAS_REPORT.has(x.state) || !!libRowFor(x.company_name);
+    /* Same rule as the row's own button: a report is offered because one
+       exists. A terminal state alone does not mean anything was saved. */
+    const rid = x.report_id ? ` data-qr-sess-report="${esc(x.report_id)}"` : '';
+    const hasReport = !!x.report_id || !!libRowFor(x.company_name);
     const items = [];
     if (hasReport) {
-      items.push(`<button data-qr-sess-view="${co}">View Report / 查看报告</button>`);
-      items.push(`<button data-qr-sess-pdf="${co}">PDF / 查看PDF</button>`);
+      items.push(`<button data-qr-sess-view="${co}"${rid}>View Report / 查看报告</button>`);
+      items.push(`<button data-qr-sess-pdf="${co}"${rid}>PDF / 查看PDF</button>`);
     }
-    if (!SESSION_HAS_REPORT.has(x.state) && libRowFor(x.company_name)) {
+    if (!x.report_id && libRowFor(x.company_name)) {
       items.push(`<button data-qr-sess-prev="${co}">View Previous Report / 查看上一版本</button>`);
     }
     if (!SESSION_LIVE.has(x.state)) {
@@ -992,9 +1012,16 @@
     }
     list.addEventListener('click', (e) => {
       const view = e.target.closest('[data-qr-sess-view]');
-      if (view) { e.stopPropagation(); return openReport(view.dataset.qrSessView, true); }
+      if (view) {
+        e.stopPropagation();
+        // The session's own report, by id. The company name is only a label here.
+        return openReport(view.dataset.qrSessView, true, view.dataset.qrSessReport);
+      }
       const pdf = e.target.closest('[data-qr-sess-pdf]');
-      if (pdf) { e.stopPropagation(); return openPdf(pdf.dataset.qrSessPdf); }
+      if (pdf) {
+        e.stopPropagation();
+        return openPdf(pdf.dataset.qrSessPdf, pdf.dataset.qrSessReport);
+      }
       // The overflow menu is inside the row; opening it must not switch workspace.
       if (e.target.closest('.qr-menu')) {
         const b = e.target.closest('.qr-menubox button');
@@ -1216,9 +1243,9 @@
     });
     initLibraryActions();
     $('qr-pdfclose').addEventListener('click', closePdf);
-    $('qr-view-pdf').addEventListener('click', () => current && openPdf(current.company));
+    $('qr-view-pdf').addEventListener('click', () => current && openPdf(current.company, current.id));
     $('qr-dl-pdf').addEventListener('click', () => {
-      if (current) window.location = pdfUrl(current.company, false);
+      if (current) window.location = pdfUrl(current.company, false, current.id);
     });
     $('qr-delete').addEventListener('click', () => current && deleteReport(current.company));
     $('qr-generate').addEventListener('click', () => startResearch(false));
