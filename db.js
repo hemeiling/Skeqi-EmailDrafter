@@ -4347,12 +4347,18 @@ async function claimQwenJob({ jobId, companyName, companyKey, website, model,
     companyId: co.length ? co[0].id : null,
     companyName, website, alias,
   });
+  /* The ENGINE inserts the queued row now, so this is an upsert: it fills in
+     the identity the CRM knows and the engine does not - company_id, the user
+     who asked, how identity was resolved - without disturbing the queue state. */
   const rows = await q(`
     INSERT INTO account_research_qwen_jobs
       (job_id, company_key, company_id, company_name, website, model, job_type,
        status, stage, progress_percent, created_by, identity_source)
     VALUES ($1,$2,$3,$4,$5,$6,$7,'queued','queued',0,$8,$9)
-    ON CONFLICT DO NOTHING
+    ON CONFLICT (job_id) DO UPDATE SET
+      company_id      = COALESCE(account_research_qwen_jobs.company_id, EXCLUDED.company_id),
+      created_by      = COALESCE(account_research_qwen_jobs.created_by, EXCLUDED.created_by),
+      identity_source = COALESCE(account_research_qwen_jobs.identity_source, EXCLUDED.identity_source)
     RETURNING *
   `, [jobId, ident.key, ident.companyId, companyName, website || null,
       model || null, jobType, createdBy, ident.source]);
@@ -4427,10 +4433,19 @@ async function updateQwenJob(jobId, { status, stage, progress, warning }) {
 async function completeQwenJob(jobId, reportId, outcome = 'completed') {
   const status = outcome === 'completed_with_limitations'
     ? 'completed_with_limitations' : 'completed';
+  /* The WORKER owns the lifecycle transition and writes it under its fencing
+     token before it calls back. This records what came out of the run - the
+     report id - and only sets the status if the worker has not already, so a
+     callback can never overwrite a state the worker owns. */
   const rows = await q(`
     UPDATE account_research_qwen_jobs
-    SET status=$3, stage='completed', progress_percent=100,
-        report_id=$2, error=NULL, completed_at=NOW(), updated_at=NOW()
+    SET status = CASE
+          WHEN status IN ('completed','completed_with_limitations',
+                          'synthesis_failed','failed') THEN status
+          ELSE $3 END,
+        stage='completed', progress_percent=100,
+        report_id=$2, error=NULL,
+        completed_at=COALESCE(completed_at, NOW()), updated_at=NOW()
     WHERE job_id=$1 RETURNING *
   `, [jobId, reportId || null, status]);
   return rows[0] || null;
@@ -4536,11 +4551,24 @@ async function failQwenJob(jobId, error, status = 'failed') {
 
 /** Every job still marked live but long past its last heartbeat. */
 async function sweepStaleQwenJobs() {
+  /* The last-resort net, and it must not catch healthy jobs.
+
+     A QUEUED job is not stalled, it is waiting: with one worker and a six
+     minute run, a job four deep in the queue is untouched for half an hour and
+     was being marked interrupted while perfectly healthy. A RUNNING job with a
+     live lease heartbeats every 30 seconds, so it is never stale either.
+
+     What is left is a running job whose lease lapsed long ago and which no
+     worker has reclaimed - which means no worker is alive to run the reaper.
+     That is the only case this should touch. */
   const rows = await q(`
     UPDATE account_research_qwen_jobs
     SET status='interrupted', completed_at=NOW(), updated_at=NOW(),
-        error=COALESCE(error, 'Interrupted: the research service restarted while this run was in progress.')
-    WHERE status IN ${JOB_LIVE}
+        error=COALESCE(error, 'Interrupted: no worker has held this run for '
+                              || '${JOB_STALE_MINUTES} minutes.')
+    WHERE status = 'running'
+      AND (lease_expires_at IS NULL
+           OR lease_expires_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes')
       AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes'
     RETURNING job_id, company_name
   `);
@@ -4634,7 +4662,8 @@ async function listRecentQwenJobs(limit = 25) {
            estimated_cost_usd, cost_estimated,
            (status IN ${JOB_LIVE}
             AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale,
-           EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW()) - started_at)) AS elapsed_seconds
+           EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW())
+                               - COALESCE(started_at, queued_at))) AS elapsed_seconds
     FROM account_research_qwen_jobs
     WHERE status IN ${JOB_LIVE}
        OR completed_at > NOW() - INTERVAL '24 hours'
@@ -4668,7 +4697,8 @@ async function listQwenSessions({ limit = 25, beforeStartedAt = null, beforeJobI
            estimated_cost_usd, cost_estimated,
            (status IN ${JOB_LIVE}
             AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale,
-           EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW()) - started_at)) AS elapsed_seconds
+           EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW())
+                               - COALESCE(started_at, queued_at))) AS elapsed_seconds
     FROM account_research_qwen_jobs
     WHERE $2::timestamptz IS NULL
        OR (started_at, job_id) < ($2::timestamptz, $3::text)

@@ -256,6 +256,47 @@ ck('the reason it went is recorded where it lived',
 ck('a live row is treated as live',
    /A live row means a live job/.test(SRV2));
 
+console.log('\n[N2] The callback records the result, the worker owns the state\n');
+
+const DB2 = require('fs').readFileSync(__dirname + '/db.js', 'utf8');
+const COMPLETE = DB2.slice(DB2.indexOf('async function completeQwenJob'),
+                           DB2.indexOf('async function', DB2.indexOf('async function completeQwenJob') + 10));
+ck('a terminal status is never overwritten by the callback',
+   /WHEN status IN \('completed','completed_with_limitations',\s*'synthesis_failed','failed'\) THEN status/.test(COMPLETE),
+   'the worker writes it first, under its fencing token');
+ck('the callback still records the report id', /report_id=\$2/.test(COMPLETE));
+ck('and does not move completed_at once set',
+   /completed_at=COALESCE\(completed_at, NOW\(\)\)/.test(COMPLETE));
+ck('it does not touch the lease or worker fields',
+   !/lease_expires_at|worker_id|attempts/.test(COMPLETE),
+   'those belong to the worker');
+
+const CLAIMJ = DB2.slice(DB2.indexOf('async function claimQwenJob'),
+                         DB2.indexOf('async function', DB2.indexOf('async function claimQwenJob') + 10));
+ck('the CRM upserts identity onto the engine-created row',
+   /ON CONFLICT \(job_id\) DO UPDATE/.test(CLAIMJ),
+   'ON CONFLICT DO NOTHING silently lost created_by and company_id');
+ck('and never clobbers what is already there',
+   /COALESCE\(account_research_qwen_jobs\.created_by, EXCLUDED\.created_by\)/.test(CLAIMJ));
+ck('elapsed time survives a job that has not started yet',
+   /COALESCE\(started_at, queued_at\)/.test(DB2),
+   'started_at is null while a job is queued');
+
+console.log('\n[N3] The stale sweeper cannot catch a healthy job\n');
+
+const SWEEP = DB2.slice(DB2.indexOf('async function sweepStaleQwenJobs'),
+                        DB2.indexOf('async function', DB2.indexOf('async function sweepStaleQwenJobs') + 10));
+ck('a queued job is never swept', !/status IN \$\{JOB_LIVE\}/.test(SWEEP)
+   && /status = 'running'/.test(SWEEP),
+   'with one worker, waiting 25 minutes in the queue is normal');
+ck('a running job with a live lease is never swept',
+   /lease_expires_at < NOW\(\) - INTERVAL/.test(SWEEP),
+   'the heartbeat renews the lease every 30 seconds');
+ck('it still catches a run no worker holds',
+   /lease_expires_at IS NULL/.test(SWEEP));
+ck('and says that, rather than blaming a restart',
+   /no worker has held this run/.test(SWEEP));
+
 console.log('\n' + pass + ' passed, ' + fail.length + ' failed');
   fail.forEach((f) => console.log('  FAILED: ' + f));
   process.exit(fail.length ? 1 : 0);
