@@ -129,8 +129,10 @@ ck('it selects only the columns the rules read',
    'no report bodies or manifests');
 ck('the client prefers the server total',
    /const attnN = sessionTotals \? sessionTotals\.attention : attention\.length/.test(QR));
-ck('and falls back to the page when the server sent none',
-   /sessionTotals \? sessionTotals\.live : active\.length/.test(QR));
+ck('and falls back to the loaded rows when the server sent none',
+   /sessionTotals \? sessionTotals\.researching\s*\n?\s*: sessionActive\.filter/.test(QR)
+   && /sessionTotals \? sessionTotals\.queued\s*\n?\s*: sessionActive\.filter/.test(QR),
+   'the header must still render without totals');
 ck('a partly-loaded filter says so rather than contradicting the count',
    /Showing \$\{shown\.length\} of \$\{attnN\} loaded so far/.test(QR));
 ck('the total never fails the list',

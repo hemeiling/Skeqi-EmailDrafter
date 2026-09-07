@@ -328,6 +328,10 @@
        touching the menu beside it. `contents` keeps the buttons as direct flex
        items, so the layout is unchanged and an empty wrapper adds no gap. */
     .qr-sess-primary { display:contents; }
+    .qr-sess-sec { font-size:11px; font-weight:600; letter-spacing:.04em;
+                   text-transform:uppercase; color:var(--color-text-secondary);
+                   padding:10px 10px 4px; }
+    .qr-sess-sec[hidden] { display:none; }
     /* The row executing right now. A tinted ground and a left marker: enough to
        find by eye in a long table, not enough to shout. */
     #qr-batchtable tbody tr.is-running > td {
@@ -3472,6 +3476,12 @@
               <button type="button" class="qr-sess-filter" id="qr-sess-filter"
                       aria-pressed="false" hidden></button>
             </div>
+            <!-- Live work, unpaged. Never hidden behind history's page limit. -->
+            <div class="qr-sess-sec" id="qr-sess-active-head" hidden>
+              Active Now <span class="i18n-zh">当前任务</span></div>
+            <ul class="qr-sess-list" id="qr-sess-active"></ul>
+            <div class="qr-sess-sec" id="qr-sess-history-head" hidden>
+              Recent History <span class="i18n-zh">最近历史</span></div>
             <ul class="qr-sess-list" id="qr-sess-list"></ul>
             <div class="qr-sess-done" id="qr-sess-done">
               <button type="button" class="qr-sess-morebtn" id="qr-sess-more" hidden>

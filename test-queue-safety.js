@@ -34,7 +34,15 @@ const slice = (fn) => {
 const code = (fn) => stripComments(slice(fn));
 const ACTIVE = slice('activeQwenJob');
 const SWEEP = slice('sweepStaleQwenJobs');
-const SESSIONS = slice('listQwenSessions');
+/* The session views' staleness test now lives in SESSION_COLUMNS, the one
+   select both the paged history and the unpaged live list share. That is the
+   definition to check: pulling it out of listQwenSessions would only prove the
+   function still interpolates a constant. */
+const SESSIONS = (() => {
+  const src = require('fs').readFileSync(__dirname + '/db.js', 'utf8');
+  const i = src.indexOf('const SESSION_COLUMNS');
+  return src.slice(i, src.indexOf('`;', i));
+})();
 
 console.log('\n[1] A queued job is never stale, however long it waits\n');
 for (const [name, sql] of [['activeQwenJob', ACTIVE], ['sweepStaleQwenJobs', SWEEP],
@@ -51,7 +59,7 @@ ck('the only age test is paired with a lease test',
 
 console.log('\n[2] Staleness means a lapsed lease\n');
 for (const [name, sql] of [['activeQwenJob', ACTIVE], ['sweepStaleQwenJobs', SWEEP],
-                           ['listQwenSessions', SESSIONS]]) {
+                           ['SESSION_COLUMNS', SESSIONS]]) {
   ck(`${name} requires the lease to be absent or long expired`,
      /lease_expires_at IS NULL/.test(sql)
      && /lease_expires_at < NOW\(\) - INTERVAL/.test(sql));

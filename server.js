@@ -1502,6 +1502,18 @@ app.get('/api/aresearch/sessions', async (req, res) => {
        whose engine has forgotten it is interrupted, and must say so here rather
        than showing a frozen percentage that will never advance. */
     const out = rows.map((r) => ({ ...r, state: sessionState(r) }));
+    /* Live work, unpaged and first. It used to be sorted into the same paged
+       list, and because the order is by start time and a queued job has none,
+       seven live jobs sat behind thirty-two historical rows that also had none.
+       Same JOB_LIVE predicate the queue uses, so the two lists name the same
+       jobs. */
+    let active = [];
+    try {
+      active = (await jobsDb.listQwenActiveSessions())
+        .map((r) => ({ ...r, state: sessionState(r) }));
+    } catch (e) {
+      console.error('active sessions failed:', e.message);
+    }
     /* Totals over EVERY job, not over this page. Counting the page answered
        "how many of the 25 rows on screen", which read as a total and moved
        when the page size did. Classified by the same sessionState() the rows
@@ -1510,10 +1522,14 @@ app.get('/api/aresearch/sessions', async (req, res) => {
     let totals = null;
     try {
       const all = await jobsDb.listQwenSessionStateInputs();
-      totals = { total: all.length, live: 0, attention: 0 };
+      totals = { total: all.length, live: 0, attention: 0,
+                 researching: 0, queued: 0, history: 0 };
       for (const r of all) {
         const st = sessionState(r);
-        if (SESSION_LIVE_STATES.has(st)) totals.live += 1;
+        if (SESSION_LIVE_STATES.has(st)) totals.live += 1; else totals.history += 1;
+        // The two halves of "live", so the header can say which is which.
+        if (st === 'researching' || st === 'generating') totals.researching += 1;
+        if (st === 'queued') totals.queued += 1;
         if (SESSION_ATTENTION_STATES.has(st)) totals.attention += 1;
       }
     } catch (e) {
@@ -1523,6 +1539,7 @@ app.get('/api/aresearch/sessions', async (req, res) => {
     const last = out.length ? out[out.length - 1] : null;
     res.json({
       sessions: out,
+      active,
       totals,
       // The cursor for the next page. Null when this page was not full, so the
       // client stops rather than paging forever against a shrinking table.

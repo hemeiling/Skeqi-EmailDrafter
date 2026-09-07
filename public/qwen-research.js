@@ -855,7 +855,12 @@
   };
   const SESSION_LIVE = new Set(['queued', 'researching', 'generating']);
 
-  let sessions = [];
+  let sessions = [];                     // HISTORY only, paged
+  /* Live work, unpaged, from the same JOB_LIVE predicate the queue uses. Kept
+     apart from history so paging can never hide what is happening now, and so
+     the two lists cannot drift into two definitions of "live". */
+  let sessionActive = [];
+  const allSessions = () => sessionActive.concat(sessions);
   let sessionSel = null;         // job_id whose detail is on screen
   let sessionTimer = null;
   let sessionFollowing = null;   // job_id the follower loop is polling
@@ -897,9 +902,14 @@
   async function fetchSessions() {
     try {
       const r = await fetch(api('/sessions?limit=25')).then((x) => x.json());
-      if (Array.isArray(r)) return { rows: r, next: null, totals: null };   // pre-paging shape
+      if (Array.isArray(r)) return { rows: r, next: null, totals: null, active: [] };
       return r && Array.isArray(r.sessions)
-        ? { rows: r.sessions, next: r.next, totals: r.totals || null } : null;
+        ? { rows: r.sessions, next: r.next, totals: r.totals || null,
+            /* An older server sends no `active`; fall back to filtering the page
+               so the section is merely incomplete rather than empty. */
+            active: Array.isArray(r.active) ? r.active
+                  : r.sessions.filter((x) => SESSION_LIVE.has(x.state)) }
+        : null;
     } catch (e) {
       return null;                  // transient: keep whatever is on screen
     }
@@ -1163,29 +1173,33 @@
   function renderSessions() {
     const box = $('qr-sessions'); const list = $('qr-sess-list');
     if (!box || !list) return;
-    const active = sessions.filter((x) => SESSION_LIVE.has(x.state));
     const attention = sessions.filter((x) => SESSION_NEEDS_ATTENTION.has(x.state));
-    box.hidden = sessions.length === 0;
+    box.hidden = sessions.length === 0 && sessionActive.length === 0;
 
     // The count is a summary of the SAME rows, not a different set.
     /* Counts describe the whole table when the server supplied them, and fall
        back to the page only when it did not. The page is 25 rows, so counting
        it reported the page size as a total. */
-    const liveN = sessionTotals ? sessionTotals.live : active.length;
     const attnN = sessionTotals ? sessionTotals.attention : attention.length;
-    const totalN = sessionTotals ? sessionTotals.total : sessions.length;
+    /* Running and waiting are reported separately. One number covering both was
+       labelled "running", so the header said 7 running while Queue Management
+       said 1 running and 6 waiting, from the same rows. */
+    const runN = sessionTotals ? sessionTotals.researching
+               : sessionActive.filter((x) => x.state !== 'queued').length;
+    const queueN = sessionTotals ? sessionTotals.queued
+                 : sessionActive.filter((x) => x.state === 'queued').length;
+    // "shown of" describes HISTORY. Live work is never paged, so it never counts.
+    const histN = sessionTotals ? sessionTotals.history : sessions.length;
 
     const count = $('qr-sess-count');
     if (count) {
       const bits = [];
-      /* "active", not "running": this number is queued + researching +
-         generating, and calling six waiting jobs "running" made the header
-         disagree with Queue Management, which counts the two separately. The
-         number is unchanged; only the word was wrong. */
-      if (liveN) bits.push(`${liveN} active / ${liveN} 进行中`);
-      if (attnN) bits.push(`${attnN} need attention`);
-      bits.push(sessions.length < totalN
-        ? `${sessions.length} of ${totalN} shown` : `${totalN} shown`);
+      if (runN) bits.push(`${runN} researching / ${runN} 个研究中`);
+      if (queueN) bits.push(`${queueN} queued / ${queueN} 个排队中`);
+      if (attnN) bits.push(`${attnN} need attention / ${attnN} 个需要处理`);
+      bits.push(sessions.length < histN
+        ? `${sessions.length} of ${histN} history shown`
+        : `${histN} history shown`);
       count.textContent = bits.join(' · ');
     }
 
@@ -1201,16 +1215,30 @@
       ? sessions.filter((x) => SESSION_NEEDS_ATTENTION.has(x.state))
       : sessions;
 
-    /* One list, already ordered newest-first by the server. The client does not
-       re-sort: the order is a property of the query, and re-deriving it here
-       would let the two disagree. */
+    /* Two lists, both ordered by the server. The client does not re-sort: the
+       order is a property of the query, and re-deriving it here would let the
+       two disagree.
+
+       Active Now is rendered from its own unpaged list, so seven live jobs are
+       all visible even when history shows 25 of 105. The attention filter is
+       about terminal states, so live work is hidden while it is on. */
+    const activeList = $('qr-sess-active');
+    const activeHead = $('qr-sess-active-head');
+    const shownActive = sessionFilter === 'attention' ? [] : sessionActive;
+    if (activeList) syncSessionRows(activeList, shownActive);
+    if (activeHead) activeHead.hidden = shownActive.length === 0;
+    const histHead = $('qr-sess-history-head');
+    if (histHead) histHead.hidden = shownActive.length === 0 || shown.length === 0;
+
     syncSessionRows(list, shown);
 
     let note = '';
     if (!shown.length) {
       note = sessionFilter === 'attention'
         ? 'Nothing needs attention. <span class="i18n-zh">没有需要处理的任务。</span>'
-        : 'No research sessions yet. <span class="i18n-zh">暂无研究任务。</span>';
+        : shownActive.length
+          ? ''            // live work is on screen above; history is simply empty
+          : 'No research sessions yet. <span class="i18n-zh">暂无研究任务。</span>';
     } else if (sessionFilter === 'attention' && shown.length < attnN) {
       /* The count is the table's; this list is the loaded page's. Say which is
          on screen rather than let the two numbers quietly disagree. */
@@ -1237,7 +1265,7 @@
   /* Poll only while something is live, and stop the moment nothing is. */
   function scheduleSessions() {
     clearTimeout(sessionTimer);
-    if (!sessions.some((x) => SESSION_LIVE.has(x.state))) return;
+    if (!sessionActive.length) return;
     sessionTimer = setTimeout(refreshSessions, 3000);
   }
 
@@ -1246,9 +1274,10 @@
     const page = await fetchSessions();
     if (page) {
       sessions = page.rows;
+      sessionActive = page.active || [];
       sessionNext = page.next || null;
       sessionTotals = page.totals || null;
-      if (sessionSel && !sessions.some((x) => x.job_id === sessionSel)) sessionSel = null;
+      if (sessionSel && !allSessions().some((x) => x.job_id === sessionSel)) sessionSel = null;
       renderSessions();
     }
     scheduleSessions();
@@ -1259,12 +1288,12 @@
   async function followSession(jobId) {
     if (sessionFollowing === jobId) return;
     sessionFollowing = jobId;
-    const row = sessions.find((x) => x.job_id === jobId);
+    const row = allSessions().find((x) => x.job_id === jobId);
     if (!row) return;
     const startedAt = new Date(row.started_at || Date.now()).getTime();
     renderProgress(jobRowToSnapshot(row), startedAt);
     while (sessionFollowing === jobId) {
-      const live = sessions.find((x) => x.job_id === jobId);
+      const live = allSessions().find((x) => x.job_id === jobId);
       if (!live || !SESSION_LIVE.has(live.state)) {
         renderProgress(jobRowToSnapshot(live || row), startedAt);
         break;
@@ -1315,14 +1344,17 @@
     wireQueue();
     /* A menu that was open while its content changed holds the new markup until
        it closes. `toggle` does not bubble, hence the capture phase. */
-    list.addEventListener('toggle', (e) => {
+    const activeList = $('qr-sess-active');
+    const onToggle = (e) => {
       const d = e.target;
       if (!d || !d.classList || !d.classList.contains('qr-menu')) return;
       if (d.open || !d._qrPending) return;
       const next = elementFrom(d._qrPending);
       next._qrHtml = d._qrPending;
       d.replaceWith(next);
-    }, true);
+    };
+    list.addEventListener('toggle', onToggle, true);
+    if (activeList) activeList.addEventListener('toggle', onToggle, true);
     const retry = $('qr-retry-save');
     if (retry) retry.addEventListener('click', () => { if (liveJobId) retrySave(liveJobId); });
     const openPrev = $('qr-prev-open');
@@ -1343,7 +1375,9 @@
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
       });
     }
-    list.addEventListener('click', (e) => {
+    /* One handler, delegated to BOTH lists. Active Now renders the same rows
+       with the same controls, so it must answer clicks the same way. */
+    const onListClick = (e) => {
       const view = e.target.closest('[data-qr-sess-view]');
       if (view) {
         e.stopPropagation();
@@ -1388,7 +1422,9 @@
       if (open) { e.stopPropagation(); return selectSession(open.dataset.qrSessOpen); }
       const row = e.target.closest('[data-qr-sess]');
       if (row) selectSession(row.dataset.qrSess);
-    });
+    };
+    list.addEventListener('click', onListClick);
+    if (activeList) activeList.addEventListener('click', onListClick);
 
     const filt = $('qr-sess-filter');
     if (filt) filt.addEventListener('click', () => {
@@ -1419,7 +1455,7 @@
   let pendingDelete = null;
 
   function askDeleteSession(jobId) {
-    const x = sessions.find((s2) => s2.job_id === jobId);
+    const x = allSessions().find((s2) => s2.job_id === jobId);
     if (!x) return;
     if (SESSION_LIVE.has(x.state)) return;          // guarded server-side too
     pendingDelete = x;
@@ -1888,7 +1924,7 @@
   function jobIdOf(job) { return (job && job._jobId) || sessionSel || null; }
 
   function sessionRow(jobId) {
-    return jobId ? sessions.find((x) => x.job_id === jobId) || null : null;
+    return jobId ? allSessions().find((x) => x.job_id === jobId) || null : null;
   }
 
   const PROG_MARK = { done: '✓', active: '→', failed: '✕', warned: '⚠', skipped: '○', todo: '○' };

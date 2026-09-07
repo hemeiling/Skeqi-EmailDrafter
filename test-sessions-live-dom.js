@@ -36,10 +36,10 @@ const HELPERS = SRC.slice(from, to);
    test drives exactly what changes between polls. */
 /* The real toggle listener, lifted out of wireSessions so the deferred-menu
    path is tested as shipped rather than as a copy of itself. */
-const tFrom = SRC.indexOf("    list.addEventListener('toggle'");
-const tTo = SRC.indexOf('}, true);', tFrom);
+const tFrom = SRC.indexOf('    const onToggle = (e) => {');
+const tTo = SRC.indexOf('\n    };', tFrom);
 if (tFrom < 0 || tTo < 0) throw new Error('could not lift the toggle listener');
-const TOGGLE = SRC.slice(tFrom, tTo + '}, true);'.length);
+const TOGGLE = SRC.slice(tFrom, tTo + '\n    };'.length);
 
 const HARNESS = `
   window.sessionSel = null;
@@ -62,6 +62,7 @@ ${HELPERS}
   window.setSessionNote = setSessionNote;
   window.wireToggle = function (list) {
 ${TOGGLE}
+    list.addEventListener('toggle', onToggle, true);
   };
 `;
 
@@ -223,11 +224,14 @@ ${TOGGLE}
     ck('polling was not disabled or slowed',
        /setTimeout\(refreshSessions, 3000\)/.test(SRC),
        'the list must stay live');
-    ck('the header says active, not running',
-       /bits\.push\(`\$\{liveN\} active \/ \$\{liveN\} 进行中`\)/.test(SRC),
-       'the number is queued + researching + generating');
-    ck('and the number itself is unchanged',
-       /const liveN = sessionTotals \? sessionTotals\.live : active\.length;/.test(SRC));
+    ck('the header reports researching and queued separately',
+       /\$\{runN\} researching/.test(SRC) && /\$\{queueN\} queued/.test(SRC),
+       'one number covering both was labelled "running"');
+    ck('both counts come from the server totals',
+       /sessionTotals \.researching|sessionTotals \? sessionTotals\.researching/.test(SRC));
+    ck('Active Now uses this same reconciliation',
+       /syncSessionRows\(activeList, shownActive\)/.test(SRC),
+       'the menu must survive polling there too');
     ck('updates are not frozen while a menu is open',
        /setCell\(li\.querySelector\('\.qr-sess-ctx'\), c\.ctx\);/.test(SRC),
        'only the MENU subtree is deferred');

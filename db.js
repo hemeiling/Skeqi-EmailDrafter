@@ -4806,9 +4806,9 @@ async function listRecentQwenJobs(limit = 25) {
    Keyset pagination rather than OFFSET, because rows arrive while a user pages
    and an offset would skip or repeat them. job_id breaks ties for rows that
    started in the same instant. */
-async function listQwenSessions({ limit = 25, beforeStartedAt = null, beforeJobId = null } = {}) {
-  const n = Math.max(1, Math.min(100, Number(limit) || 25));
-  return await q(`
+/* One column list for both session views, so the paged history and the unpaged
+   live list cannot drift into rendering different shapes. */
+const SESSION_COLUMNS = `
     SELECT job_id, company_name, company_key, website, model, job_type,
            status, stage, progress_percent, warnings, error, report_id, attempts,
            created_by, started_at, updated_at, completed_at, execution_manifest,
@@ -4826,13 +4826,38 @@ async function listQwenSessions({ limit = 25, beforeStartedAt = null, beforeJobI
                  OR lease_expires_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes')
             AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale,
            EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW())
-                               - COALESCE(started_at, queued_at))) AS elapsed_seconds
+                               - COALESCE(started_at, queued_at))) AS elapsed_seconds`;
+
+async function listQwenSessions({ limit = 25, beforeStartedAt = null, beforeJobId = null } = {}) {
+  const n = Math.max(1, Math.min(100, Number(limit) || 25));
+  return await q(`
+    ${SESSION_COLUMNS}
     FROM account_research_qwen_jobs
-    WHERE $2::timestamptz IS NULL
-       OR (started_at, job_id) < ($2::timestamptz, $3::text)
+    WHERE status NOT IN ${JOB_LIVE}
+      AND ($2::timestamptz IS NULL
+           OR (started_at, job_id) < ($2::timestamptz, $3::text))
     ORDER BY started_at DESC, job_id DESC
     LIMIT $1
   `, [n, beforeStartedAt, beforeJobId]);
+}
+
+/** Everything live, in the order a person reads it: running first, then the
+ *  queue in claim order.
+ *
+ *  Deliberately UNPAGED and deliberately the same `JOB_LIVE` predicate the
+ *  queue uses. Live work sorted into a paged history disappeared behind older
+ *  rows - the session list is ordered by start time, and a queued job has none,
+ *  so it sorted among thirty-two historical rows that also had none. Paging
+ *  belongs to history; what is happening now is never a page.
+ *
+ *  Same SELECT as listQwenSessions, so both lists render through one path. */
+async function listQwenActiveSessions() {
+  return await q(`
+    ${SESSION_COLUMNS}
+    FROM account_research_qwen_jobs
+    WHERE status IN ${JOB_LIVE}
+    ORDER BY (status = 'running') DESC, queued_at
+  `);
 }
 
 /* Permanent deletion of ONE session.
@@ -5444,7 +5469,7 @@ module.exports = {
   completeQwenJob, failQwenJob, sweepStaleQwenJobs, listActiveQwenJobs,
   listRecentQwenJobs,
   cancelQueuedJob, cancelAllQueuedJobs, queueSummary,
-  listQwenSessions, listQwenSessionStateInputs,
+  listQwenSessions, listQwenActiveSessions, listQwenSessionStateInputs,
   deleteQwenSession, isTerminalStatus, resolveIdentity, JOB_TERMINAL,
   setQwenJobUsage,
   retrievalToolUsage,
