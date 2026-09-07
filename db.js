@@ -4902,11 +4902,104 @@ async function deleteQwenSession(jobId) {
     }
     const sec = await client.query(
       'DELETE FROM account_research_qwen_job_sections WHERE job_id = $1', [jobId]);
+    // The terminal gate again, in the statement, so the guarantee does not
+    // depend on the check above having been reached.
     const del = await client.query(
-      'DELETE FROM account_research_qwen_jobs WHERE job_id = $1', [jobId]);
+      'DELETE FROM account_research_qwen_jobs WHERE job_id = $1 AND status = ANY($2)',
+      [jobId, JOB_TERMINAL]);
     await client.query('COMMIT');
     return { ok: true, job_id: jobId, company_name: job.company_name,
              sections_deleted: sec.rowCount || 0, jobs_deleted: del.rowCount || 0 };
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* noop */ }
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/* ── Clearing session history ─────────────────────────────────────────────
+
+   The same deletion deleteQwenSession performs, applied to many rows: the job
+   row and the sections keyed to it, and NOTHING else. Reports, ai_usage_events,
+   companies and contacts are all untouched, and no foreign key points at this
+   table, so nothing cascades out of it. A company whose historical job row is
+   deleted still reads as Existing Report, because the report lives in its own
+   table keyed by company.
+
+   The terminal gate is in the STATEMENT, not in JavaScript. A client can ask to
+   delete anything it likes; what actually happens is bounded by
+   `status = ANY(JOB_TERMINAL)`, an explicit allow-list rather than "not queued
+   or running" - a status nobody has thought of yet is not deletable by default.
+
+   Rows are locked before the check so a job that starts running between the
+   click and the commit is skipped rather than deleted under a live worker. */
+
+async function deleteSessionRows(client, jobIds) {
+  /* Sections first, because their job_id is a plain column and they orphan
+     silently otherwise - and gated by the SAME terminal predicate, read back
+     from the job rows that still exist at this point. Filtering only the job
+     delete would have made this helper safe only because its callers passed it
+     safe input; a live job's partial output must survive being named in a
+     request, whoever does the naming. */
+  await client.query(
+    `DELETE FROM account_research_qwen_job_sections
+      WHERE job_id IN (SELECT job_id FROM account_research_qwen_jobs
+                        WHERE job_id = ANY($1) AND status = ANY($2))`,
+    [jobIds, JOB_TERMINAL]);
+  const { rows } = await client.query(
+    `DELETE FROM account_research_qwen_jobs
+      WHERE job_id = ANY($1) AND status = ANY($2)
+      RETURNING job_id, company_name`, [jobIds, JOB_TERMINAL]);
+  return rows;
+}
+
+/** Delete the historical sessions named, and report honestly on the rest. */
+async function deleteQwenSessions(jobIds) {
+  const ids = (jobIds || []).map(String).filter(Boolean);
+  if (!ids.length) return { deleted: [], skipped: [] };
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT job_id, status, company_name FROM account_research_qwen_jobs
+        WHERE job_id = ANY($1) FOR UPDATE`, [ids]);
+    const found = new Map(rows.map((r) => [r.job_id, r]));
+    const terminal = rows.filter((r) => JOB_TERMINAL.includes(r.status)).map((r) => r.job_id);
+    const deleted = terminal.length ? await deleteSessionRows(client, terminal) : [];
+    await client.query('COMMIT');
+    const done = new Set(deleted.map((d) => d.job_id));
+    const skipped = ids.filter((id) => !done.has(id)).map((id) => {
+      const r = found.get(id);
+      if (!r) return { job_id: id, reason: 'not_found' };
+      // Became live between the list being drawn and this request.
+      return { job_id: id, reason: 'not_terminal', status: r.status,
+               company_name: r.company_name };
+    });
+    return { deleted, skipped };
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* noop */ }
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/** Delete ALL history: every terminal row, not merely the page on screen.
+
+    Live work is outside the predicate entirely, so Active Now and the queue are
+    unaffected by definition rather than by being filtered out afterwards. */
+async function clearQwenSessionHistory() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT job_id FROM account_research_qwen_jobs
+        WHERE status = ANY($1) FOR UPDATE`, [JOB_TERMINAL]);
+    const ids = rows.map((r) => r.job_id);
+    const deleted = ids.length ? await deleteSessionRows(client, ids) : [];
+    await client.query('COMMIT');
+    return { deleted, skipped: [] };
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch (_) { /* noop */ }
     throw e;
@@ -5470,7 +5563,8 @@ module.exports = {
   listRecentQwenJobs,
   cancelQueuedJob, cancelAllQueuedJobs, queueSummary,
   listQwenSessions, listQwenActiveSessions, listQwenSessionStateInputs,
-  deleteQwenSession, isTerminalStatus, resolveIdentity, JOB_TERMINAL,
+  deleteQwenSession, deleteQwenSessions, clearQwenSessionHistory,
+  isTerminalStatus, resolveIdentity, JOB_TERMINAL,
   setQwenJobUsage,
   retrievalToolUsage,
   setQwenJobManifest,

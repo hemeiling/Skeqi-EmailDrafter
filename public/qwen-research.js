@@ -861,6 +861,11 @@
      the two lists cannot drift into two definitions of "live". */
   let sessionActive = [];
   const allSessions = () => sessionActive.concat(sessions);
+  /* Bulk deletion of HISTORY. Selection lives here rather than in the DOM, so a
+     poll that patches a row cannot lose a tick. Active Now is never selectable:
+     a live job is not history, and the statement behind this refuses it anyway. */
+  let histPicking = false;
+  const histSel = new Set();
   let sessionSel = null;         // job_id whose detail is on screen
   let sessionTimer = null;
   let sessionFollowing = null;   // job_id the follower loop is polling
@@ -1080,11 +1085,14 @@
      Rows still update their status, progress and elapsed time on every poll;
      what they no longer do is get rebuilt. */
 
-  function rowHtml(x) {
+  function rowHtml(x, pick) {
     const c = rowContent(x);
     return `<li class="qr-sess-row ${railClass(x.state)}${x.job_id === sessionSel ? ' is-selected' : ''}"
                 data-qr-sess="${esc(x.job_id)}">
       <span class="qr-rail"></span>
+      ${pick ? `<span class="qr-sess-pick"><input type="checkbox"
+            data-qr-hist-pick="${esc(x.job_id)}" ${histSel.has(x.job_id) ? 'checked' : ''}
+            aria-label="Select ${esc(x.company_name || '')}"></span>` : ''}
       <span class="qr-sess-co">${esc(x.company_name || '')}</span>
       <span class="qr-sess-state">${c.state}</span>
       <span class="qr-sess-ctx">${c.ctx}</span>
@@ -1118,8 +1126,24 @@
     cur.replaceWith(next);
   }
 
-  function patchSessionRow(li, x) {
+  function patchSessionRow(li, x, pick) {
     const c = rowContent(x);
+    /* The tick box appears and disappears with Select mode. Its checked state
+       is never written while it has focus, so a poll cannot undo a click that
+       is in progress. */
+    const cell = li.querySelector('.qr-sess-pick');
+    if (pick && !cell) {
+      li.querySelector('.qr-rail').insertAdjacentHTML('afterend',
+        `<span class="qr-sess-pick"><input type="checkbox"
+           data-qr-hist-pick="${esc(x.job_id)}" ${histSel.has(x.job_id) ? 'checked' : ''}
+           aria-label="Select ${esc(x.company_name || '')}"></span>`);
+    } else if (!pick && cell) {
+      cell.remove();
+    } else if (cell) {
+      const box = cell.querySelector('input');
+      const want = histSel.has(x.job_id);
+      if (box && document.activeElement !== box && box.checked !== want) box.checked = want;
+    }
     const cls = `qr-sess-row ${railClass(x.state)}`
               + (x.job_id === sessionSel ? ' is-selected' : '');
     if (li.className !== cls) li.className = cls;
@@ -1132,7 +1156,7 @@
     patchMenu(act, rowMenu(x));
   }
 
-  function syncSessionRows(list, rows) {
+  function syncSessionRows(list, rows, pick) {
     const have = new Map();
     list.querySelectorAll('li[data-qr-sess]').forEach((li) => {
       have.set(li.dataset.qrSess, li);
@@ -1140,9 +1164,9 @@
     let cursor = null;                   // the node the next row must follow
     rows.forEach((x) => {
       let li = have.get(x.job_id);
-      if (li) { have.delete(x.job_id); patchSessionRow(li, x); }
+      if (li) { have.delete(x.job_id); patchSessionRow(li, x, pick); }
       else {
-        li = elementFrom(rowHtml(x));
+        li = elementFrom(rowHtml(x, pick));
         // Record what the menu was built from, so the first patch is a no-op.
         const m = li.querySelector('.qr-menu');
         if (m) m._qrHtml = rowMenu(x);
@@ -1154,6 +1178,134 @@
     });
     // Whatever is left is a job that is no longer on this page.
     have.forEach((li) => li.remove());
+  }
+
+  function renderHistoryControls(shown) {
+    const sel = $('qr-hist-select');
+    const del = $('qr-hist-del');
+    const clr = $('qr-hist-clear');
+    if (!sel) return;
+    // Selection can only mean rows that are actually on screen.
+    const visible = new Set(shown.map((x) => x.job_id));
+    [...histSel].forEach((id) => { if (!visible.has(id)) histSel.delete(id); });
+    sel.setAttribute('aria-pressed', histPicking ? 'true' : 'false');
+    sel.textContent = histPicking ? 'Done / 完成' : 'Select / 选择';
+    sel.hidden = shown.length === 0;
+    if (del) {
+      del.hidden = !histPicking;
+      del.disabled = histSel.size === 0;
+      del.textContent = histSel.size
+        ? `Delete Selected (${histSel.size}) / 删除选中 ${histSel.size}`
+        : 'Delete Selected / 删除选中';
+    }
+    if (clr) clr.hidden = !histPicking;
+
+    const all = $('qr-hist-all');
+    if (all) {
+      all.hidden = !histPicking;
+      // A toggle: the same button clears the selection once everything is in it.
+      const everything = shown.length > 0 && shown.every((x) => histSel.has(x.job_id));
+      all.textContent = everything
+        ? 'Clear Selection / 取消选择' : 'Select All Visible / 选择当前显示';
+    }
+    /* The never-started rows are the noise: 32 of them, from the sweeps, and
+       none of them ever ran. One button for the common cleanup. */
+    const never = $('qr-hist-never');
+    if (never) {
+      const n = shown.filter((x) => x.state === 'interrupted_before_start').length;
+      never.hidden = !histPicking || n === 0;
+      never.textContent = `Select Never Started (${n}) / 选择启动前中断 ${n}`;
+    }
+  }
+
+  /** Send one deletion and say plainly what happened, including what was kept. */
+  async function deleteHistory(payload, confirmText) {
+    if (confirmText && !window.confirm(confirmText)) return;
+    const msgEl = $('qr-hist-msg');
+    if (msgEl) msgEl.textContent = 'Deleting… 正在删除…';
+    let out = null;
+    try {
+      out = await fetch(api('/sessions/delete'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).then((r) => r.json());
+    } catch (e) {
+      if (msgEl) msgEl.textContent = 'Could not reach the server. 无法连接服务器。';
+      return;
+    }
+    if (out && out.error) { if (msgEl) msgEl.textContent = out.error; return; }
+    histSel.clear();
+    const parts = [`Deleted ${out.deleted}. 已删除 ${out.deleted}。`];
+    /* A job that went live between the list being drawn and this request is
+       skipped by the statement, not by the client. Say so. */
+    const live = (out.skipped || []).filter((k) => k.reason === 'not_terminal');
+    if (live.length) {
+      parts.push(`${live.length} had started and were kept. ${live.length} 项已开始，未删除。`);
+    }
+    if (msgEl) msgEl.textContent = parts.join(' ');
+    /* Start history again from the first page: clearing means all eligible
+       history, so there is nothing to page back into. */
+    sessionNext = null;
+    await refreshSessions();
+  }
+
+  function wireHistoryControls() {
+    const sel = $('qr-hist-select');
+    if (sel) sel.addEventListener('click', () => {
+      histPicking = !histPicking;
+      if (!histPicking) histSel.clear();
+      const msgEl = $('qr-hist-msg');
+      if (msgEl) msgEl.textContent = '';
+      renderSessions();
+    });
+
+    const list = $('qr-sess-list');
+    if (list) list.addEventListener('change', (e) => {
+      const box = e.target.closest('[data-qr-hist-pick]');
+      if (!box) return;
+      if (box.checked) histSel.add(box.dataset.qrHistPick);
+      else histSel.delete(box.dataset.qrHistPick);
+      renderHistoryControls(sessions);
+    });
+
+    const all = $('qr-hist-all');
+    if (all) all.addEventListener('click', () => {
+      const everything = sessions.length > 0 && sessions.every((x) => histSel.has(x.job_id));
+      histSel.clear();
+      if (!everything) sessions.forEach((x) => histSel.add(x.job_id));
+      renderSessions();
+    });
+
+    const never = $('qr-hist-never');
+    if (never) never.addEventListener('click', () => {
+      sessions.filter((x) => x.state === 'interrupted_before_start')
+        .forEach((x) => histSel.add(x.job_id));
+      renderSessions();
+    });
+
+    const del = $('qr-hist-del');
+    if (del) del.addEventListener('click', () => {
+      const n = histSel.size;
+      if (!n) return;
+      deleteHistory({ scope: 'selected', job_ids: [...histSel] },
+        `Permanently delete ${n} historical research session${n === 1 ? '' : 's'}? `
+        + 'Saved reports and AI usage records will not be deleted. '
+        + 'This cannot be undone.\n\n'
+        + `确定永久删除 ${n} 条历史研究记录吗？已保存的报告与 AI 用量记录不会被删除。此操作无法撤销。`);
+    });
+
+    const clr = $('qr-hist-clear');
+    if (clr) clr.addEventListener('click', () => {
+      const n = sessionTotals ? sessionTotals.history : sessions.length;
+      if (!n) return;
+      /* Deliberately the TOTAL, not the 25 on screen: Clear History means all
+         eligible history, and the confirmation must say the real number. */
+      deleteHistory({ scope: 'all' },
+        `Permanently delete ${n} historical research session${n === 1 ? '' : 's'}? `
+        + 'Saved reports and AI usage records will not be deleted. '
+        + 'This cannot be undone.\n\n'
+        + `确定永久删除 ${n} 条历史研究记录吗？已保存的报告与 AI 用量记录不会被删除。此操作无法撤销。`);
+    });
   }
 
   /** The one trailing message, kept out of the keyed rows. */
@@ -1225,20 +1377,23 @@
     const activeList = $('qr-sess-active');
     const activeHead = $('qr-sess-active-head');
     const shownActive = sessionFilter === 'attention' ? [] : sessionActive;
-    if (activeList) syncSessionRows(activeList, shownActive);
+    if (activeList) syncSessionRows(activeList, shownActive, false);
     if (activeHead) activeHead.hidden = shownActive.length === 0;
     const histHead = $('qr-sess-history-head');
-    if (histHead) histHead.hidden = shownActive.length === 0 || shown.length === 0;
+    if (histHead) histHead.hidden = shown.length === 0;
 
-    syncSessionRows(list, shown);
+    syncSessionRows(list, shown, histPicking);
+    renderHistoryControls(shown);
 
     let note = '';
     if (!shown.length) {
       note = sessionFilter === 'attention'
         ? 'Nothing needs attention. <span class="i18n-zh">没有需要处理的任务。</span>'
-        : shownActive.length
-          ? ''            // live work is on screen above; history is simply empty
-          : 'No research sessions yet. <span class="i18n-zh">暂无研究任务。</span>';
+        : sessionTotals && sessionTotals.history === 0
+          ? 'No recent history. <span class="i18n-zh">暂无最近历史。</span>'
+          : shownActive.length
+            ? ''          // live work is on screen above; history is simply empty
+            : 'No research sessions yet. <span class="i18n-zh">暂无研究任务。</span>';
     } else if (sessionFilter === 'attention' && shown.length < attnN) {
       /* The count is the table's; this list is the loaded page's. Say which is
          on screen rather than let the two numbers quietly disagree. */
@@ -1342,6 +1497,7 @@
     if (!list) return;
     sessionsWired = true;
     wireQueue();
+    wireHistoryControls();
     /* A menu that was open while its content changed holds the new markup until
        it closes. `toggle` does not bubble, hence the capture phase. */
     const activeList = $('qr-sess-active');
@@ -1378,6 +1534,8 @@
     /* One handler, delegated to BOTH lists. Active Now renders the same rows
        with the same controls, so it must answer clicks the same way. */
     const onListClick = (e) => {
+      // A tick box is a selection, not a request to open the session.
+      if (e.target.closest('[data-qr-hist-pick]')) { e.stopPropagation(); return; }
       const view = e.target.closest('[data-qr-sess-view]');
       if (view) {
         e.stopPropagation();

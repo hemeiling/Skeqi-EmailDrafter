@@ -1598,6 +1598,34 @@ app.get('/api/aresearch/job/:id/sections', async (req, res) => {
 });
 
 /* Everything currently running, for the Reports tab. */
+/* Bulk deletion of session HISTORY.
+
+   Same deletion as the single-row path, applied to many rows: the job row and
+   its sections, and nothing else. The client's idea of what is terminal is not
+   consulted - the statement carries the allow-list, so asking to delete a
+   running job simply deletes nothing and says so. */
+app.post('/api/aresearch/sessions/delete', async (req, res) => {
+  const body = req.body || {};
+  const scope = body.scope === 'all' ? 'all' : 'selected';
+  try {
+    let out;
+    if (scope === 'all') {
+      out = await jobsDb.clearQwenSessionHistory();
+    } else {
+      const ids = Array.isArray(body.job_ids) ? body.job_ids.filter(Boolean) : [];
+      if (!ids.length) return res.status(400).json({ error: 'no job_ids given' });
+      out = await jobsDb.deleteQwenSessions(ids);
+    }
+    logCrmActivity({ actor: reqUser(req), action: 'aresearch.session.bulk_delete',
+                     metadata: { scope, deleted: out.deleted.length,
+                                 skipped: out.skipped.length } });
+    res.json({ scope, deleted: out.deleted.length,
+               job_ids: out.deleted.map((d) => d.job_id), skipped: out.skipped });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 /* ── The queue ────────────────────────────────────────────────────────────
    One read for the summary line AND the management panel, so the two cannot
    disagree about what is waiting. */

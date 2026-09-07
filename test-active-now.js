@@ -102,9 +102,10 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL,
     console.log('\n[6] The client renders two sections and says which is which\n');
     ck('Active Now has its own list element', /\$\('qr-sess-active'\)/.test(SRC));
     ck('it renders through the same keyed reconciliation',
-       /syncSessionRows\(activeList, shownActive\)/.test(SRC),
+       /syncSessionRows\(activeList, shownActive, false\)/.test(SRC),
        'the menu fix from 18f8cee must still hold here');
-    ck('history keeps its own reconciliation', /syncSessionRows\(list, shown\)/.test(SRC));
+    ck('history keeps its own reconciliation',
+       /syncSessionRows\(list, shown, histPicking\)/.test(SRC));
     ck('the header reports researching and queued separately',
        /\$\{runN\} researching \/ \$\{runN\} 个研究中/.test(SRC)
        && /\$\{queueN\} queued \/ \$\{queueN\} 个排队中/.test(SRC));

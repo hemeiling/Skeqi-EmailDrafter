@@ -27,7 +27,7 @@ const ck = (name, ok, detail) => {
 
 /* The shipped functions, lifted out of the real file. */
 const SRC = fs.readFileSync(path.join(__dirname, 'public/qwen-research.js'), 'utf8');
-const from = SRC.indexOf('  function rowHtml(x) {');
+const from = SRC.indexOf('  function rowHtml(x, pick) {');
 const to = SRC.indexOf('  function renderSessions() {');
 if (from < 0 || to < 0 || to < from) throw new Error('could not lift the render helpers');
 const HELPERS = SRC.slice(from, to);
@@ -43,6 +43,9 @@ const TOGGLE = SRC.slice(tFrom, tTo + '\n    };'.length);
 
 const HARNESS = `
   window.sessionSel = null;
+  // The history tick boxes; the DOM tests drive them through the real code.
+  window.histSel = new Set();
+  const histSel = window.histSel;
   const esc = (v) => String(v == null ? '' : v)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
@@ -75,8 +78,8 @@ ${TOGGLE}
   await page.addScriptTag({ content: HARNESS });
   await page.evaluate(() => window.wireToggle(document.getElementById('list')));
 
-  const sync = (rows) => page.evaluate(
-    (r) => window.syncSessionRows(document.getElementById('list'), r), rows);
+  const sync = (rows, pick) => page.evaluate(
+    ([r, p]) => window.syncSessionRows(document.getElementById('list'), r, p), [rows, !!pick]);
 
   const ROWS = (n, over) => Array.from({ length: n }, (_, i) => ({
     job_id: 'j' + (i + 1), company_name: 'Co ' + (i + 1),
@@ -216,7 +219,40 @@ ${TOGGLE}
     ck('and it is removed when there is nothing to say',
        (await page.$$('li.qr-sess-empty')).length === 0);
 
-    console.log('\n[9] The shipped file no longer rebuilds either list\n');
+    console.log('\n[9] A history tick survives polling\n');
+    await sync(ROWS(4), true);
+    // A fresh marker: rows were added and removed by the previous section.
+    await page.evaluate(() => {
+      document.querySelectorAll('li[data-qr-sess]').forEach((li, i) => { li._pick = i; });
+    });
+    ck('select mode renders a tick box per row',
+       (await page.$$('input[data-qr-hist-pick]')).length === 4);
+    await page.evaluate(() => {
+      window.histSel.add('j2');
+      document.querySelector('[data-qr-hist-pick="j2"]').checked = true;
+    });
+    await sync(ROWS(4, { ctx: 'later' }), true);
+    ck('the tick is still there after a poll',
+       await page.evaluate(() => document.querySelector('[data-qr-hist-pick="j2"]').checked));
+    ck('and the others are still clear',
+       await page.evaluate(() =>
+         ['j1', 'j3', 'j4'].every((k) =>
+           !document.querySelector(`[data-qr-hist-pick="${k}"]`).checked)));
+    await page.evaluate(() => document.querySelector('[data-qr-hist-pick="j3"]').focus());
+    await page.evaluate(() => { document.querySelector('[data-qr-hist-pick="j3"]').checked = true; });
+    await sync(ROWS(4, { ctx: 'later still' }), true);
+    ck('a box being clicked is not overwritten mid-interaction',
+       await page.evaluate(() => document.querySelector('[data-qr-hist-pick="j3"]').checked),
+       'the poll skips the focused box');
+    await sync(ROWS(4), false);
+    ck('leaving select mode removes the boxes',
+       (await page.$$('input[data-qr-hist-pick]')).length === 0);
+    ck('and the rows themselves survived that too',
+       await page.evaluate(() =>
+         [...document.querySelectorAll('li[data-qr-sess]')].every((li) => '_pick' in li)),
+       'toggling select mode must not rebuild the list');
+
+    console.log('\n[10] The shipped file no longer rebuilds either list\n');
     ck('the sessions list is patched, not rewritten',
        !/list\.innerHTML\s*=/.test(SRC), 'innerHTML on the list is the bug');
     ck('the queue panel writes only when its markup changed',
@@ -230,7 +266,7 @@ ${TOGGLE}
     ck('both counts come from the server totals',
        /sessionTotals \.researching|sessionTotals \? sessionTotals\.researching/.test(SRC));
     ck('Active Now uses this same reconciliation',
-       /syncSessionRows\(activeList, shownActive\)/.test(SRC),
+       /syncSessionRows\(activeList, shownActive, false\)/.test(SRC),
        'the menu must survive polling there too');
     ck('updates are not frozen while a menu is open',
        /setCell\(li\.querySelector\('\.qr-sess-ctx'\), c\.ctx\);/.test(SRC),
