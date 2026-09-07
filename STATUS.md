@@ -1439,19 +1439,95 @@ Test suites: 674 checks across 12 files, plus 49 production probe checks.
 
 ---
 
+## 2o. Live work, live UI, and orphan recovery (2026-09-07) — CRM DEPLOYED
+
+CRM `24018be` live and hash-verified. Engine `5df07d7` **pushed but NOT yet
+deployed** — the worker service still runs the old reaper (see below).
+
+### Recent Sessions is patched, not rebuilt (`18f8cee`)
+
+The overflow menu is a native `<details>`; its open state lives in the DOM and
+nowhere else. `renderSessions` wrote `innerHTML` over the whole list every three
+seconds, so the menu closed the instant it opened. The list is now reconciled by
+`job_id`: rows keep their elements, only changed cells are written, and an open
+menu is never swapped — new markup waits and is applied on close. Open menu,
+scroll, focus, hover and selection all survive a poll. Polling is unchanged.
+
+### Live work is surfaced, history is paged (`24018be`)
+
+Manage Queue said "6 waiting, 1 running"; Recent Sessions said "7 running" and
+showed one of them. Both came from one list doing two jobs: history is ordered by
+`started_at` and paged 25 at a time, and **a queued job has no start time**, so
+Postgres sorted the live work in among 32 historical rows that also had none.
+
+- `listQwenActiveSessions()` — same `JOB_LIVE` predicate as the queue, UNPAGED,
+  running first then queue order. Rendered as **Active Now / 当前任务**.
+- `listQwenSessions()` — now `status NOT IN JOB_LIVE`. **Recent History / 最近历史**.
+- Both read one `SESSION_COLUMNS` constant, so they cannot render different shapes.
+- Header now reads `2 researching · 3 queued · 25 need attention · 25 of 100
+  history shown`. It previously reported the sum of the first two as "running".
+
+> **Invariant, tested and verified live:** the job ids Manage Queue calls live
+> equal the job ids Active Now shows, subject only to the polling race.
+
+### Batch Research tells you what is executing (`9ebd6f0`)
+
+Three call sites wrote `status: 'running'` whatever the backend said — the
+follower on attach, the durable fallback, and reconnect (which applies it to
+`/active-jobs`, a route that returns queued rows too). All three now carry the
+real status and the badge asks `companyState`. The executing row is tinted.
+Queue position deliberately absent: no whole-queue poll exists on that tab.
+
+### Orphan recovery (`5df07d7`, engine — NOT DEPLOYED)
+
+**Reaping only ever ran inside `claim()`**, so a worker busy with a long run
+could not rescue a job a dead process left behind. `JobStore.reap()` runs the
+same statement under the same advisory lock without claiming, and `worker.py`
+calls it from a thread every 45s.
+
+**Measured in production on 2026-09-07, read-only, on the OLD code:**
+
+| | |
+| --- | --- |
+| Masmec's lease expired | ~07:04:10Z |
+| reaped and re-claimed | ~07:09:17Z |
+| orphaned for | ~5 minutes |
+| what unblocked it | the OTHER job (Lithos) finishing |
+
+With the deployed fix that becomes ≤45 seconds and does not depend on another
+job finishing. Worker `73d4d861` has now died mid-run **twice** in one evening.
+
+### Ownership model — settled, do not change without production evidence
+
+| owner | responsibility |
+| --- | --- |
+| worker maintenance reaper | ALL normal lease recovery, every 45s |
+| CRM `sweepStaleQwenJobs` | 25-minute last-resort terminal cleanup only |
+
+The sweeper predicate is UNCHANGED and stays unchanged. Decoupling the reaper
+removes the race by itself: the reaper wins by ~24 minutes unless no worker
+process exists at all, which is exactly what the sweeper's own comment claims to
+detect. Residual: if the worker service is down >25 min, the sweeper still
+terminalises a job with attempts remaining. Deliberate visibility.
+
+Tests: CRM 769 across 15 suites; engine 40 in `test_orphan_recovery.py` plus 105
+in `test_durable_queue.py`.
+
+---
+
 ## 6. NEXT ACTIONS
 
-1. **Record the ENGINE's Render hostname** in `DEPLOY.md`. The CRM's is now
+1. **Deploy engine `5df07d7` to the worker service.** Pushed, not deployed. Until
+   it is, an orphaned job waits for the current run to finish (§2o).
+2. **Record the ENGINE's Render hostname** in `DEPLOY.md`. The CRM's is now
    recorded; the engine's is still `<this-service>`.
-2. **Running-job cancellation** is deliberately NOT implemented. A running job
+3. **Running-job cancellation** is deliberately NOT implemented. A running job
    is inside a worker with no way to be told to stop; the UI says so.
-3. **Requeue the jobs killed while queued** — 32 now, deliberately deferred by
+4. **Requeue the jobs killed while queued** — 32 now, deliberately deferred by
    the user; they are identity-repaired and ready.
-4. **Content-quality pass** — now evidenced in §2m: reports emit prompt
+5. **Content-quality pass** — now evidenced in §2m: reports emit prompt
    scaffolding into user-visible sections, including an instruction addressed to
    the model, and leak one language into the other's block.
-5. **P0 — target-website integrity** (§2j, diagnosed, not implemented) and
-   **P1 — bounded rejected-candidate diagnostics** (paused by the user).
 
 **Deliberately NOT scheduled** (user decision, 2026-09-04): supplier/integrator
 discovery expansion, distributor discovery, new competitor retrieval, prompt
@@ -1472,8 +1548,9 @@ live `qwen-research.js` at `skeqi-emaildrafter-i46d.onrender.com` has the same
 SHA-256 as the working tree. Post-repair UI verification against production is
 recorded in §2m.
 
-**Last successful operation:** production validation of queue cancellation
-(§2n) — 49 checks green, all probe rows removed, no paid run.
+**Last successful operation:** CRM `24018be` deployed and verified live — the
+Manage Queue / Active Now invariant holds against production, and no live row
+appears on a history page.
 
 **The queue is idle** and the table holds 90 jobs, unchanged by the probe.
 
