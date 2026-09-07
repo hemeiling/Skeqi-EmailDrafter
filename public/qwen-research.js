@@ -725,7 +725,11 @@
     const rows = $('qr-queue-rows');
     if (!rows || !queueOpen) return;
 
-    rows.innerHTML = (queue.jobs || []).map((j) => {
+    /* Same rule as the sessions list: this is rewritten on every poll, and a
+       wholesale rewrite drops the checkbox the user is reaching for and the
+       focus ring with it. The rows only change when the queue changes, so
+       write nothing when the markup is identical. */
+    const html = (queue.jobs || []).map((j) => {
       const queued = j.status === 'queued';
       const label = queued ? 'Queued / 排队中' : 'Running / 研究中';
       return `<tr class="${queued ? 'qr-q-queued' : 'qr-q-running'}">
@@ -743,6 +747,7 @@
         <td>${queued ? mins(j.waiting_seconds) : mins(j.running_seconds)}</td>
       </tr>`;
     }).join('');
+    if (rows._qrHtml !== html) { rows.innerHTML = html; rows._qrHtml = html; }
 
     const sel = $('qr-queue-cancel-sel');
     if (sel) sel.disabled = queueSel.size === 0;
@@ -1052,6 +1057,109 @@
       <div class="qr-menubox">${items.join('')}</div></details>`;
   }
 
+  /* ── Keeping the list live WITHOUT destroying it ──────────────────────────
+
+     The overflow menu is a native <details>. Its open state lives in the DOM
+     and nowhere else, so rewriting the list's innerHTML every three seconds
+     closed it the instant it was opened - along with the scroll offset, the
+     focused element and the hover. While anything was queued or running the
+     menu was effectively unusable.
+
+     So the list is PATCHED, keyed by job_id: a row that is still present keeps
+     its element, and only the cells whose content actually changed are written.
+     Rows still update their status, progress and elapsed time on every poll;
+     what they no longer do is get rebuilt. */
+
+  function rowHtml(x) {
+    const c = rowContent(x);
+    return `<li class="qr-sess-row ${railClass(x.state)}${x.job_id === sessionSel ? ' is-selected' : ''}"
+                data-qr-sess="${esc(x.job_id)}">
+      <span class="qr-rail"></span>
+      <span class="qr-sess-co">${esc(x.company_name || '')}</span>
+      <span class="qr-sess-state">${c.state}</span>
+      <span class="qr-sess-ctx">${c.ctx}</span>
+      <span class="qr-sess-act"><span class="qr-sess-primary">${c.action}</span>${rowMenu(x)}</span>
+    </li>`;
+  }
+
+  function elementFrom(html) {
+    const t = document.createElement('template');
+    t.innerHTML = html.trim();
+    return t.content.firstElementChild;
+  }
+
+  /** Write only if it differs, so an unchanged cell is never touched. */
+  function setCell(el, html) {
+    if (el && el.innerHTML !== html) el.innerHTML = html;
+  }
+
+  /** Replace the menu only when its content changed AND it is not open.
+   *
+   *  An open menu is the user's; swapping it mid-interaction is the bug this
+   *  whole function exists to fix. The new markup is parked on the element and
+   *  applied when the menu closes, so it is never stale for long. */
+  function patchMenu(act, html) {
+    const cur = act.querySelector('.qr-menu');
+    if (!cur) { act.insertAdjacentHTML('beforeend', html); return; }
+    if (cur._qrHtml === html) return;
+    if (cur.open) { cur._qrPending = html; return; }
+    const next = elementFrom(html);
+    next._qrHtml = html;
+    cur.replaceWith(next);
+  }
+
+  function patchSessionRow(li, x) {
+    const c = rowContent(x);
+    const cls = `qr-sess-row ${railClass(x.state)}`
+              + (x.job_id === sessionSel ? ' is-selected' : '');
+    if (li.className !== cls) li.className = cls;
+    setCell(li.querySelector('.qr-sess-co'), esc(x.company_name || ''));
+    setCell(li.querySelector('.qr-sess-state'), c.state);
+    setCell(li.querySelector('.qr-sess-ctx'), c.ctx);
+    const act = li.querySelector('.qr-sess-act');
+    if (!act) return;
+    setCell(act.querySelector('.qr-sess-primary'), c.action);
+    patchMenu(act, rowMenu(x));
+  }
+
+  function syncSessionRows(list, rows) {
+    const have = new Map();
+    list.querySelectorAll('li[data-qr-sess]').forEach((li) => {
+      have.set(li.dataset.qrSess, li);
+    });
+    let cursor = null;                   // the node the next row must follow
+    rows.forEach((x) => {
+      let li = have.get(x.job_id);
+      if (li) { have.delete(x.job_id); patchSessionRow(li, x); }
+      else {
+        li = elementFrom(rowHtml(x));
+        // Record what the menu was built from, so the first patch is a no-op.
+        const m = li.querySelector('.qr-menu');
+        if (m) m._qrHtml = rowMenu(x);
+      }
+      // Moving a node preserves it, and with it any open menu inside it.
+      const target = cursor ? cursor.nextSibling : list.firstChild;
+      if (li !== target) list.insertBefore(li, target);
+      cursor = li;
+    });
+    // Whatever is left is a job that is no longer on this page.
+    have.forEach((li) => li.remove());
+  }
+
+  /** The one trailing message, kept out of the keyed rows. */
+  function setSessionNote(list, html) {
+    let note = list.querySelector('li.qr-sess-empty');
+    if (!html) { if (note) note.remove(); return; }
+    if (!note) {
+      note = document.createElement('li');
+      note.className = 'qr-sess-empty';
+      list.appendChild(note);
+    } else if (note !== list.lastElementChild) {
+      list.appendChild(note);
+    }
+    if (note.innerHTML !== html) note.innerHTML = html;
+  }
+
   function renderSessions() {
     const box = $('qr-sessions'); const list = $('qr-sess-list');
     if (!box || !list) return;
@@ -1070,7 +1178,11 @@
     const count = $('qr-sess-count');
     if (count) {
       const bits = [];
-      if (liveN) bits.push(`${liveN} running`);
+      /* "active", not "running": this number is queued + researching +
+         generating, and calling six waiting jobs "running" made the header
+         disagree with Queue Management, which counts the two separately. The
+         number is unchanged; only the word was wrong. */
+      if (liveN) bits.push(`${liveN} active / ${liveN} 进行中`);
       if (attnN) bits.push(`${attnN} need attention`);
       bits.push(sessions.length < totalN
         ? `${sessions.length} of ${totalN} shown` : `${totalN} shown`);
@@ -1089,33 +1201,23 @@
       ? sessions.filter((x) => SESSION_NEEDS_ATTENTION.has(x.state))
       : sessions;
 
-    const render = (x) => {
-      const c = rowContent(x);
-      return `<li class="qr-sess-row ${railClass(x.state)}${x.job_id === sessionSel ? ' is-selected' : ''}"
-                  data-qr-sess="${esc(x.job_id)}">
-        <span class="qr-rail"></span>
-        <span class="qr-sess-co">${esc(x.company_name || '')}</span>
-        <span class="qr-sess-state">${c.state}</span>
-        <span class="qr-sess-ctx">${c.ctx}</span>
-        <span class="qr-sess-act">${c.action}${rowMenu(x)}</span>
-      </li>`;
-    };
-
     /* One list, already ordered newest-first by the server. The client does not
        re-sort: the order is a property of the query, and re-deriving it here
        would let the two disagree. */
-    let html = shown.map(render).join('');
+    syncSessionRows(list, shown);
+
+    let note = '';
     if (!shown.length) {
-      html = `<li class="qr-sess-empty">${sessionFilter === 'attention'
+      note = sessionFilter === 'attention'
         ? 'Nothing needs attention. <span class="i18n-zh">没有需要处理的任务。</span>'
-        : 'No research sessions yet. <span class="i18n-zh">暂无研究任务。</span>'}</li>`;
+        : 'No research sessions yet. <span class="i18n-zh">暂无研究任务。</span>';
     } else if (sessionFilter === 'attention' && shown.length < attnN) {
       /* The count is the table's; this list is the loaded page's. Say which is
          on screen rather than let the two numbers quietly disagree. */
-      html += `<li class="qr-sess-empty">Showing ${shown.length} of ${attnN} loaded so far.`
-            + ` <span class="i18n-zh">已加载 ${shown.length} / ${attnN}。</span></li>`;
+      note = `Showing ${shown.length} of ${attnN} loaded so far.`
+           + ` <span class="i18n-zh">已加载 ${shown.length} / ${attnN}。</span>`;
     }
-    list.innerHTML = html;
+    setSessionNote(list, note);
 
     const more = $('qr-sess-more');
     if (more) more.hidden = !sessionNext || sessionFilter === 'attention';
@@ -1211,6 +1313,16 @@
     if (!list) return;
     sessionsWired = true;
     wireQueue();
+    /* A menu that was open while its content changed holds the new markup until
+       it closes. `toggle` does not bubble, hence the capture phase. */
+    list.addEventListener('toggle', (e) => {
+      const d = e.target;
+      if (!d || !d.classList || !d.classList.contains('qr-menu')) return;
+      if (d.open || !d._qrPending) return;
+      const next = elementFrom(d._qrPending);
+      next._qrHtml = d._qrPending;
+      d.replaceWith(next);
+    }, true);
     const retry = $('qr-retry-save');
     if (retry) retry.addEventListener('click', () => { if (liveJobId) retrySave(liveJobId); });
     const openPrev = $('qr-prev-open');

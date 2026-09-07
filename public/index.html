@@ -324,6 +324,10 @@
     .qr-sess-ctx { font-size:12px; color:var(--color-text-secondary);
                    font-variant-numeric:tabular-nums; white-space:nowrap; }
     .qr-sess-act { display:flex; align-items:center; gap:6px; padding-right:10px; }
+    /* A wrapper so the primary action can be repainted on its own without
+       touching the menu beside it. `contents` keeps the buttons as direct flex
+       items, so the layout is unchanged and an empty wrapper adds no gap. */
+    .qr-sess-primary { display:contents; }
     .qr-sess-act button { font-size:11.5px; padding:3px 9px; }
     /* Completed work: one line, and a route to where it actually lives. */
     .qr-sess-done { display:flex; align-items:center; justify-content:space-between;
