@@ -1032,10 +1032,11 @@ function costViewFor(report, runUsage) {
 
 /* Which states are live, and which are asking for a person.
 
-   'interrupted_before_start' is deliberately in NEITHER. Nothing is running,
-   and there is nothing to troubleshoot: the run never happened. Whether that
-   company still wants research is a question about the COMPANY, answered by
-   its own state, not by a job that never began. */
+   'interrupted_before_start' and 'cancelled' are deliberately in NEITHER.
+   Nothing is running, and there is nothing to troubleshoot: one run never
+   happened and the other was stopped on purpose. Whether those companies still
+   want research is a question about the COMPANY, answered by its own state,
+   not by a job that never began. */
 const SESSION_LIVE_STATES = new Set(['queued', 'researching', 'generating']);
 const SESSION_ATTENTION_STATES = new Set(
   ['interrupted', 'save_failed', 'synthesis_failed', 'failed']);
@@ -1059,6 +1060,9 @@ function sessionState(row) {
     case 'interrupted':
       return (row.started_at == null && Number(row.attempts || 0) === 0)
         ? 'interrupted_before_start' : 'interrupted';
+    /* A person stopped this on purpose. It is history, not a fault: nothing
+       failed and nobody needs to look into it. */
+    case 'cancelled':                   return 'cancelled';
     default:                            return row.report_id ? 'completed' : 'failed';
   }
 }
@@ -1577,6 +1581,47 @@ app.get('/api/aresearch/job/:id/sections', async (req, res) => {
 });
 
 /* Everything currently running, for the Reports tab. */
+/* ── The queue ────────────────────────────────────────────────────────────
+   One read for the summary line AND the management panel, so the two cannot
+   disagree about what is waiting. */
+app.get('/api/aresearch/queue', async (req, res) => {
+  try {
+    res.json(await jobsDb.queueSummary());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* One write for both "cancel this" and "cancel everything waiting".
+
+   Only queued work can be cancelled. A running job is spending money in a
+   worker that has no way to be told to stop, so asking is answered with an
+   explanation rather than a partial attempt. */
+app.post('/api/aresearch/queue/cancel', async (req, res) => {
+  const body = req.body || {};
+  const scope = body.scope === 'all' ? 'all' : 'selected';
+  try {
+    if (scope === 'all') {
+      const out = await jobsDb.cancelAllQueuedJobs();
+      return res.json({ scope, cancelled: out.cancelled, jobs: out.jobs, skipped: [] });
+    }
+    const ids = Array.isArray(body.job_ids) ? body.job_ids.filter(Boolean) : [];
+    if (!ids.length) return res.status(400).json({ error: 'no job_ids given' });
+    const jobs = []; const skipped = [];
+    for (const id of ids) {
+      const r = await jobsDb.cancelQueuedJob(String(id));
+      if (r.ok) jobs.push(r.job);
+      /* A job claimed between the panel's read and this request is the normal
+         race, not a failure. Name it so the user is told what happened. */
+      else skipped.push({ job_id: String(id), reason: r.reason,
+                          status: r.status || null, company_name: r.company_name || null });
+    }
+    res.json({ scope, cancelled: jobs.length, jobs, skipped });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/aresearch/active-jobs', async (req, res) => {
   try {
     res.json(await jobsDb.listActiveQwenJobs());

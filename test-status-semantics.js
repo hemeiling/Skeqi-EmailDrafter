@@ -91,6 +91,13 @@ ck('a real interrupted run IS attention',
    SESSION_ATTENTION_STATES.has('interrupted'));
 ck('so are the other failures',
    ['save_failed', 'synthesis_failed', 'failed'].every((s) => SESSION_ATTENTION_STATES.has(s)));
+ck('a cancelled job is NOT attention',
+   !SESSION_ATTENTION_STATES.has('cancelled'),
+   'a person stopped it on purpose; nothing failed');
+ck('a cancelled job is not live either', !SESSION_LIVE_STATES.has('cancelled'));
+ck('but it is still a state the list can render',
+   sessionState({ status: 'cancelled', started_at: null, attempts: 0 }) === 'cancelled',
+   'cancelled rows stay in history');
 ck('a never-started job is not live either',
    !SESSION_LIVE_STATES.has('interrupted_before_start'),
    'nothing is running');

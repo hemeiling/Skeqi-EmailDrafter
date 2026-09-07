@@ -261,9 +261,20 @@ console.log('\n[N2] The callback records the result, the worker owns the state\n
 const DB2 = require('fs').readFileSync(__dirname + '/db.js', 'utf8');
 const COMPLETE = DB2.slice(DB2.indexOf('async function completeQwenJob'),
                            DB2.indexOf('async function', DB2.indexOf('async function completeQwenJob') + 10));
+/* Checked per status rather than as one pinned string, so adding a protected
+   status extends this instead of breaking it. */
+const PROTECTED = ['completed', 'completed_with_limitations',
+                   'synthesis_failed', 'failed', 'cancelled'];
+const guard = (COMPLETE.match(/WHEN status IN \(([\s\S]*?)\) THEN status/) || [])[1] || '';
 ck('a terminal status is never overwritten by the callback',
-   /WHEN status IN \('completed','completed_with_limitations',\s*'synthesis_failed','failed'\) THEN status/.test(COMPLETE),
+   PROTECTED.every((st) => guard.includes(`'${st}'`)),
    'the worker writes it first, under its fencing token');
+ck('a cancelled job is among them',
+   guard.includes("'cancelled'"),
+   'a late callback must not complete what a person cancelled');
+ck('save_failed is deliberately NOT protected',
+   !guard.includes("'save_failed'"),
+   'save_failed -> completed is the retry path');
 ck('the callback still records the report id', /report_id=\$2/.test(COMPLETE));
 ck('and does not move completed_at once set',
    /completed_at=COALESCE\(completed_at, NOW\(\)\)/.test(COMPLETE));

@@ -341,6 +341,29 @@
     .qr-sess-filter[aria-pressed="true"] { background:var(--color-primary,#5b5bd6);
       border-color:var(--color-primary,#5b5bd6); color:#fff; }
     .qr-sess-filter[hidden], .qr-sess-morebtn[hidden] { display:none; }
+    .qr-queue { display:flex; align-items:center; gap:10px; margin:10px 0 0; }
+    .qr-queue[hidden], .qr-queue-panel[hidden] { display:none; }
+    .qr-queue-line { font-size:12px; color:var(--color-text-secondary);
+                     font-variant-numeric:tabular-nums; }
+    .qr-queue-panel { margin:8px 0 0; border:1px solid var(--color-border,#e3e3e8);
+                      border-radius:6px; padding:10px; }
+    .qr-queue-acts { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+                     margin-bottom:8px; }
+    .qr-queue-acts button { font:inherit; font-size:11px; cursor:pointer;
+                            padding:3px 9px; border-radius:4px;
+                            border:1px solid var(--color-border,#d7d7de);
+                            background:var(--color-surface,#fff); }
+    .qr-queue-acts button[disabled] { opacity:.45; cursor:default; }
+    .qr-queue-msg { font-size:11px; color:var(--color-text-secondary); }
+    /* Wide on purpose: eight columns must scroll here, never widen the page. */
+    .qr-queue-scroll { overflow-x:auto; }
+    .qr-queue-table { width:100%; border-collapse:collapse; font-size:12px;
+                      font-variant-numeric:tabular-nums; }
+    .qr-queue-table th, .qr-queue-table td { text-align:left; padding:4px 8px;
+                      border-bottom:1px solid var(--color-border,#eee); white-space:nowrap; }
+    .qr-queue-table th { font-weight:600; color:var(--color-text-secondary); }
+    .qr-queue-table .qr-qsel { width:28px; }
+    .qr-q-running td { opacity:.7; }
     /* Not a dollar figure, and deliberately not .u-cost: the sidebar
        summary selects the first .u-cost and must keep finding the model
        cost, not this. */
@@ -3403,6 +3426,35 @@
                polling loop already fetches; nothing here issues a request. -->
           <!-- Research Sessions. Rendered from Neon, never from browser state,
                so a session survives navigation, refresh and a closed browser. -->
+          <!-- The durable queue. One line always, the panel on request. -->
+          <div id="qr-queue" class="qr-queue" hidden>
+            <span class="qr-queue-line" id="qr-queue-line"></span>
+            <button type="button" class="qr-sess-filter" id="qr-queue-manage">
+              Manage Queue <span class="i18n-zh">管理队列</span></button>
+          </div>
+          <div id="qr-queue-panel" class="qr-queue-panel" hidden>
+            <div class="qr-queue-acts">
+              <button type="button" id="qr-queue-cancel-sel" disabled>
+                Cancel Selected / 取消选中</button>
+              <button type="button" id="qr-queue-cancel-all">
+                Cancel All Queued / 取消全部排队任务</button>
+              <span class="qr-queue-msg" id="qr-queue-msg"></span>
+            </div>
+            <div class="qr-queue-scroll">
+              <table class="qr-queue-table">
+                <thead><tr>
+                  <th class="qr-qsel"><input type="checkbox" id="qr-queue-allsel"
+                        aria-label="Select all queued jobs"></th>
+                  <th>Company / 公司</th><th>Status / 状态</th>
+                  <th>Queued / 入队</th><th>Started / 开始</th>
+                  <th>Attempts / 尝试</th><th>Worker / 执行器</th>
+                  <th>Wait / Runtime / 等待或运行</th>
+                </tr></thead>
+                <tbody id="qr-queue-rows"></tbody>
+              </table>
+            </div>
+          </div>
+
           <div id="qr-sessions" class="qr-sessions" hidden>
             <div class="qr-sess-head">
               <span class="qr-sess-title">Recent Sessions <span class="i18n-zh">最近任务</span></span>

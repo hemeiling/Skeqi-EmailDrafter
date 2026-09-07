@@ -4303,7 +4303,7 @@ const JOB_LIVE = "('queued','running')";
    85% running while carrying a completion time AND an error - which is exactly
    the state that made Sessions and Progress disagree. */
 const JOB_TERMINAL = ['completed', 'completed_with_limitations', 'interrupted',
-                      'failed', 'synthesis_failed', 'save_failed'];
+                      'failed', 'synthesis_failed', 'save_failed', 'cancelled'];
 
 function isTerminalStatus(status) {
   return JOB_TERMINAL.indexOf(String(status || '')) >= 0;
@@ -4463,7 +4463,7 @@ async function completeQwenJob(jobId, reportId, outcome = 'completed') {
     UPDATE account_research_qwen_jobs
     SET status = CASE
           WHEN status IN ('completed','completed_with_limitations',
-                          'synthesis_failed','failed') THEN status
+                          'synthesis_failed','failed','cancelled') THEN status
           ELSE $3 END,
         stage='completed', progress_percent=100,
         report_id=$2, error=NULL,
@@ -4563,12 +4563,100 @@ async function getQwenJobManifest(jobId) {
 }
 
 async function failQwenJob(jobId, error, status = 'failed') {
+  /* A cancelled job is settled by a PERSON, and no later machine event may
+     restate it. Every other transition is still allowed, because that is how an
+     interrupted run legitimately becomes failed once the reason is known. */
   const rows = await q(`
     UPDATE account_research_qwen_jobs
     SET status=$3, error=$2, completed_at=NOW(), updated_at=NOW()
-    WHERE job_id=$1 RETURNING *
+    WHERE job_id=$1 AND status <> 'cancelled' RETURNING *
   `, [jobId, String(error || '').slice(0, 500), status]);
   return rows[0] || null;
+}
+
+/* ── Cancelling queued work ───────────────────────────────────────────────
+
+   Only a job that is still WAITING can be cancelled. Once a worker has claimed
+   it, money is being spent and stopping it safely is a different problem, so
+   this deliberately does not try.
+
+   Nothing here tells the worker anything. Its claim query reads
+   `WHERE status = 'queued'` and its claimable index is partial on the same
+   predicate, so a cancelled row simply leaves the index and stops being
+   claimable. That is the entire safety mechanism, and it already existed. */
+
+const CANCEL_NOTE = 'Cancelled from the queue before it started.';
+
+/** Cancel ONE queued job.
+
+    The guard is the whole design: `AND status = 'queued'` means a worker that
+    claimed this row a millisecond ago wins, and we affect zero rows. Zero is
+    not an error - it is the answer - so the caller gets the row's CURRENT state
+    and can say what actually happened.
+
+    started_at, attempts, worker_id and the lease are all left alone. The job
+    never ran; writing a start time or an attempt onto it would be a lie that
+    outlives everyone who remembers the cancellation. */
+async function cancelQueuedJob(jobId) {
+  if (!jobId) return { ok: false, reason: 'not_found' };
+  const rows = await q(`
+    UPDATE account_research_qwen_jobs
+       SET status = 'cancelled', completed_at = NOW(), updated_at = NOW(),
+           error = $2
+     WHERE job_id = $1 AND status = 'queued'
+    RETURNING job_id, company_name, company_key, status, queued_at, completed_at
+  `, [jobId, CANCEL_NOTE]);
+  if (rows.length) return { ok: true, job: rows[0] };
+
+  // Nothing changed. Report what the row IS, so the UI can explain rather than
+  // just fail: it either started, or it had already finished.
+  const cur = await getQwenJob(jobId);
+  if (!cur) return { ok: false, reason: 'not_found' };
+  return { ok: false, reason: cur.status === 'running' ? 'already_running' : 'not_queued',
+           status: cur.status, job_id: jobId, company_name: cur.company_name };
+}
+
+/** Cancel every job still waiting.
+
+    One statement, so a worker claiming a job while this runs either loses that
+    row to the cancel or keeps it entirely - never half. Running jobs are not in
+    the predicate and are not touched. */
+async function cancelAllQueuedJobs() {
+  const rows = await q(`
+    UPDATE account_research_qwen_jobs
+       SET status = 'cancelled', completed_at = NOW(), updated_at = NOW(),
+           error = $1
+     WHERE status = 'queued'
+    RETURNING job_id, company_name, company_key, queued_at, completed_at
+  `, [CANCEL_NOTE]);
+  return { cancelled: rows.length, jobs: rows };
+}
+
+/** The queue as it stands: the counts, the oldest wait, and the rows themselves.
+
+    One read for all three, because the summary line and the management panel
+    ask the same question and a second query could answer it differently. */
+async function queueSummary() {
+  const rows = await q(`
+    SELECT job_id, company_name, company_key, website, model, status, stage,
+           progress_percent, attempts, worker_id, queued_at, started_at,
+           lease_expires_at, updated_at,
+           EXTRACT(EPOCH FROM (NOW() - queued_at))                    AS waiting_seconds,
+           EXTRACT(EPOCH FROM (NOW() - started_at))                   AS running_seconds
+      FROM account_research_qwen_jobs
+     WHERE status IN ${JOB_LIVE}
+     ORDER BY (status = 'running') DESC, queued_at
+  `);
+  const queued = rows.filter((r) => r.status === 'queued');
+  const running = rows.filter((r) => r.status === 'running');
+  return {
+    queued: queued.length,
+    running: running.length,
+    // The oldest job still WAITING, which is what a wait estimate is about.
+    oldest_queued_at: queued.length ? queued[0].queued_at : null,
+    oldest_wait_seconds: queued.length ? Number(queued[0].waiting_seconds) || 0 : 0,
+    jobs: rows,
+  };
 }
 
 /** Every job still marked live but long past its last heartbeat. */
@@ -5355,6 +5443,7 @@ module.exports = {
   claimQwenJob, activeQwenJob, getQwenJob, latestQwenJob, updateQwenJob,
   completeQwenJob, failQwenJob, sweepStaleQwenJobs, listActiveQwenJobs,
   listRecentQwenJobs,
+  cancelQueuedJob, cancelAllQueuedJobs, queueSummary,
   listQwenSessions, listQwenSessionStateInputs,
   deleteQwenSession, isTerminalStatus, resolveIdentity, JOB_TERMINAL,
   setQwenJobUsage,

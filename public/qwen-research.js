@@ -686,6 +686,150 @@
     pending:     ['Pending', '待处理'],
   };
 
+  /* ── The queue ────────────────────────────────────────────────────────────
+     The durable P0-A queue, shown as it actually is. One read serves both the
+     summary line and the panel, so they cannot report different numbers.
+
+     Only QUEUED work can be cancelled. A running job is spending money inside a
+     worker that has no way to be told to stop, so it is listed for context and
+     is not selectable. */
+
+  let queue = null;                      // last queueSummary() response
+  let queueOpen = false;
+  const queueSel = new Set();            // job_ids ticked in the panel
+
+  function mins(seconds) {
+    const s = Math.max(0, Math.round(Number(seconds) || 0));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.round(s / 60) + 'm';
+    return Math.floor(s / 3600) + 'h' + String(Math.round((s % 3600) / 60)).padStart(2, '0');
+  }
+
+  async function refreshQueue() {
+    try {
+      queue = await fetch(api('/queue')).then((r) => r.json());
+    } catch (e) { return; }              // transient: keep what is on screen
+    renderQueue();
+  }
+
+  function renderQueue() {
+    const box = $('qr-queue'); const line = $('qr-queue-line');
+    if (!box || !line || !queue) return;
+    const q = queue.queued || 0; const r = queue.running || 0;
+    box.hidden = q === 0 && r === 0;
+    line.textContent = `Queue: ${q} waiting · ${r} running`
+      + (q ? ` · oldest wait ${mins(queue.oldest_wait_seconds)}` : '');
+
+    const panel = $('qr-queue-panel');
+    if (panel) panel.hidden = !queueOpen || box.hidden;
+    const rows = $('qr-queue-rows');
+    if (!rows || !queueOpen) return;
+
+    rows.innerHTML = (queue.jobs || []).map((j) => {
+      const queued = j.status === 'queued';
+      const label = queued ? 'Queued / 排队中' : 'Running / 研究中';
+      return `<tr class="${queued ? 'qr-q-queued' : 'qr-q-running'}">
+        <td class="qr-qsel">${queued
+          ? `<input type="checkbox" data-qr-qsel="${esc(j.job_id)}"
+                    ${queueSel.has(j.job_id) ? 'checked' : ''}
+                    aria-label="Select ${esc(j.company_name || '')}">`
+          : ''}</td>
+        <td>${esc(j.company_name || '')}</td>
+        <td>${label}</td>
+        <td>${esc(sessionWhen({ started_at: j.queued_at }))}</td>
+        <td>${j.started_at ? esc(sessionWhen({ started_at: j.started_at })) : '—'}</td>
+        <td>${esc(String(j.attempts == null ? 0 : j.attempts))}</td>
+        <td>${esc(String(j.worker_id || '—').split(':')[0].slice(0, 18))}</td>
+        <td>${queued ? mins(j.waiting_seconds) : mins(j.running_seconds)}</td>
+      </tr>`;
+    }).join('');
+
+    const sel = $('qr-queue-cancel-sel');
+    if (sel) sel.disabled = queueSel.size === 0;
+    const all = $('qr-queue-cancel-all');
+    if (all) all.disabled = q === 0;
+  }
+
+  /** Send one cancellation request and explain the result, including the race. */
+  async function cancelQueued(payload) {
+    const msgEl = $('qr-queue-msg');
+    if (msgEl) msgEl.textContent = 'Cancelling… 正在取消…';
+    let out = null;
+    try {
+      out = await fetch(api('/queue/cancel'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).then((r) => r.json());
+    } catch (e) {
+      if (msgEl) msgEl.textContent = 'Could not reach the server. 无法连接服务器。';
+      return;
+    }
+    if (out && out.error) {
+      if (msgEl) msgEl.textContent = out.error;
+      return;
+    }
+    queueSel.clear();
+    const parts = [`Cancelled ${out.cancelled}. 已取消 ${out.cancelled}。`];
+    /* A job the worker claimed between the panel's read and this request is the
+       normal race. Say so plainly rather than reporting a failure. */
+    const started = (out.skipped || []).filter((s) => s.reason === 'already_running');
+    if (started.length) {
+      parts.push(`${started.length} job(s) had already started and were not cancelled.`
+               + ` ${started.length} 项已开始，未取消。`);
+    }
+    const gone = (out.skipped || []).filter((s) => s.reason !== 'already_running');
+    if (gone.length) parts.push(`${gone.length} were no longer queued. ${gone.length} 项已不在队列中。`);
+    if (msgEl) msgEl.textContent = parts.join(' ');
+    await refreshSessions();            // reads the queue too, and the new history
+  }
+
+  function wireQueue() {
+    const manage = $('qr-queue-manage');
+    if (manage) manage.addEventListener('click', () => {
+      queueOpen = !queueOpen;
+      manage.setAttribute('aria-pressed', queueOpen ? 'true' : 'false');
+      renderQueue();
+    });
+
+    const rows = $('qr-queue-rows');
+    if (rows) rows.addEventListener('change', (e) => {
+      const box = e.target.closest('[data-qr-qsel]');
+      if (!box) return;
+      if (box.checked) queueSel.add(box.dataset.qrQsel);
+      else queueSel.delete(box.dataset.qrQsel);
+      const sel = $('qr-queue-cancel-sel');
+      if (sel) sel.disabled = queueSel.size === 0;
+    });
+
+    const allBox = $('qr-queue-allsel');
+    if (allBox) allBox.addEventListener('change', () => {
+      queueSel.clear();
+      if (allBox.checked) {
+        (queue && queue.jobs || []).filter((j) => j.status === 'queued')
+          .forEach((j) => queueSel.add(j.job_id));
+      }
+      renderQueue();
+    });
+
+    const sel = $('qr-queue-cancel-sel');
+    if (sel) sel.addEventListener('click', () => {
+      if (!queueSel.size) return;
+      cancelQueued({ scope: 'selected', job_ids: [...queueSel] });
+    });
+
+    const all = $('qr-queue-cancel-all');
+    if (all) all.addEventListener('click', () => {
+      const n = (queue && queue.queued) || 0;
+      if (!n) return;
+      /* Explicit, and it says what is NOT affected: the running job keeps
+         going, and the cancelled rows stay in history. */
+      if (!window.confirm(
+        `Cancel all ${n} queued research jobs? Running jobs will not be affected. `
+        + `Cancelled jobs remain in history.`)) return;
+      cancelQueued({ scope: 'all' });
+    });
+  }
+
   /* ── Research Sessions ────────────────────────────────────────────────────
      The list is rendered from Neon, never from browser state, so a session
      survives navigation, a refresh, a closed browser and an engine restart.
@@ -701,6 +845,7 @@
     save_failed:                ['Generated · save failed', '已生成·保存失败', 'st-limited'],
     interrupted:                ['Interrupted', '已中断', 'st-failed'],
     interrupted_before_start:   ['Interrupted before start', '启动前中断', 'st-done'],
+    cancelled:                  ['Cancelled', '已取消', 'st-done'],
     failed:                     ['Failed', '失败', 'st-failed'],
   };
   const SESSION_LIVE = new Set(['queued', 'researching', 'generating']);
@@ -813,6 +958,12 @@
       return { state: 'Generated · save failed',
                ctx: `${when} · ${n == null ? 'sections stored' : n + ' sections stored'}`,
                action: `<button data-qr-sess-retry="${esc(x.job_id)}">Retry Save / 重新保存</button>` };
+    }
+    if (x.state === 'cancelled') {
+      /* Stopped by a person on purpose. It stays in history and asks nothing of
+         anyone, so it carries no action and no stage. */
+      const [en, zh] = SESSION_STATE.cancelled;
+      return { state: `${en} / ${zh}`, ctx: when, action: '' };
     }
     if (x.state === 'interrupted_before_start') {
       /* No worker ever claimed this job, so there is no run to describe.
@@ -989,6 +1140,7 @@
   }
 
   async function refreshSessions() {
+    refreshQueue();                     // same beat, so the two never disagree
     const page = await fetchSessions();
     if (page) {
       sessions = page.rows;
@@ -1058,6 +1210,7 @@
     const list = $('qr-sess-list');
     if (!list) return;
     sessionsWired = true;
+    wireQueue();
     const retry = $('qr-retry-save');
     if (retry) retry.addEventListener('click', () => { if (liveJobId) retrySave(liveJobId); });
     const openPrev = $('qr-prev-open');
