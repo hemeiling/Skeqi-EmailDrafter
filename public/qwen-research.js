@@ -2210,13 +2210,18 @@
     /* A row being regenerated shows the RUN, not the stale report status: the
        point of the button is to see that something is happening. */
     const job = rowJobs.get(it.company);
-    if (job && job.status === 'running' && job.stage === 'queued' && !job.jobId) {
-      return '<span class="qr-badge qr-b-Pending">Queued / 排队中</span>';
-    }
     if (job && job.status === 'cancelled') {
       return '<span class="qr-badge qr-b-Pending">Cancelled / 已取消</span>';
     }
-    if (job && job.status === 'running') {
+    /* Which of the four the COMPANY is in, from the one shared resolver. The
+       badge decides how to draw it; it does not decide what it is. */
+    const state = companyState({ job, hasReport: it._hasReport });
+    if (state === 'queued') {
+      return '<span class="qr-badge qr-b-Pending">Queued / 排队中</span>';
+    }
+    if (state === 'researching') {
+      /* The stage and percentage are already in the live job map, so this adds
+         no request: "Researching · 45% · Building evidence". */
       const [en, zh] = ROW_STAGE[job.stage] || ['Researching', '研究中'];
       const pct = Math.max(0, Math.min(100, job.pct || 0));
       return `<span class="qr-badge qr-b-Searching">Researching / 研究中${pct ? ' ' + pct + '%' : ''}</span>`
@@ -2244,7 +2249,7 @@
     if (it.status && Object.prototype.hasOwnProperty.call(RUN_STATE, it.status)) {
       st = it.status; zh = RUN_STATE[it.status];
     } else {
-      [st, zh] = COMPANY_LABEL[companyState({ job, hasReport: it._hasReport })];
+      [st, zh] = COMPANY_LABEL[state];
     }
     return `<span class="qr-badge qr-b-${st.replace(/\s+/g, '')}">${esc(st)}${zh ? ' / ' + zh : ''}</span>`;
   }
@@ -2320,6 +2325,14 @@
         return;                                    // leave an editing row alone
       }
       tr.dataset.mode = mode;
+      /* Subtle emphasis on the ONE row executing right now, so a long table can
+         be scanned for it. Same resolver as the badge, so the marker and the
+         label can never disagree. */
+      const running = companyState({ job: rowJobs.get(it.company),
+                                     hasReport: it._hasReport }) === 'researching';
+      if (tr.classList.contains('is-running') !== running) {
+        tr.classList.toggle('is-running', running);
+      }
       setHTML(tr.children[1], esc(it.company));
       setHTML(tr.children[2], websiteCell(it));
       setHTML(tr.children[3], statusBadge(it) + (it.error ? `<div style="font-size:.72rem;color:var(--color-danger)">${esc(it.error)}</div>` : ''));
@@ -2504,7 +2517,10 @@
   /** Poll one job and paint the row. Leaves the existing report alone unless
    *  and until the run actually completes. */
   async function followRowJob(company, jobId, opts) {
-    setRowJob(company, { jobId, status: 'running' });
+    /* Deliberately no status here. The row already carries the optimistic
+       pre-claim state, and asserting 'running' before the queue has claimed
+       anything is what made every queued company look like it was executing. */
+    setRowJob(company, { jobId });
     while (true) {
       const snap = await fetch(api(`/job/${encodeURIComponent(jobId)}`))
         .then((r) => r.json()).catch(() => null);
@@ -2529,7 +2545,9 @@
                                pct: (row && row.progress_percent) || 0 });
           break;
         }
-        setRowJob(company, { pct: row.progress_percent, stage: row.stage, status: 'running' });
+        // The durable row's own status: 'queued' until a worker claims it.
+        setRowJob(company, { pct: row.progress_percent, stage: row.stage,
+                             status: row.status });
       }
       await new Promise((r) => setTimeout(r, 1500));
     }
@@ -2571,7 +2589,9 @@
 
     active.forEach((job) => {
       if ((rowJobs.get(job.company_name) || {}).jobId === job.job_id) return;
-      setRowJob(job.company_name, { jobId: job.job_id, status: 'running',
+      /* /active-jobs returns queued AND running rows; it always said 'running'.
+         Six waiting companies then rendered as though six were executing. */
+      setRowJob(job.company_name, { jobId: job.job_id, status: job.status,
                                     stage: job.stage, pct: job.progress_percent });
       followRowJob(job.company_name, job.job_id, { keep: true });
     });
