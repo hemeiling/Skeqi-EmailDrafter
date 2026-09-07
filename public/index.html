@@ -308,6 +308,7 @@
     .qr-sess-group:first-child { border-top:0; }
     /* One line, four zones, fixed positions. The rail carries state, so no chip. */
     .qr-sess-row { display:grid; grid-template-columns:3px 1fr auto auto auto;
+                   --qr-pick:0px;
                    align-items:center; gap:0 12px; padding:0; cursor:pointer;
                    background:var(--color-surface); border-top:1px solid var(--color-border); }
     .qr-sess-row:first-child { border-top:0; }
@@ -334,21 +335,44 @@
     .qr-sess-sec[hidden] { display:none; }
     .qr-sess-histhead { display:flex; align-items:center; justify-content:space-between;
                         gap:10px; flex-wrap:wrap; }
-    .qr-hist-acts { display:flex; align-items:center; gap:6px; text-transform:none;
-                    letter-spacing:0; }
-    .qr-hist-acts button { font:inherit; font-size:11px; cursor:pointer;
-                           padding:2px 8px; border-radius:4px;
-                           border:1px solid var(--color-border,#d7d7de);
-                           background:var(--color-surface,#fff);
-                           color:var(--color-text,#222); font-weight:500; }
-    .qr-hist-acts button[disabled] { opacity:.45; cursor:default; }
-    .qr-hist-acts button[hidden] { display:none; }
-    .qr-hist-acts button[aria-pressed="true"] { background:var(--color-primary,#5b5bd6);
-                                                border-color:var(--color-primary,#5b5bd6);
-                                                color:#fff; }
+    .qr-hist-acts { display:flex; align-items:center; gap:8px; text-transform:none;
+                    letter-spacing:0; font-weight:400; }
+    .qr-hist-bar { display:flex; align-items:center; gap:6px; }
+    .qr-hist-bar[hidden] { display:none; }
+    /* Manage is a word, not a button: history is the point of this list. */
+    .qr-hist-manage { font:inherit; font-size:11px; cursor:pointer; padding:2px 4px;
+                      border:0; background:none; color:var(--color-text-secondary);
+                      text-decoration:underline; text-underline-offset:2px; }
+    .qr-hist-manage:hover { color:var(--color-text); }
+    .qr-hist-manage[hidden] { display:none; }
+    .qr-hist-bar button { font:inherit; font-size:11px; cursor:pointer;
+                          padding:2px 8px; border-radius:4px;
+                          border:1px solid var(--color-border,#d7d7de);
+                          background:var(--color-surface,#fff);
+                          color:var(--color-text-secondary); font-weight:400; }
+    .qr-hist-bar button:hover:not([disabled]) { color:var(--color-text); }
+    /* The only control with weight, and only once it can do something. */
+    .qr-hist-bar .qr-hist-go:not([disabled]) { color:var(--color-danger,#b42318);
+                                               border-color:var(--color-danger,#b42318);
+                                               font-weight:500; }
+    .qr-hist-bar button[disabled] { opacity:.4; cursor:default; }
+    .qr-hist-bar .qr-menu summary { font-size:11px; padding:1px 7px; }
+    .qr-hist-count { font-size:11px; color:var(--color-text-secondary);
+                     font-variant-numeric:tabular-nums; }
     .qr-hist-msg { font-size:11px; font-weight:400; color:var(--color-text-secondary); }
-    /* The tick box only exists while Select is on, and only on history rows. */
-    .qr-sess-pick { display:flex; align-items:center; padding-left:8px; }
+    /* Manage mode adds a narrow LEADING column. Declaring it on the list means
+       the row keeps its single line and its height: the tick box occupies a
+       column of its own instead of being auto-placed into the next row, which
+       is what pushed Open and the overflow menu onto a second line. */
+    .qr-sess-list.is-picking .qr-sess-row { grid-template-columns:3px 22px 1fr auto auto auto; }
+    .qr-sess-pick { display:flex; align-items:center; justify-content:center; }
+    .qr-sess-pick input { margin:0; cursor:pointer; }
+    @media (max-width:720px) {
+      .qr-sess-list.is-picking .qr-sess-row {
+        grid-template-columns:3px 22px 1fr auto;
+        grid-template-areas:"rail pick co act" "rail pick state act" "rail pick ctx act"; }
+      .qr-sess-list.is-picking .qr-sess-pick { grid-area:pick; }
+    }
     /* The row executing right now. A tinted ground and a left marker: enough to
        find by eye in a long table, not enough to shout. */
     #qr-batchtable tbody tr.is-running > td {
@@ -3500,17 +3524,24 @@
             <div class="qr-sess-sec qr-sess-histhead" id="qr-sess-history-head" hidden>
               <span>Recent History <span class="i18n-zh">最近历史</span></span>
               <span class="qr-hist-acts">
-                <button type="button" id="qr-hist-select" aria-pressed="false">
-                  Select / 选择</button>
-                <button type="button" id="qr-hist-all" hidden>
-                  Select All Visible / 选择当前显示</button>
-                <button type="button" id="qr-hist-never" hidden>
-                  Select Never Started / 选择启动前中断</button>
-                <button type="button" id="qr-hist-del" hidden disabled>
-                  Delete Selected / 删除选中</button>
-                <button type="button" id="qr-hist-clear" hidden>
-                  Clear History / 清空历史</button>
                 <span class="qr-hist-msg" id="qr-hist-msg"></span>
+                <!-- Normal mode is one quiet word. Cleanup is secondary. -->
+                <button type="button" class="qr-hist-manage" id="qr-hist-manage">
+                  Manage <span class="i18n-zh">管理</span></button>
+                <span class="qr-hist-bar" id="qr-hist-bar" hidden>
+                  <span class="qr-hist-count" id="qr-hist-count"></span>
+                  <button type="button" id="qr-hist-all">Select all / 全选</button>
+                  <button type="button" id="qr-hist-never">Select never started / 选择启动前中断</button>
+                  <button type="button" class="qr-hist-go" id="qr-hist-del" disabled>
+                    Delete / 删除</button>
+                  <button type="button" id="qr-hist-done">Done / 完成</button>
+                  <!-- Rare and irreversible, so it lives one click further away. -->
+                  <details class="qr-menu"><summary>⋯</summary>
+                    <div class="qr-menubox">
+                      <button type="button" class="qr-danger" id="qr-hist-clear">
+                        Clear History / 清空历史</button>
+                    </div></details>
+                </span>
               </span></div>
             <ul class="qr-sess-list" id="qr-sess-list"></ul>
             <div class="qr-sess-done" id="qr-sess-done">

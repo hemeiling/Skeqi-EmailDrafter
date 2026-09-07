@@ -866,6 +866,7 @@
      a live job is not history, and the statement behind this refuses it anyway. */
   let histPicking = false;
   const histSel = new Set();
+  let histShown = [];                    // the history rows currently on screen
   let sessionSel = null;         // job_id whose detail is on screen
   let sessionTimer = null;
   let sessionFollowing = null;   // job_id the follower loop is polling
@@ -1181,40 +1182,47 @@
   }
 
   function renderHistoryControls(shown) {
-    const sel = $('qr-hist-select');
-    const del = $('qr-hist-del');
-    const clr = $('qr-hist-clear');
-    if (!sel) return;
+    const manage = $('qr-hist-manage');
+    const bar = $('qr-hist-bar');
+    if (!manage || !bar) return;
+    histShown = shown;
     // Selection can only mean rows that are actually on screen.
     const visible = new Set(shown.map((x) => x.job_id));
     [...histSel].forEach((id) => { if (!visible.has(id)) histSel.delete(id); });
-    sel.setAttribute('aria-pressed', histPicking ? 'true' : 'false');
-    sel.textContent = histPicking ? 'Done / 完成' : 'Select / 选择';
-    sel.hidden = shown.length === 0;
-    if (del) {
-      del.hidden = !histPicking;
-      del.disabled = histSel.size === 0;
-      del.textContent = histSel.size
-        ? `Delete Selected (${histSel.size}) / 删除选中 ${histSel.size}`
-        : 'Delete Selected / 删除选中';
+    // Nothing left to manage - clearing everything should leave a plain empty list.
+    if (histPicking && shown.length === 0) { histPicking = false; histSel.clear(); }
+
+    /* Normal mode is the history view it was before any of this existed: the
+       heading, and one quiet word. Everything else waits behind Manage. */
+    manage.hidden = histPicking || shown.length === 0;
+    bar.hidden = !histPicking;
+    // The narrow leading column exists only while selecting, so the row keeps
+    // its single line and its height in both modes.
+    const list = $('qr-sess-list');
+    if (list) list.classList.toggle('is-picking', histPicking);
+    if (!histPicking) return;
+
+    const count = $('qr-hist-count');
+    if (count) {
+      count.textContent = histSel.size
+        ? `${histSel.size} selected / 已选 ${histSel.size} 项` : 'None selected / 未选择';
     }
-    if (clr) clr.hidden = !histPicking;
+    const del = $('qr-hist-del');
+    if (del) del.disabled = histSel.size === 0;
 
     const all = $('qr-hist-all');
     if (all) {
-      all.hidden = !histPicking;
-      // A toggle: the same button clears the selection once everything is in it.
+      // A toggle, so a large selection can be undone without unticking 25 boxes.
       const everything = shown.length > 0 && shown.every((x) => histSel.has(x.job_id));
-      all.textContent = everything
-        ? 'Clear Selection / 取消选择' : 'Select All Visible / 选择当前显示';
+      all.textContent = everything ? 'Clear / 取消全选' : 'Select all / 全选';
     }
-    /* The never-started rows are the noise: 32 of them, from the sweeps, and
-       none of them ever ran. One button for the common cleanup. */
+    /* The never-started rows are the noise: none of them ever ran. One button
+       for the cleanup that is actually wanted. */
     const never = $('qr-hist-never');
     if (never) {
       const n = shown.filter((x) => x.state === 'interrupted_before_start').length;
-      never.hidden = !histPicking || n === 0;
-      never.textContent = `Select Never Started (${n}) / 选择启动前中断 ${n}`;
+      never.hidden = n === 0;
+      never.textContent = `Select never started (${n}) / 选择启动前中断 ${n}`;
     }
   }
 
@@ -1250,14 +1258,17 @@
   }
 
   function wireHistoryControls() {
-    const sel = $('qr-hist-select');
-    if (sel) sel.addEventListener('click', () => {
-      histPicking = !histPicking;
-      if (!histPicking) histSel.clear();
+    const setMode = (on) => {
+      histPicking = on;
+      if (!on) histSel.clear();
       const msgEl = $('qr-hist-msg');
       if (msgEl) msgEl.textContent = '';
       renderSessions();
-    });
+    };
+    const manage = $('qr-hist-manage');
+    if (manage) manage.addEventListener('click', () => setMode(true));
+    const done = $('qr-hist-done');
+    if (done) done.addEventListener('click', () => setMode(false));
 
     const list = $('qr-sess-list');
     if (list) list.addEventListener('change', (e) => {
@@ -1265,20 +1276,21 @@
       if (!box) return;
       if (box.checked) histSel.add(box.dataset.qrHistPick);
       else histSel.delete(box.dataset.qrHistPick);
-      renderHistoryControls(sessions);
+      // Only the toolbar changes; the rows are left exactly as they are.
+      renderHistoryControls(histShown);
     });
 
     const all = $('qr-hist-all');
     if (all) all.addEventListener('click', () => {
-      const everything = sessions.length > 0 && sessions.every((x) => histSel.has(x.job_id));
+      const everything = histShown.length > 0 && histShown.every((x) => histSel.has(x.job_id));
       histSel.clear();
-      if (!everything) sessions.forEach((x) => histSel.add(x.job_id));
+      if (!everything) histShown.forEach((x) => histSel.add(x.job_id));
       renderSessions();
     });
 
     const never = $('qr-hist-never');
     if (never) never.addEventListener('click', () => {
-      sessions.filter((x) => x.state === 'interrupted_before_start')
+      histShown.filter((x) => x.state === 'interrupted_before_start')
         .forEach((x) => histSel.add(x.job_id));
       renderSessions();
     });
@@ -1295,7 +1307,9 @@
     });
 
     const clr = $('qr-hist-clear');
-    if (clr) clr.addEventListener('click', () => {
+    if (clr) clr.addEventListener('click', (e) => {
+      const menu = e.target.closest('.qr-menu');
+      if (menu) menu.open = false;
       const n = sessionTotals ? sessionTotals.history : sessions.length;
       if (!n) return;
       /* Deliberately the TOTAL, not the 25 on screen: Clear History means all

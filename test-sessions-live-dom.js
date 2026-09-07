@@ -72,9 +72,16 @@ ${TOGGLE}
 (async () => {
   const browser = await chromium.launch({ executablePath: SHELL });
   const page = await browser.newPage();
+  /* The real stylesheet, so geometry assertions mean something. The row is a
+     grid; whether a sixth cell wraps is a property of that grid, not of a
+     string. */
+  const CSS = (fs.readFileSync(path.join(__dirname, 'public/index.html'), 'utf8')
+    .match(/<style[^>]*>([\s\S]*?)<\/style>/g) || [])
+    .map((b) => b.replace(/<\/?style[^>]*>/g, '')).join('\n');
   await page.setContent(
-    '<style>ul{height:80px;overflow-y:auto;margin:0}li{height:40px}</style>'
-    + '<ul id="list"></ul>');
+    `<style>${CSS}</style>`
+    + '<style>#scroller{height:80px;overflow-y:auto}</style>'
+    + '<div id="scroller"><ul class="qr-sess-list" id="list"></ul></div>');
   await page.addScriptTag({ content: HARNESS });
   await page.evaluate(() => window.wireToggle(document.getElementById('list')));
 
@@ -160,13 +167,13 @@ ${TOGGLE}
        }));
 
     console.log('\n[5] Scroll and focus survive a poll\n');
-    await page.evaluate(() => { document.getElementById('list').scrollTop = 60; });
+    await page.evaluate(() => { document.getElementById('scroller').scrollTop = 60; });
     await page.evaluate(() =>
       document.querySelector('li[data-qr-sess="j3"] .qr-menu summary').focus());
     await sync(ROWS(4, { ctx: 'moved on' }));
     ck('scroll position is unchanged',
-       await page.evaluate(() => document.getElementById('list').scrollTop === 60),
-       String(await page.evaluate(() => document.getElementById('list').scrollTop)));
+       await page.evaluate(() => document.getElementById('scroller').scrollTop === 60),
+       String(await page.evaluate(() => document.getElementById('scroller').scrollTop)));
     ck('focus is still on the same control',
        await page.evaluate(() =>
          document.activeElement === document.querySelector('li[data-qr-sess="j3"] .qr-menu summary')));
@@ -252,7 +259,50 @@ ${TOGGLE}
          [...document.querySelectorAll('li[data-qr-sess]')].every((li) => '_pick' in li)),
        'toggling select mode must not rebuild the list');
 
-    console.log('\n[10] The shipped file no longer rebuilds either list\n');
+    console.log('\n[10] The row stays one line in both modes\n');
+    /* The reported break: the tick box was a sixth cell in a five-column grid,
+       so Open and the overflow menu were auto-placed onto a second line. */
+    const geom = async (pick) => {
+      await page.evaluate((p) =>
+        document.getElementById('list').classList.toggle('is-picking', p), pick);
+      await sync(ROWS(3), pick);
+      return page.evaluate(() => {
+        const li = document.querySelector('li[data-qr-sess="j2"]');
+        const kids = [...li.children].filter((k) => k.offsetWidth || k.offsetHeight);
+        /* Cell CENTRES, not tops: the cells are different heights and are
+           centred, so their tops legitimately differ by a few pixels. What a
+           wrap would show is a centre a whole row lower. */
+        const mid = kids.map((k) => {
+          const r = k.getBoundingClientRect(); return r.top + r.height / 2;
+        });
+        return { height: Math.round(li.getBoundingClientRect().height),
+                 cells: kids.length,
+                 spread: Math.round(Math.max(...mid) - Math.min(...mid)),
+                 actLeft: Math.round(li.querySelector('.qr-sess-act').getBoundingClientRect().left),
+                 coLeft: Math.round(li.querySelector('.qr-sess-co').getBoundingClientRect().left) };
+      });
+    };
+    const plain = await geom(false);
+    const picking = await geom(true);
+    console.log('    normal : ' + JSON.stringify(plain));
+    console.log('    manage : ' + JSON.stringify(picking));
+    ck('Manage mode adds exactly one cell',
+       picking.cells === plain.cells + 1, `${plain.cells} -> ${picking.cells}`);
+    ck('every cell is centred on one line normally', plain.spread <= 2,
+       String(plain.spread) + 'px between cell centres');
+    ck('and still is in Manage mode', picking.spread <= 2,
+       String(picking.spread) + 'px between cell centres — a wrap would be a whole row');
+    ck('the row height does not change',
+       Math.abs(picking.height - plain.height) <= 1,
+       `${plain.height}px -> ${picking.height}px`);
+    ck('the actions stay on the right, not below',
+       picking.actLeft > picking.coLeft,
+       `act ${picking.actLeft} vs company ${picking.coLeft}`);
+    ck('the company shifts right by the narrow column only',
+       picking.coLeft - plain.coLeft > 0 && picking.coLeft - plain.coLeft <= 40,
+       `${plain.coLeft} -> ${picking.coLeft}`);
+
+    console.log('\n[11] The shipped file no longer rebuilds either list\n');
     ck('the sessions list is patched, not rewritten',
        !/list\.innerHTML\s*=/.test(SRC), 'innerHTML on the list is the bug');
     ck('the queue panel writes only when its markup changed',

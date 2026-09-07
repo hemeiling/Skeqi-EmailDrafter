@@ -157,13 +157,26 @@ const DEL = async (ids) => {
        'the allow-list contains no live state');
 
     console.log('\n[6] The UI offers it on history only\n');
-    ck('Select is offered', /id="qr-hist-select"/.test(HTML));
-    ck('Select All Visible is offered', /Select All Visible \/ 选择当前显示/.test(HTML));
+    /* Normal mode is the history view it always was: the heading and one quiet
+       word. Everything destructive waits behind it. */
+    ck('normal mode offers only Manage', /id="qr-hist-manage"/.test(HTML));
+    ck('the toolbar starts hidden', /id="qr-hist-bar" hidden/.test(HTML));
+    ck('Manage is text, not a button-looking control',
+       /\.qr-hist-manage \{[^}]*border:0[^}]*\}/.test(HTML));
+    ck('the toolbar carries a selection count', /id="qr-hist-count"/.test(HTML));
+    ck('Select all is offered', /Select all \/ 全选/.test(HTML));
     ck('a shortcut for the never-started noise is offered',
        /id="qr-hist-never"/.test(HTML)
        && /x\.state === 'interrupted_before_start'/.test(QR));
-    ck('Delete Selected is offered', /Delete Selected \/ 删除选中/.test(HTML));
-    ck('Clear History is offered', /Clear History \/ 清空历史/.test(HTML));
+    ck('Delete is offered and starts disabled',
+       /id="qr-hist-del" disabled/.test(HTML));
+    ck('and is enabled only once something is selected',
+       /del\.disabled = histSel\.size === 0;/.test(QR));
+    ck('Done leaves the mode', /id="qr-hist-done"/.test(HTML));
+    ck('Clear History is one click further away, in a menu',
+       /<details class="qr-menu">[\s\S]{0,300}id="qr-hist-clear"/.test(HTML),
+       'a rare irreversible action should not sit beside the ordinary ones');
+    ck('and is styled as destructive', /class="qr-danger" id="qr-hist-clear"/.test(HTML));
     ck('the tick box is rendered only when asked for',
        /\$\{pick \? `<span class="qr-sess-pick">/.test(QR));
     ck('Active Now is never given tick boxes',
@@ -171,6 +184,17 @@ const DEL = async (ids) => {
        'a live job is not history');
     ck('history gets them only in select mode',
        /syncSessionRows\(list, shown, histPicking\)/.test(QR));
+    /* The row is a five-column grid; a sixth cell with no column was auto-placed
+       onto a new line, which is what pushed Open and the overflow menu down. */
+    ck('Manage mode declares its own leading column',
+       /\.qr-sess-list\.is-picking \.qr-sess-row \{ grid-template-columns:3px 22px 1fr auto auto auto; \}/
+         .test(HTML),
+       'otherwise the actions wrap onto a second line');
+    ck('and the narrow layout gets one too',
+       /\.qr-sess-list\.is-picking \.qr-sess-row \{\s*\n?\s*grid-template-columns:3px 22px 1fr auto;/
+         .test(HTML));
+    ck('the class is toggled with the mode',
+       /list\.classList\.toggle\('is-picking', histPicking\)/.test(QR));
     ck('selection lives in JS, so a poll cannot lose a tick',
        /const histSel = new Set\(\);/.test(QR));
     ck('and a focused box is never overwritten',
