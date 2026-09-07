@@ -4678,7 +4678,7 @@ async function setQwenJobUsage(jobId, u) {
 async function listRecentQwenJobs(limit = 25) {
   return await q(`
     SELECT job_id, company_name, company_key, website, model, job_type,
-           status, stage, progress_percent, warnings, error, report_id,
+           status, stage, progress_percent, warnings, error, report_id, attempts,
            created_by, started_at, updated_at, completed_at,
            input_tokens, output_tokens, total_tokens,
            estimated_cost_usd, cost_estimated,
@@ -4722,7 +4722,7 @@ async function listQwenSessions({ limit = 25, beforeStartedAt = null, beforeJobI
   const n = Math.max(1, Math.min(100, Number(limit) || 25));
   return await q(`
     SELECT job_id, company_name, company_key, website, model, job_type,
-           status, stage, progress_percent, warnings, error, report_id,
+           status, stage, progress_percent, warnings, error, report_id, attempts,
            created_by, started_at, updated_at, completed_at, execution_manifest,
            input_tokens, output_tokens, total_tokens,
            estimated_cost_usd, cost_estimated,
@@ -4800,6 +4800,24 @@ async function deleteQwenSession(jobId) {
   } finally {
     client.release();
   }
+}
+
+/* Just enough of every job to derive its state, for counting.
+
+   The session list is paged, so counting the loaded page answers "how many of
+   the 25 rows I happen to be showing", not "how many need attention". This
+   returns the six small columns sessionState() reads - no report bodies, no
+   manifests, no warnings - and the SAME function then classifies them, so the
+   count and the rows can never disagree about what a state means. */
+async function listQwenSessionStateInputs() {
+  return await q(`
+    SELECT job_id, status, stage, started_at, attempts, report_id,
+           (status = 'running'
+            AND (lease_expires_at IS NULL
+                 OR lease_expires_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes')
+            AND updated_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes') AS stale
+    FROM account_research_qwen_jobs
+  `);
 }
 
 async function listActiveQwenJobs() {
@@ -5337,7 +5355,8 @@ module.exports = {
   claimQwenJob, activeQwenJob, getQwenJob, latestQwenJob, updateQwenJob,
   completeQwenJob, failQwenJob, sweepStaleQwenJobs, listActiveQwenJobs,
   listRecentQwenJobs,
-  listQwenSessions, deleteQwenSession, isTerminalStatus, resolveIdentity, JOB_TERMINAL,
+  listQwenSessions, listQwenSessionStateInputs,
+  deleteQwenSession, isTerminalStatus, resolveIdentity, JOB_TERMINAL,
   setQwenJobUsage,
   retrievalToolUsage,
   setQwenJobManifest,

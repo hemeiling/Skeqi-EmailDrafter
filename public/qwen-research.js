@@ -657,6 +657,35 @@
   }
 
 
+  /* ── Company state ────────────────────────────────────────────────────────
+     What a COMPANY currently is, as opposed to what any one job did.
+
+     Four states, and history is deliberately absent from all of them. A run
+     that was interrupted yesterday does not change whether this company has
+     usable research today, and letting it do so kept companies looking broken
+     forever. Recent Sessions keeps the job history; it is a different question
+     with a different vocabulary, and the two must stay distinct.
+
+     `job` is a CURRENT job for this company - queued or running - or null. */
+  function companyState(opts) {
+    const job = (opts && opts.job) || null;
+    const hasReport = !!(opts && opts.hasReport);
+    if (job) {
+      // A row can be optimistically 'running' before its job id exists; the
+      // stage is what says it has not been claimed yet.
+      if (job.status === 'queued' || job.stage === 'queued') return 'queued';
+      if (job.status === 'running') return 'researching';
+    }
+    return hasReport ? 'existing' : 'pending';
+  }
+
+  const COMPANY_LABEL = {
+    researching: ['Researching', '研究中'],
+    queued:      ['Queued', '排队中'],
+    existing:    ['Existing Report', '已有报告'],
+    pending:     ['Pending', '待处理'],
+  };
+
   /* ── Research Sessions ────────────────────────────────────────────────────
      The list is rendered from Neon, never from browser state, so a session
      survives navigation, a refresh, a closed browser and an engine restart.
@@ -671,6 +700,7 @@
     synthesis_failed:           ['Synthesis failed', '生成失败', 'st-failed'],
     save_failed:                ['Generated · save failed', '已生成·保存失败', 'st-limited'],
     interrupted:                ['Interrupted', '已中断', 'st-failed'],
+    interrupted_before_start:   ['Interrupted before start', '启动前中断', 'st-done'],
     failed:                     ['Failed', '失败', 'st-failed'],
   };
   const SESSION_LIVE = new Set(['queued', 'researching', 'generating']);
@@ -717,8 +747,9 @@
   async function fetchSessions() {
     try {
       const r = await fetch(api('/sessions?limit=25')).then((x) => x.json());
-      if (Array.isArray(r)) return { rows: r, next: null };   // pre-paging shape
-      return r && Array.isArray(r.sessions) ? { rows: r.sessions, next: r.next } : null;
+      if (Array.isArray(r)) return { rows: r, next: null, totals: null };   // pre-paging shape
+      return r && Array.isArray(r.sessions)
+        ? { rows: r.sessions, next: r.next, totals: r.totals || null } : null;
     } catch (e) {
       return null;                  // transient: keep whatever is on screen
     }
@@ -744,6 +775,9 @@
   const SECTION_COUNTS = new Map();      // job_id -> stored section count
   let sessionFilter = 'all';             // 'all' | 'attention'
   let sessionNext = null;                // keyset cursor for the next page
+  /* Counts over the whole table, from the server. The page is 25 rows; counting
+     it told the user "25 need attention" whatever the truth was. */
+  let sessionTotals = null;              // { total, live, attention } | null
 
   function railClass(state) {
     if (SESSION_LIVE.has(state)) return 'st-active';
@@ -779,6 +813,14 @@
       return { state: 'Generated · save failed',
                ctx: `${when} · ${n == null ? 'sections stored' : n + ' sections stored'}`,
                action: `<button data-qr-sess-retry="${esc(x.job_id)}">Retry Save / 重新保存</button>` };
+    }
+    if (x.state === 'interrupted_before_start') {
+      /* No worker ever claimed this job, so there is no run to describe.
+         Printing the stage here would append "· Queued" to "Interrupted" and
+         read as though research started and was cut off. It never started. */
+      const [en, zh] = SESSION_STATE.interrupted_before_start;
+      return { state: `${en} / ${zh}`, ctx: when,
+               action: `<button data-qr-sess-regen="${co}" data-qr-sess-site="${site}">Research / 开始研究</button>` };
     }
     if (SESSION_NEEDS_ATTENTION.has(x.state)) {
       /* Name the state truthfully and offer the action it actually needs. An
@@ -867,21 +909,29 @@
     box.hidden = sessions.length === 0;
 
     // The count is a summary of the SAME rows, not a different set.
+    /* Counts describe the whole table when the server supplied them, and fall
+       back to the page only when it did not. The page is 25 rows, so counting
+       it reported the page size as a total. */
+    const liveN = sessionTotals ? sessionTotals.live : active.length;
+    const attnN = sessionTotals ? sessionTotals.attention : attention.length;
+    const totalN = sessionTotals ? sessionTotals.total : sessions.length;
+
     const count = $('qr-sess-count');
     if (count) {
       const bits = [];
-      if (active.length) bits.push(`${active.length} running`);
-      if (attention.length) bits.push(`${attention.length} need attention`);
-      bits.push(`${sessions.length} shown`);
+      if (liveN) bits.push(`${liveN} running`);
+      if (attnN) bits.push(`${attnN} need attention`);
+      bits.push(sessions.length < totalN
+        ? `${sessions.length} of ${totalN} shown` : `${totalN} shown`);
       count.textContent = bits.join(' · ');
     }
 
     const filterBtn = $('qr-sess-filter');
     if (filterBtn) {
-      filterBtn.hidden = attention.length === 0;
+      filterBtn.hidden = attnN === 0;
       filterBtn.setAttribute('aria-pressed', sessionFilter === 'attention' ? 'true' : 'false');
       filterBtn.textContent = sessionFilter === 'attention'
-        ? 'Show all / 显示全部' : `Needs attention (${attention.length}) / 需要处理`;
+        ? 'Show all / 显示全部' : `Needs attention (${attnN}) / 需要处理`;
     }
 
     const shown = sessionFilter === 'attention'
@@ -908,6 +958,11 @@
       html = `<li class="qr-sess-empty">${sessionFilter === 'attention'
         ? 'Nothing needs attention. <span class="i18n-zh">没有需要处理的任务。</span>'
         : 'No research sessions yet. <span class="i18n-zh">暂无研究任务。</span>'}</li>`;
+    } else if (sessionFilter === 'attention' && shown.length < attnN) {
+      /* The count is the table's; this list is the loaded page's. Say which is
+         on screen rather than let the two numbers quietly disagree. */
+      html += `<li class="qr-sess-empty">Showing ${shown.length} of ${attnN} loaded so far.`
+            + ` <span class="i18n-zh">已加载 ${shown.length} / ${attnN}。</span></li>`;
     }
     list.innerHTML = html;
 
@@ -938,6 +993,7 @@
     if (page) {
       sessions = page.rows;
       sessionNext = page.next || null;
+      sessionTotals = page.totals || null;
       if (sessionSel && !sessions.some((x) => x.job_id === sessionSel)) sessionSel = null;
       renderSessions();
     }
@@ -1363,26 +1419,36 @@
     const name = String(company || '').trim();
     const seq = ++lookupSeq;
     if (!name) { lookupHit = null; renderLookup('none'); return; }
+    /* A library hit already proves a report exists, so it saves the /exists
+       round trip - but it must NOT short-circuit the active-job check below.
+       An active run outranks a stored report, and returning here showed
+       "Existing Report" for a company that was being researched right then. */
     const local = libRowFor(name);
-    if (local) { lookupHit = local; renderLookup('existing', local, name); return; }
-    let exists = false;
-    try {
-      const d = await fetch(api(`/exists?companies=${encodeURIComponent(name)}`)).then((r) => r.json());
-      // A legitimate `false` must not fall through to a fallback: read the key
-      // we asked about, and only then the single entry the server keyed itself.
-      const bag = (d && typeof d === 'object') ? d : {};
-      const entries = Object.entries(bag);
-      exists = Object.prototype.hasOwnProperty.call(bag, name) ? !!bag[name]
-             : entries.length === 1 ? !!entries[0][1] : false;
-    } catch (e) { /* lookup is advisory; never block the user on it */ }
-    if (seq !== lookupSeq) return;                       // a newer keystroke won
+    let exists = !!local;
+    if (!local) {
+      try {
+        const d = await fetch(api(`/exists?companies=${encodeURIComponent(name)}`)).then((r) => r.json());
+        // A legitimate `false` must not fall through to a fallback: read the key
+        // we asked about, and only then the single entry the server keyed itself.
+        const bag = (d && typeof d === 'object') ? d : {};
+        const entries = Object.entries(bag);
+        exists = Object.prototype.hasOwnProperty.call(bag, name) ? !!bag[name]
+               : entries.length === 1 ? !!entries[0][1] : false;
+      } catch (e) { /* lookup is advisory; never block the user on it */ }
+      if (seq !== lookupSeq) return;                     // a newer keystroke won
+    }
 
     /* Before deciding "existing" or "new", ask whether a run is under way. The
        answer comes from Neon, so it is the same whether the user refreshed,
        switched tabs, or closed the browser an hour ago. */
     const { active } = await jobForCompany(name);
     if (seq !== lookupSeq) return;
-    if (active) {
+
+    /* The same four-state question Batch Research asks, answered by the same
+       function, so one company cannot read as Pending on one screen and
+       Existing Report on the other. */
+    const state = companyState({ job: active, hasReport: exists });
+    if (state === 'researching' || state === 'queued') {
       renderLookup('none');
       msg('qr-single-msg',
           `Research already in progress for ${esc(name)} — reconnected. `
@@ -1391,8 +1457,8 @@
       return;
     }
 
-    lookupHit = exists ? (libRowFor(name) || { companyName: name }) : null;
-    renderLookup(exists ? 'existing' : 'new', lookupHit, name);
+    lookupHit = state === 'existing' ? (libRowFor(name) || { companyName: name }) : null;
+    renderLookup(state === 'existing' ? 'existing' : 'new', lookupHit, name);
   }
 
   /* Reattach to a run that is already going, without starting anything. */
@@ -1902,10 +1968,19 @@
       return `<span class="qr-badge qr-b-Failed">${en} / ${zh}</span>`
         + (job.error ? `<div class="qr-rowstage">${esc(String(job.error).slice(0, 90))}</div>` : '');
     }
-    const st = it.status || 'Pending';
-    const zh = { Completed: '已完成', 'Existing Report': '已有报告', Failed: '失败',
-      'Timed Out': '超时', Pending: '待处理', Searching: '检索中', Generating: '生成中',
-      'PDF Generating': '生成PDF', Skipped: '已跳过' }[st] || '';
+    /* No live run for this row, so this is a question about the COMPANY. The
+       in-flight vocabulary above ('Searching', 'Generating', …) belongs to a
+       run this page is watching and is left alone; only the resting states are
+       resolved here, by the same function the Single page uses. */
+    const RUN_STATE = { Completed: '已完成', Failed: '失败', 'Timed Out': '超时',
+      Searching: '检索中', Generating: '生成中', 'PDF Generating': '生成PDF',
+      Skipped: '已跳过' };
+    let st, zh;
+    if (it.status && Object.prototype.hasOwnProperty.call(RUN_STATE, it.status)) {
+      st = it.status; zh = RUN_STATE[it.status];
+    } else {
+      [st, zh] = COMPANY_LABEL[companyState({ job, hasReport: it._hasReport })];
+    }
     return `<span class="qr-badge qr-b-${st.replace(/\s+/g, '')}">${esc(st)}${zh ? ' / ' + zh : ''}</span>`;
   }
 
@@ -2246,10 +2321,13 @@
     const names = batchItems.map((i) => i.company).join('||');
     try {
       const d = await fetch(api(`/exists?companies=${encodeURIComponent(names)}`)).then((r) => r.json());
+      /* Record the FACT and let companyState() decide what to show. This used
+         to write 'Existing Report' / 'Pending' into it.status, which made the
+         row's status mean two different things depending on which code last
+         touched it. */
       batchItems.forEach((it) => {
         it._hasReport = Boolean(d[it.company]);
-        if (it._hasReport && (!it.status || it.status === 'Pending')) it.status = 'Existing Report';
-        if (!it._hasReport && it.status === 'Existing Report') it.status = 'Pending';
+        if (it.status === 'Existing Report' || it.status === 'Pending') it.status = '';
       });
     } catch (e) { /* leave statuses as they are */ }
     renderBatch();

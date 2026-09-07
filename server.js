@@ -1030,6 +1030,16 @@ function costViewFor(report, runUsage) {
            note: 'retrieval_not_captured' };
 }
 
+/* Which states are live, and which are asking for a person.
+
+   'interrupted_before_start' is deliberately in NEITHER. Nothing is running,
+   and there is nothing to troubleshoot: the run never happened. Whether that
+   company still wants research is a question about the COMPANY, answered by
+   its own state, not by a job that never began. */
+const SESSION_LIVE_STATES = new Set(['queued', 'researching', 'generating']);
+const SESSION_ATTENTION_STATES = new Set(
+  ['interrupted', 'save_failed', 'synthesis_failed', 'failed']);
+
 function sessionState(row) {
   const stale = row.stale === true;
   switch (row.status) {
@@ -1042,7 +1052,13 @@ function sessionState(row) {
     case 'synthesis_failed':            return 'synthesis_failed';
     // Synthesis SUCCEEDED; only persistence failed. Retryable without paying again.
     case 'save_failed':                 return 'save_failed';
-    case 'interrupted':                 return 'interrupted';
+    /* A sweep that ran while this job was WAITING did not interrupt research:
+       no worker ever claimed it, so nothing began. The stored status stays
+       'interrupted' - this is presentation over the historical facts, and the
+       facts are that started_at is null and no attempt was ever made. */
+    case 'interrupted':
+      return (row.started_at == null && Number(row.attempts || 0) === 0)
+        ? 'interrupted_before_start' : 'interrupted';
     default:                            return row.report_id ? 'completed' : 'failed';
   }
 }
@@ -1482,9 +1498,28 @@ app.get('/api/aresearch/sessions', async (req, res) => {
        whose engine has forgotten it is interrupted, and must say so here rather
        than showing a frozen percentage that will never advance. */
     const out = rows.map((r) => ({ ...r, state: sessionState(r) }));
+    /* Totals over EVERY job, not over this page. Counting the page answered
+       "how many of the 25 rows on screen", which read as a total and moved
+       when the page size did. Classified by the same sessionState() the rows
+       use, so a state cannot mean one thing in the list and another in the
+       count. */
+    let totals = null;
+    try {
+      const all = await jobsDb.listQwenSessionStateInputs();
+      totals = { total: all.length, live: 0, attention: 0 };
+      for (const r of all) {
+        const st = sessionState(r);
+        if (SESSION_LIVE_STATES.has(st)) totals.live += 1;
+        if (SESSION_ATTENTION_STATES.has(st)) totals.attention += 1;
+      }
+    } catch (e) {
+      // Advisory only. A count that cannot be read must not fail the list.
+      console.error('session totals failed:', e.message);
+    }
     const last = out.length ? out[out.length - 1] : null;
     res.json({
       sessions: out,
+      totals,
       // The cursor for the next page. Null when this page was not full, so the
       // client stops rather than paging forever against a shrinking table.
       next: last && out.length >= Number(req.query.limit || 25)
