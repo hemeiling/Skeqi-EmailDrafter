@@ -175,8 +175,15 @@ ck('a company with an interrupted past and nothing else reads Pending',
 
 console.log('\n[7] Both screens call it\n');
 
-ck('Batch Research resolves its resting states through it',
-   /COMPANY_LABEL\[companyState\(\{ job, hasReport: it\._hasReport \}\)\]/.test(QR));
+/* Checked as a fact rather than as one exact expression: the badge must derive
+   its state from the resolver and label it from the shared map. */
+ck('Batch Research resolves its state through it',
+   /const state = companyState\(\{ job, hasReport: it\._hasReport \}\);/.test(QR));
+ck('and labels the resting states from the shared map',
+   /\[st, zh\] = COMPANY_LABEL\[state\];/.test(QR));
+ck('the live states come from the same value',
+   /if \(state === 'queued'\)/.test(QR) && /if \(state === 'researching'\)/.test(QR),
+   'the badge no longer reads job.status itself');
 ck('the Single lookup resolves through it',
    /const state = companyState\(\{ job: active, hasReport: exists \}\)/.test(QR));
 ck('Batch no longer writes its own Existing Report / Pending strings',
