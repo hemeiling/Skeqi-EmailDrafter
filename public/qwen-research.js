@@ -1955,7 +1955,7 @@
     completed: ['info',
       'Research complete. 研究完成。', ''],
     completed_with_limitations: ['warn',
-      'Completed with limitations. 已完成（有限制）。',
+      'Research completed with limited information. 研究已完成，部分信息有限。',
       'Limited verified public evidence was available, so some sections may be '
       + 'less complete. 可验证的公开信息有限，部分章节可能不完整。'],
     save_failed: ['warn',
@@ -1967,9 +1967,8 @@
       'Interrupted before start. 启动前中断。',
       'This run never began, so nothing was researched. 该任务尚未开始执行。'],
     interrupted: ['warn',
-      'Research was interrupted. 研究被中断。',
-      'Nothing was lost that had already been saved. You can research this '
-      + 'company again. 已保存的内容不受影响，可重新研究。'],
+      'Research was interrupted. You can run it again. 研究已中断，您可以重新运行。',
+      'Anything already saved is unaffected. 已保存的内容不受影响。'],
     synthesis_failed: ['err',
       'Report generation failed. 报告生成失败。',
       'The evidence that was retrieved is preserved. 检索到的证据已保留。'],
