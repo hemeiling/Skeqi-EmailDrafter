@@ -4682,6 +4682,13 @@ async function listRecentQwenJobs(limit = 25) {
            created_by, started_at, updated_at, completed_at,
            input_tokens, output_tokens, total_tokens,
            estimated_cost_usd, cost_estimated,
+           /* A session's report_id is a historical pointer and may already
+              resolve to nothing - see deleteQwenSession below, and the four
+              pre-2026-09-06 jobs whose report row is gone. Holding an id is
+              therefore NOT evidence that a report can be opened, and the client
+              gates Open on this rather than on the id. */
+           EXISTS (SELECT 1 FROM account_research_qwen_reports r
+                    WHERE r.id = account_research_qwen_jobs.report_id) AS report_exists,
            (status = 'running'
             AND (lease_expires_at IS NULL
                  OR lease_expires_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes')
@@ -4719,6 +4726,13 @@ async function listQwenSessions({ limit = 25, beforeStartedAt = null, beforeJobI
            created_by, started_at, updated_at, completed_at, execution_manifest,
            input_tokens, output_tokens, total_tokens,
            estimated_cost_usd, cost_estimated,
+           /* A session's report_id is a historical pointer and may already
+              resolve to nothing - see deleteQwenSession below, and the four
+              pre-2026-09-06 jobs whose report row is gone. Holding an id is
+              therefore NOT evidence that a report can be opened, and the client
+              gates Open on this rather than on the id. */
+           EXISTS (SELECT 1 FROM account_research_qwen_reports r
+                    WHERE r.id = account_research_qwen_jobs.report_id) AS report_exists,
            (status = 'running'
             AND (lease_expires_at IS NULL
                  OR lease_expires_at < NOW() - INTERVAL '${JOB_STALE_MINUTES} minutes')

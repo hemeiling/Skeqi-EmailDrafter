@@ -319,7 +319,7 @@ ck('the click handler passes it through',
 ck('openReport asks by id when it has one',
    /reportId \? `\?report_id=\$\{encodeURIComponent\(reportId\)\}`/.test(QR));
 ck('Open is not offered when no report was saved',
-   /if \(!x\.report_id\) \{[\s\S]{0,220}action: ''/.test(QR),
+   /if \(!hasReport\(x\)\) \{[\s\S]{0,220}action: ''/.test(QR),
    'a terminal job is not the same as a stored report');
 ck('and the row says so instead of offering a dead button',
    /no report saved/.test(QR));
@@ -344,7 +344,7 @@ ck('the reason is recorded where the next reader will look',
    company name, which would have put a different row on screen than the one the
    session opened. */
 ck('the overflow menu offers a report only when one exists',
-   /const hasReport = !!x\.report_id \|\| !!libRowFor\(x\.company_name\)/.test(QR),
+   /const openable = hasReport\(x\) \|\| !!libRowFor\(x\.company_name\)/.test(QR),
    'the menu still trusted the job state alone');
 ck('the menu buttons carry the report id',
    /data-qr-sess-view="\$\{co\}"\$\{rid\}/.test(QR)
@@ -367,6 +367,23 @@ const DBSRC = require('fs').readFileSync(__dirname + '/db.js', 'utf8');
 ck('by-id and by-company reports share one shape',
    /getQwenReport\(id\) \{[\s\S]{0,200}REPORT_SELECT\} WHERE r\.id = \$1/.test(DBSRC)
    && /getQwenReportForCompany\(company\) \{[\s\S]{0,200}REPORT_SELECT\} WHERE r\.company_key = \$1/.test(DBSRC));
+/* Holding a report id is not the same as having a report. Four jobs from before
+   report persistence was reliable point at a row that no longer exists, and the
+   first version of this fix still offered them Open - which 404s. */
+ck('the server reports whether the report row still exists',
+   (DBSRC.match(/AS report_exists/g) || []).length === 2,
+   'both the sessions list and Recent Sessions need it');
+ck('Open is gated on that, not on the id',
+   /function hasReport\(x\) \{[\s\S]{0,200}x\.report_exists === undefined \? !!x\.report_id : !!x\.report_exists/.test(QR));
+ck('the row uses it', /if \(!hasReport\(x\)\) \{/.test(QR));
+ck('the overflow menu uses it', /const openable = hasReport\(x\) \|\| !!libRowFor/.test(QR));
+ck('and so does the Reconcile branch',
+   /x\.state === 'interrupted' && hasReport\(x\)/.test(QR),
+   'an interrupted row whose report is gone must not claim one is saved');
+ck('an older payload without the field still works',
+   /x\.report_exists === undefined \? !!x\.report_id/.test(QR),
+   'the fallback keeps a stale client from hiding every button');
+
 ck('and both carry the run accounting',
    /function shapeReport\(x\) \{[\s\S]{0,600}run_usage:/.test(DBSRC),
    'by-id used to return only the record and its version');

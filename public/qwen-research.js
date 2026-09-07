@@ -786,7 +786,8 @@
          to pay for again, so it is never offered Regenerate. */
       const LABEL = { interrupted: 'Interrupted', synthesis_failed: 'Synthesis failed',
                       failed: 'Failed' };
-      const stale = x.state === 'interrupted' && !!x.report_id;
+      // Same rule as Open: the report has to still exist, not merely be pointed at.
+      const stale = x.state === 'interrupted' && hasReport(x);
       return { state: stale ? 'Interrupted · report saved' : (LABEL[x.state] || 'Failed'),
                ctx: `${when} · ${esc(stageEn)}`,
                action: stale
@@ -796,11 +797,13 @@
                  : `<button data-qr-sess-regen="${co}" data-qr-sess-site="${site}">Regenerate / 重新生成</button>` };
     }
     if (x.state === 'completed' || x.state === 'completed_with_limitations') {
-      /* Open is offered because a report EXISTS, not because the job finished.
-         A terminal job with no report_id has nothing to open, and offering the
-         button anyway produced "no stored report" when the reader clicked it. */
+      /* Open is offered because a report EXISTS, not because the job finished
+         and not because the row carries an id. report_id is a historical
+         pointer that may already resolve to nothing, so the server checks the
+         report row and answers report_exists; four jobs from before report
+         persistence was reliable hold an id whose row is gone. */
       const label = x.state === 'completed' ? 'Completed' : 'Completed · limitations';
-      if (!x.report_id) {
+      if (!hasReport(x)) {
         return { state: `${label} · no report saved`,
                  ctx: `${when} · ${esc(sessionElapsed(x))}`, action: '' };
       }
@@ -812,20 +815,29 @@
     return { state: 'Completed', ctx: `${when} · ${esc(sessionElapsed(x))}`, action: '' };
   }
 
+  /** Can this session's own report actually be opened?
+   *
+   *  report_exists comes from the server, which checked the report row. Older
+   *  clients and any caller without that field fall back to the id, which is
+   *  the weaker test that let a dead pointer render a button that 404s. */
+  function hasReport(x) {
+    return x.report_exists === undefined ? !!x.report_id : !!x.report_exists;
+  }
+
   function rowMenu(x) {
     const co = esc(x.company_name || '');
     const site = esc(x.website || '');
     const host = esc(String(x.website || '').replace(/^https?:\/\//, '').replace(/\/$/, ''));
     /* Same rule as the row's own button: a report is offered because one
        exists. A terminal state alone does not mean anything was saved. */
-    const rid = x.report_id ? ` data-qr-sess-report="${esc(x.report_id)}"` : '';
-    const hasReport = !!x.report_id || !!libRowFor(x.company_name);
+    const rid = hasReport(x) ? ` data-qr-sess-report="${esc(x.report_id)}"` : '';
+    const openable = hasReport(x) || !!libRowFor(x.company_name);
     const items = [];
-    if (hasReport) {
+    if (openable) {
       items.push(`<button data-qr-sess-view="${co}"${rid}>View Report / 查看报告</button>`);
       items.push(`<button data-qr-sess-pdf="${co}"${rid}>PDF / 查看PDF</button>`);
     }
-    if (!x.report_id && libRowFor(x.company_name)) {
+    if (!hasReport(x) && libRowFor(x.company_name)) {
       items.push(`<button data-qr-sess-prev="${co}">View Previous Report / 查看上一版本</button>`);
     }
     if (!SESSION_LIVE.has(x.state)) {
