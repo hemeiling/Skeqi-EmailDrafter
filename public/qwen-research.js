@@ -1934,6 +1934,61 @@
     renderLookup(state === 'existing' ? 'existing' : 'new', lookupHit, name);
   }
 
+  /* ── What a durable job state means to a person ──────────────────────────
+
+     One table, keyed by the SAME semantic state the server computes for Recent
+     Sessions and the attention totals. Nothing here re-derives a verdict from a
+     raw status, and no raw lifecycle word is ever printed: "queued" is a
+     database value, not a sentence.
+
+     `sev` is the banner class. Only genuine failures are red. A job that is
+     waiting or running has not failed, and a run that finished with
+     limitations succeeded. */
+  const JOB_BANNER = {
+    queued: ['info',
+      'Research queued. 研究已排队。',
+      'It will start as soon as a worker is free. 有空闲执行器时将自动开始。'],
+    researching: ['info',
+      'Research in progress. 研究进行中。', ''],
+    generating: ['info',
+      'Generating the report. 正在生成报告。', ''],
+    completed: ['info',
+      'Research complete. 研究完成。', ''],
+    completed_with_limitations: ['warn',
+      'Completed with limitations. 已完成（有限制）。',
+      'Limited verified public evidence was available, so some sections may be '
+      + 'less complete. 可验证的公开信息有限，部分章节可能不完整。'],
+    save_failed: ['warn',
+      'Generated, but saving failed. 已生成，但保存失败。',
+      'The generated sections are stored and can be retried. 已生成的内容已保留，可重试保存。'],
+    cancelled: ['info',
+      'Research was cancelled. 研究已取消。', ''],
+    interrupted_before_start: ['warn',
+      'Interrupted before start. 启动前中断。',
+      'This run never began, so nothing was researched. 该任务尚未开始执行。'],
+    interrupted: ['warn',
+      'Research was interrupted. 研究被中断。',
+      'Nothing was lost that had already been saved. You can research this '
+      + 'company again. 已保存的内容不受影响，可重新研究。'],
+    synthesis_failed: ['err',
+      'Report generation failed. 报告生成失败。',
+      'The evidence that was retrieved is preserved. 检索到的证据已保留。'],
+    failed: ['err', 'Research failed. 研究失败。', ''],
+  };
+
+  /** Render the banner for a durable job row, from its shared semantic state. */
+  function showJobBanner(row) {
+    const [sev, head, detail] = JOB_BANNER[row && row.state] || JOB_BANNER.failed;
+    /* A row's own error text is shown only where it explains a FAILURE. On a
+       success it would be noise, and on a live state it would be a lifecycle
+       word masquerading as a problem. */
+    const why = sev === 'err' && row && row.error ? esc(String(row.error)) : detail;
+    msg('qr-single-msg', `<strong>${head}</strong>` + (why ? `<br><span>${why}</span>` : ''), sev);
+  }
+
+  const JOB_TERMINAL_STATES = new Set(Object.keys(JOB_BANNER)
+    .filter((k) => !['queued', 'researching', 'generating'].includes(k)));
+
   /* Reattach to a run that is already going, without starting anything. */
   let resuming = null;
   async function resumeJob(company, row) {
@@ -1951,22 +2006,38 @@
           if (snap.status !== 'running') break;
         } else {
           // The engine forgot it. The durable row is the remaining truth.
-          const { active, latest } = await jobForCompany(company);
-          const row2 = active || latest;
+          const look = await jobForCompany(company);
+          /* Could not ask. That is a polling problem, not an outcome: keep
+             waiting rather than declaring a live job finished. */
+          if (!look.ok) { await new Promise((r) => setTimeout(r, 1500)); continue; }
+          const row2 = look.active || look.latest;
           renderProgress(jobRowToSnapshot(row2 || row), startedAt);
-          if (!active) break;
+          if (!look.active) break;
         }
         await new Promise((r) => setTimeout(r, 1500));
       }
-      const { latest } = await jobForCompany(company);
-      if (latest && latest.status === 'completed') {
-        msg('qr-single-msg', 'Research complete. 研究完成。', 'info');
+
+      /* One final durable read, and the banner is rendered from THAT - so the
+         queued or running notice shown while waiting is replaced by the real
+         outcome rather than surviving it. */
+      const done = await jobForCompany(company);
+      const latest = done.latest;
+      if (!done.ok || !latest) return;              // say nothing rather than guess
+      if (latest.state === 'completed' && latest.report_id) {
+        // The report itself is the message; a banner over it is noise.
+        msg('qr-single-msg', '');
         await loadLibrary();
         await openReport(company, true);
-      } else if (latest) {
-        msg('qr-single-msg', `<strong>Research did not complete.</strong> `
-            + `<br><span>${esc(latest.error || latest.status)}</span>`, 'err');
+        return;
       }
+      /* Open first, THEN speak: openReport clears this banner as its first act,
+         so rendering the outcome before it would erase the outcome. */
+      if (latest.report_id && JOB_TERMINAL_STATES.has(latest.state)) {
+        // Limitations, or a saved report behind an interrupted row: still open it.
+        await loadLibrary();
+        await openReport(company, true);
+      }
+      showJobBanner(latest);
     } finally { resuming = null; }
   }
 
@@ -2229,17 +2300,29 @@
   /* Where a run lives is NEON, not this tab. sessionStorage could not answer
      "is anything running for this company" after a browser restart, and two
      tabs disagreed with each other. The server owns the answer now. */
+  /** The durable rows for a company, plus whether the question could be asked.
+   *
+   *  `ok:false` means the REQUEST failed, which is not the same as "there is no
+   *  live job" - and the two used to be indistinguishable. A single dropped
+   *  fetch ended the polling loop and declared a queued job finished. */
   async function jobForCompany(company) {
-    if (!company) return { active: null, latest: null };
+    if (!company) return { ok: true, active: null, latest: null };
     try {
-      return await fetch(api(`/job-for-company?company=${encodeURIComponent(company)}`))
-        .then((r) => r.json());
-    } catch (e) { return { active: null, latest: null }; }
+      const d = await fetch(api(`/job-for-company?company=${encodeURIComponent(company)}`))
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))));
+      return { ok: true, active: d.active || null, latest: d.latest || null };
+    } catch (e) { return { ok: false, active: null, latest: null }; }
   }
 
-  /** The durable record for a company that is still being researched. */
+  /** The durable record for a company that is still being researched.
+   *
+   *  Returns `undefined` when the question could not be ASKED, which the caller
+   *  must not read as "nothing is running" - that would start a second paid run
+   *  because one request happened to drop. `null` means genuinely nothing. */
   async function findRunningJob(company) {
-    const { active } = await jobForCompany(company);
+    const look = await jobForCompany(company);
+    if (!look.ok) return undefined;
+    const active = look.active;
     if (!active) return null;
     let snap = null;
     try {
@@ -2288,6 +2371,16 @@
     try {
       let jobId;
       const running = await findRunningJob(company);
+      if (running === undefined) {
+        /* Never start a run on a guess. The database refuses a second live job
+           for one company anyway, but asking again is cheaper than relying on
+           that to catch a mistake we can simply not make. */
+        msg('qr-single-msg',
+            '<strong>Could not check whether this company is already being '
+            + 'researched.</strong><br><span>Nothing was started. Please try '
+            + 'again. 未能确认该公司是否已在研究中，未启动任务，请重试。</span>', 'warn');
+        return;
+      }
       if (running) {
         // Never pay twice for the same company.
         jobId = running.id;
@@ -2745,9 +2838,12 @@
         if (snap.status !== 'running') break;
       } else {
         // Engine forgot it; fall back to the durable row.
-        const { active, latest } = await jobForCompany(company);
-        const row = active || latest;
-        if (!active) {
+        const look = await jobForCompany(company);
+        /* Could not ask. A dropped request is a polling problem, and treating
+           it as an outcome used to mark a perfectly live row `interrupted`. */
+        if (!look.ok) { await new Promise((r) => setTimeout(r, 1500)); continue; }
+        const row = look.active || look.latest;
+        if (!look.active) {
           setRowJob(company, { status: (row && row.status) || 'interrupted',
                                stage: (row && row.stage) || 'interrupted',
                                pct: (row && row.progress_percent) || 0 });
@@ -2759,7 +2855,8 @@
       }
       await new Promise((r) => setTimeout(r, 1500));
     }
-    const { latest } = await jobForCompany(company);
+    const done = await jobForCompany(company);
+    const latest = done.ok ? done.latest : null;   // leave the row as it is if we could not ask
     if (latest && latest.status === 'completed') {
       setRowJob(company, { status: 'completed', stage: 'completed', pct: 100 });
       await refreshExisting();

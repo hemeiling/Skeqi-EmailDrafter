@@ -1476,9 +1476,16 @@ app.get('/api/aresearch/job-for-company', async (req, res) => {
       jobsDb.activeQwenJob(company),
       jobsDb.latestQwenJob(company),
     ]);
+    /* Carry the SAME semantic state Recent Sessions and the attention totals
+       use. The Single Company banner used to re-derive its own verdict from the
+       raw status and got it wrong: it treated everything but the literal string
+       'completed' as a failure, so a completed_with_limitations run - and, on a
+       dropped request, a still-queued one - rendered as "Research did not
+       complete". One mapping, computed here, for every surface. */
     // No reconciliation step: a row in a live state IS live, because a worker's
     // lease is what holds it there and a lapsed one is reclaimed, not orphaned.
-    res.json({ active: active || null, latest: latest || null });
+    const withState = (r) => (r ? { ...r, state: sessionState(r) } : null);
+    res.json({ active: withState(active), latest: withState(latest) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
