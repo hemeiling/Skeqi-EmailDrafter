@@ -1158,12 +1158,19 @@ declared** in the blueprint, each with `sync: false`:
 and never committed. **The blueprint declaring a variable is not evidence that it
 holds a value.**
 
-**Not confirmed, and not confirmable from this machine.** Dashboard state is not
-in the repository, and a probe of `https://skeqi-emaildrafter.onrender.com/healthz`
-returned `404` with `x-render-routing: no-server`, meaning no Render service is
-bound to that hostname. Either the CRM is deployed under a different name or it is
-not deployed. `DEPLOY.md` uses placeholders (`<crm-service>`, `<this-service>`), so
-the real hostnames are not recorded anywhere in either repository.
+**Production CRM hostname — `https://skeqi-emaildrafter-i46d.onrender.com`.**
+Confirmed by the user against the Render dashboard and verified from a shell on
+2026-09-06. **`skeqi-emaildrafter.onrender.com` is OBSOLETE** — no Render service
+is bound to it, so it answers `404` with `x-render-routing: no-server` on every
+path including `/healthz`. Probing it looks exactly like a failed deploy when
+nothing is wrong; two sessions have now lost time to it. Do not use it.
+
+The **engine** hostname is still unrecorded. `DEPLOY.md` in the engine repository
+carries the CRM hostname now and keeps `<this-service>` as a placeholder for the
+engine's own.
+
+Dashboard state itself is still not in the repository: the blueprint declaring a
+variable is not evidence that it holds a value.
 
 **To confirm, in the Render dashboard:**
 
@@ -1278,18 +1285,92 @@ Snapshot of every touched row before the repair:
 
 ---
 
+## 2m. Post-repair production verification (2026-09-06) — DONE
+
+Run against `https://skeqi-emaildrafter-i46d.onrender.com` with HTTP Basic. The
+deployed `qwen-research.js` has the same SHA-256 as the working tree.
+
+| check | result |
+| --- | --- |
+| Comau opens its own stored report by id | PASS, 165 KB returned |
+| four jobs with a dead report pointer show `no report saved` | PASS, after `5a560ad` |
+| every session key derives from its own company name | PASS, 70 rows |
+| the 17 killed-while-queued jobs read as historical | PASS, none live, none stale |
+| no contradictory `Interrupted · Queued` row | PASS |
+
+### The first fix was incomplete — found by this verification
+
+`52673be` gated Open on `report_id` being present. Four completed jobs HOLD an
+id whose report row is gone, so they still rendered Open and it returned `404`.
+Testing the id answered *"was a report ever saved"*; the question is *"can this
+be opened now"*.
+
+`deleteQwenSession` had said so in a comment for weeks — a session's `report_id`
+is a historical pointer that may already resolve to nothing — and nothing acted
+on it. **Read that comment before touching this again.**
+
+`5a560ad` adds `report_exists` (an `EXISTS` against the report row) to BOTH
+`listQwenSessions` and `listRecentQwenJobs`, and the client gates on it: the
+row's button, the overflow menu, and the `Interrupted · report saved` /
+Reconcile branch, which had the identical mistake. A payload without the field
+falls back to the id, so an older client loses nothing.
+
+### AMADA merged report — inspected, NOT changed
+
+No section was lost: 20 sections before, 20 after. But the newer content is not
+simply a smaller rendering of the same research, and **three verified facts
+present in the superseded content are absent from it**:
+
+- *Latest News* — the MacGregor Welding Systems acquisition, dated 2020-05-16,
+  marked `Verified`, carrying four trade-press sources. Now `Not enough evidence`.
+- *Upcoming Projects* — the MacGregor integration initiative, marked `Verified`.
+  Now `Not enough evidence`.
+- *Financial Information* — the primary value driver, marked `Verified`, and the
+  ownership-structure line. Both gone.
+
+The source sets differ accordingly. The older run cited `manufacturingdigital`,
+`laserfocusworld`, `thefabricator`, `amadaweldtech.eu` and `awt.amada.co.jp`; the
+newer cites `linkedin`, `caifuhao.eastmoney`, `chem17`, `ametchina` and
+`finance.eastmoney`. Both are 8/16 from `amadaweldtech.com` — the source
+concentration of §2j. **These are two independent runs, so this is retrieval
+variance, NOT the merge losing data**; the merge copied the newer run faithfully.
+
+The newer content is BETTER in one important place. The old *Competitor Analysis*
+listed 18 "competitors" that were largely not organisations — a headline
+(`Amada Miyachi America Europe Acquires MacGregor`), a page title
+(`Company Profile (amada.co.jp)`), the account itself (`AMADA Micro Welding
+Section`), a law firm, and `Terms, conditions` as an offering — with 12 of 18
+citing `[comp-block]` rather than any numbered source. The new one says no
+sufficiently verified competitors were found. **That is the GenAI-discovery
+redesign working as designed**, and it accounts for most of the byte drop.
+
+Left as it is, per the user: byte count alone is not a reason to change it.
+
+### Two content defects visible in the canonical AMADA report
+
+Both are instances of the deferred content-quality issue, now with evidence:
+
+1. **Prompt scaffolding reaches the reader.** `SOURCE OF TRUTH`,
+   `TABLE: [Empty per discovery result]`, `N/A per discovery`, and worst, an
+   instruction addressed to the model: *"Do not turn this into an incumbency
+   analysis; that lives in Existing Automation Providers."*
+2. **A Chinese sentence appears inside the `**English:**` block** of Competitor
+   Analysis, and `incumbency` is left untranslated in the Chinese block. The
+   bilingual validator compares tables and cross-references, not language
+   purity, so it does not catch this.
+
+---
+
 ## 6. NEXT ACTIONS
 
-1. **Confirm `52673be` is live on the CRM.** Pushed, not verified — the Render
-   hostname is not recorded anywhere in either repository (see item 2), so the
-   deploy could not be checked from a shell.
-2. **Record the real Render hostnames in `DEPLOY.md`**, replacing the
-   placeholders. This blocked deploy verification today.
-3. **Requeue the 17 jobs killed while queued** — deliberately deferred by the
+1. **Record the ENGINE's Render hostname** in `DEPLOY.md`. The CRM's is now
+   recorded; the engine's is still `<this-service>`.
+2. **Requeue the 17 jobs killed while queued** — deliberately deferred by the
    user; they are identity-repaired and ready.
-4. **Content-quality pass**: reports still emit scaffolding prose
-   (`SOURCE OF TRUTH`, `N/A per discovery`) into user-visible sections.
-5. **P0 — target-website integrity** (§2j, diagnosed, not implemented) and
+3. **Content-quality pass** — now evidenced in §2m: reports emit prompt
+   scaffolding into user-visible sections, including an instruction addressed to
+   the model, and leak one language into the other's block.
+4. **P0 — target-website integrity** (§2j, diagnosed, not implemented) and
    **P1 — bounded rejected-candidate diagnostics** (paused by the user).
 
 **Deliberately NOT scheduled** (user decision, 2026-09-04): supplier/integrator
@@ -1306,15 +1387,19 @@ NOT WORTH THE ADDED RETRIEVAL.
 queued or running. No paid research has been started.
 
 **Exact stopping point.** The company-key repair is APPLIED and VERIFIED against
-live Neon (§2l). The report-open fix is COMMITTED and PUSHED but its deploy is
-**UNCONFIRMED**: `skeqi-emaildrafter.onrender.com` now returns 404 at the edge, and
-no other Render hostname is recorded in either repository or in local `.env`.
-Get the live hostname from the Render dashboard, put it in `DEPLOY.md`, then
-confirm the asset carries `data-qr-sess-report`.
+live Neon (§2l). The report-open fix is COMMITTED, PUSHED and **DEPLOYED**: the
+live `qwen-research.js` at `skeqi-emaildrafter-i46d.onrender.com` has the same
+SHA-256 as the working tree. Post-repair UI verification against production is
+recorded in §2m.
 
-**Last successful operation:** `integrity-check.js` — every check green, including
-proof from the repair script's own source that no job UPDATE touched anything but
-`company_key`.
+**Last successful operation:** post-repair production verification (§2m), every
+check green after `5a560ad`.
+
+**The queue is NOT idle as of 19:16.** A job for `RMA`
+(`bca1245fe3f64c318674c48bdf2ef913`) was started by `admin` from the UI, outside
+this session, and was claimed by a worker five seconds later. It was left
+untouched. Incidentally this is the durable queue working: enqueue, claim,
+progress, all without a second POST.
 
 **Untracked, deliberately not committed:** `repair-keys.js`, `integrity-check.js`,
 `check-amada.js`, `observe-amada.js` (one-off operational scripts), and
