@@ -1361,16 +1361,96 @@ Both are instances of the deferred content-quality issue, now with evidence:
 
 ---
 
+## 2n. Queue management + status semantics (2026-09-07) — DEPLOYED, PRODUCTION-PROVEN
+
+CRM commits `0cfbd72` (status semantics) and `bf2af6c` (queue cancellation), live
+on `skeqi-emaildrafter-i46d.onrender.com`, client asset hash matched.
+
+### The stale local servers — READ THIS BEFORE DEBUGGING THE QUEUE AGAIN
+
+**Two `node server.js` processes were still running on the developer machine from
+2026-09-02 and 2026-09-03, against production Neon, and they were bulk-killing
+healthy QUEUED jobs every five minutes.** They executed the pre-`a0745e6`
+sweeper, whose filter was `status IN ('queued','running')`. Node caches modules
+at require time, so fixing `db.js` on disk never reached either process.
+
+They killed 32 jobs across three clusters (16 + 1 + 15). The 5-minute interval is
+visible in the data: two clusters are exactly 300 seconds apart. Both processes
+were stopped 2026-09-07 05:09Z; no cluster has appeared since.
+
+> **A long-running local `node server.js` holds the OLD code and the PRODUCTION
+> database.** Restart or stop local servers after any change to job lifecycle
+> code, and check `ps aux | grep "node server.js"` before concluding that a
+> deployed fix is not working.
+
+### Two questions, two vocabularies
+
+`sessionState` answers what a JOB did. `companyState` answers what a COMPANY is.
+They are deliberately different and must not be merged.
+
+- `interrupted` + no `started_at` + `attempts = 0` now presents as
+  **Interrupted before start / 启动前中断**, with no stage appended — printing
+  the stage produced "Interrupted · Queued", which read as though research began.
+- `cancelled` presents as **Cancelled / 已取消**.
+- Neither is in the attention set or the live set. Both stay in history.
+- The stored status is never rewritten for presentation.
+- Needs Attention is now a real total from the server, classified by the same
+  `sessionState` the rows use. It counted the loaded page before, which is why it
+  read 25 whatever the truth was.
+- `companyState` has four states — Researching, Queued, Existing Report,
+  Pending — and takes NO history argument, so a failed run can no longer keep a
+  company looking broken. Used by Batch Research and the Single lookup.
+
+### Queue cancellation
+
+`GET /api/aresearch/queue` and `POST /api/aresearch/queue/cancel`
+(`{scope:'all'}` or `{scope:'selected', job_ids:[…]}`).
+
+The guard is the design: `WHERE job_id = $1 AND status = 'queued'`. Zero rows is
+the ANSWER, not an error — the caller reads the row's current state and reports
+`already_running`.
+
+**The engine needed no change.** Its claim query already reads
+`WHERE status = 'queued'` and `idx_arq_claimable` is partial on the same
+predicate, so a cancelled row leaves the index by itself.
+
+`cancelled` is terminal in THREE places, because terminality is computed in
+three: `JOB_TERMINAL` (the heartbeat), `completeQwenJob`'s own inline list, and
+`failQwenJob`, which previously wrote unconditionally.
+
+### Production validation, 2026-09-07 — 49 checks, all green, no paid run
+
+> **How to probe the queue safely.** A queued row in production is claimable
+> within seconds and a claim SPENDS MONEY. `job_store.claim()` checks
+> `LIVE_COUNT >= MAX_CONCURRENT` (2) BEFORE claiming, and `LIVE_COUNT` counts
+> running rows with a LIVE lease. So plant two `running` probes with a lease ten
+> minutes out first; every worker then declines to claim. Verified: zero jobs
+> started during the window.
+
+Proven live: route counts, cancellation, `completed_at` set while `started_at`
+and `attempts` stay untouched, the row leaving the claimable set and the
+duplicate guard, a company becoming eligible again, a company with a RUNNING job
+still blocked, the claim/cancel race returning `already_running`, all three
+callback guards refusing to revive a cancelled row, Cancel All touching only
+queued rows, and the row remaining in history as Cancelled while Needs Attention
+did not grow. All 6 probe rows deleted; zero remain; the table is back to 90.
+
+Test suites: 674 checks across 12 files, plus 49 production probe checks.
+
+---
+
 ## 6. NEXT ACTIONS
 
 1. **Record the ENGINE's Render hostname** in `DEPLOY.md`. The CRM's is now
    recorded; the engine's is still `<this-service>`.
-2. **Requeue the 17 jobs killed while queued** — deliberately deferred by the
-   user; they are identity-repaired and ready.
-3. **Content-quality pass** — now evidenced in §2m: reports emit prompt
+2. **Running-job cancellation** is deliberately NOT implemented. A running job
+   is inside a worker with no way to be told to stop; the UI says so.
+3. **Requeue the jobs killed while queued** — 32 now, deliberately deferred by
+   the user; they are identity-repaired and ready.
+4. **Content-quality pass** — now evidenced in §2m: reports emit prompt
    scaffolding into user-visible sections, including an instruction addressed to
    the model, and leak one language into the other's block.
-4. **P0 — target-website integrity** (§2j, diagnosed, not implemented) and
+5. **P0 — target-website integrity** (§2j, diagnosed, not implemented) and
    **P1 — bounded rejected-candidate diagnostics** (paused by the user).
 
 **Deliberately NOT scheduled** (user decision, 2026-09-04): supplier/integrator
@@ -1392,14 +1472,10 @@ live `qwen-research.js` at `skeqi-emaildrafter-i46d.onrender.com` has the same
 SHA-256 as the working tree. Post-repair UI verification against production is
 recorded in §2m.
 
-**Last successful operation:** post-repair production verification (§2m), every
-check green after `5a560ad`.
+**Last successful operation:** production validation of queue cancellation
+(§2n) — 49 checks green, all probe rows removed, no paid run.
 
-**The queue is NOT idle as of 19:16.** A job for `RMA`
-(`bca1245fe3f64c318674c48bdf2ef913`) was started by `admin` from the UI, outside
-this session, and was claimed by a worker five seconds later. It was left
-untouched. Incidentally this is the durable queue working: enqueue, claim,
-progress, all without a second POST.
+**The queue is idle** and the table holds 90 jobs, unchanged by the probe.
 
 **Untracked, deliberately not committed:** `repair-keys.js`, `integrity-check.js`,
 `check-amada.js`, `observe-amada.js` (one-off operational scripts), and
