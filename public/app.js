@@ -18,7 +18,7 @@ let _sender = { name: "", title: "", company: "" };
 
 // Breadcrumb labels follow the sidebar's Chinese naming so the two never
 // disagree; the English name is kept alongside for the nav item's tooltip.
-const APP_VIEW_LABELS = { home: "首页概览", search: "AI 邮件起草", "booth-map": "展会地图", crm: "CRM 管理", intelligence: "客户情报", "account-research": "账户研究报告", "ai-usage": "数据分析", settings: "设置中心" };
+const APP_VIEW_LABELS = { home: "首页概览", search: "AI 邮件起草", "booth-map": "展会地图", outreach: "展商拓展", crm: "CRM 管理", intelligence: "客户情报", "account-research": "账户研究报告", "ai-usage": "数据分析", settings: "设置中心" };
 
 // The Booth Map and Account Report tabs are ported standalone apps rendered in
 // iframes. Load each on first open rather than on page load — the map is a
@@ -97,6 +97,9 @@ function showView(name) {
      dead zone several thousand lines below. */
   if (name === "ai-usage") queueMicrotask(loadAiUsage);
   if (name === "crm") initCrmCategoryFilter();
+  // Exhibitor Outreach lives in outreach.js; it loads on first open and
+  // refreshes its counts each time the tab is shown.
+  if (name === "outreach" && window.outreachShow) window.outreachShow();
   try { localStorage.setItem("app_active_view", name); } catch (e) { /* ignore (private browsing, etc.) */ }
 }
 
@@ -1272,7 +1275,11 @@ async function openDraftModalForContact(contact, refreshFn, options = {}) {
   await loadDraftLibrary(contact.contact_id);
   const preferredMode = options.forceRegenerateOnOpen
     ? _modalSelectedMode
-    : (_modalCategories.find((c) => c.exists) || _modalCategories[0] || { mode: "cold_outreach" }).mode;
+    : (_modalCategories.find((c) => c.exists)
+      // A caller may suggest where a brand-new draft should start (Exhibitor
+      // Outreach suggests Conference Outreach). Ignored once any draft exists.
+      || (options.preferredMode && _modalCategories.find((c) => c.mode === options.preferredMode))
+      || _modalCategories[0] || { mode: "cold_outreach" }).mode;
   await selectDraftCategory(preferredMode, { forceRegenerateOnOpen: options.forceRegenerateOnOpen });
 }
 

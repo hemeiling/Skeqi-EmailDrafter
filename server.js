@@ -69,6 +69,7 @@ const { listEmailModelChoices, DEFAULT_EMAIL_MODEL_ID } = require('./config');
 const emailSvc = require('./email');
 const accountResearch = require('./accountResearch');
 const providers = require('./providers');
+const outreach = require('./outreach');
 const {
   recordAiUsage, aiUsageTotals, aiUsageByFeature, aiUsageByCompany, estimateAiSaved,
   getAiBudget, setAiBudget, listActivePricing, buildPeriodFilter,
@@ -3381,13 +3382,16 @@ app.post('/api/communications/:id/send', async (req, res) => {
     console.log(`[email:send] comm=${id} result ok=${result.ok} — ${result.message}`);
 
     if (!result.ok) {
-      const failed = await markCommunicationSend(id, { delivery_status: 'failed', send_error: result.message });
+      const failed = await markCommunicationSend(id, { delivery_status: 'failed', send_error: result.message, user_id: reqUser(req) });
       await recordEmailTest({ userId: reqUser(req), kind: 'send', scope: 'user', target: to, ok: false, message: result.message });
       return res.status(502).json({ error: 'send_failed', message: result.message, communication: failed });
     }
     const sent = await markCommunicationSend(id, {
       delivery_status: 'sent', message_id: result.id || null, send_error: null,
       status: 'approved', sent_at: new Date(),
+      // Who sent it. The column existed and /api/analytics/by-user read it,
+      // but nothing wrote it, so per-user sends always came back empty.
+      user_id: reqUser(req),
     });
     await recordEmailTest({ userId: reqUser(req), kind: 'send', scope: 'user', target: to, ok: true, message: `Sent (id ${result.id || '?'})` });
     if (comm.contact_id) { try { await logContactActivity(comm.contact_id, 'email_sent', `Email sent to ${to}: ${comm.subject || '(no subject)'}`); } catch (e) { /* non-fatal */ } }
@@ -3735,10 +3739,18 @@ async function buildDraftContext(contact, mode, extraInstructions, resolvedConta
     {
       const notesParts = [companyRow.notes, companyRow.background, companyRow.opportunity].filter(Boolean);
       if (notesParts.length) context.companyNotes = notesParts.join(' | ');
-      if (companyRow.event_id) {
-        const events = await listEvents();
-        const event = events.find((e) => e.id === companyRow.event_id);
-        if (event) context.eventName = event.name;
+      /* A listed exhibitor at the current show is the strongest event context
+         there is, and it is looked up here rather than stored on the company:
+         the exhibitor list changes with every approved refresh. Failure to
+         read it must never block a draft — it only loses the extra line. */
+      /* If the lookup fails the draft goes ahead without an event line —
+         better no event than a claim about the show we could not check. */
+      let ev = null;
+      try { ev = await outreach.draftEventContext(pool, companyRow); }
+      catch (e) { console.warn('draft context: event lookup failed:', e.message); }
+      if (ev) {
+        context.eventName = ev.eventName;
+        if (ev.source === 'exhibitor') context.exhibitorBooths = ev.booths;
       }
     }
   }
@@ -4749,6 +4761,131 @@ app.post('/api/exhibitors/apply', async (req, res) => {
   } finally {
     release();
   }
+});
+
+/* ── Exhibitor Outreach · 展商拓展 ──────────────────────────────────────────
+   Read-only views over exhibitors → companies → contacts → communications,
+   plus one write (a manual "sent" record). All of the logic lives in
+   outreach.js; these handlers only resolve the event and translate errors.
+
+   A failure is always a 5xx with a message. The page must be able to tell
+   "the query failed" from "no exhibitors match", and it can only do that if
+   an error never arrives looking like an empty list. */
+async function outreachEvent(req, res) {
+  const eventId = await outreach.resolveEventId(pool, req.query.event_id);
+  if (!eventId) {
+    res.status(404).json({ error: 'no_event', message: 'No exhibitor list has been imported yet.' });
+    return null;
+  }
+  return eventId;
+}
+
+function outreachFail(res, where, err) {
+  if (err instanceof outreach.OutreachError) {
+    return res.status(err.status).json({ error: err.code, message: err.message, ...err.extra });
+  }
+  console.error(`[outreach] ${where}:`, err.message);
+  return res.status(500).json({ error: 'outreach_failed', message: 'Could not load outreach data. Please retry.' });
+}
+
+app.get('/api/outreach/summary', async (req, res) => {
+  try {
+    const eventId = await outreachEvent(req, res);
+    if (!eventId) return;
+    const [event, data] = await Promise.all([
+      outreach.eventMeta(pool, eventId),
+      outreach.summary(pool, eventId, req.query),
+    ]);
+    res.json({ ok: true, event, ...data });
+  } catch (err) { outreachFail(res, 'summary', err); }
+});
+
+app.get('/api/outreach/exhibitors', async (req, res) => {
+  try {
+    const eventId = await outreachEvent(req, res);
+    if (!eventId) return;
+    const out = await outreach.listExhibitors(pool, eventId, req.query,
+      { page: req.query.page, page_size: req.query.page_size });
+    res.json({ ok: true, event_id: eventId, ...out });
+  } catch (err) { outreachFail(res, 'list', err); }
+});
+
+app.get('/api/outreach/exhibitors/:id/contacts', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'bad_id' });
+    const detail = await outreach.exhibitorDetail(pool, id);
+    /* Only exhibitors of the show this page is about. An id from another
+       event's list answers 404 rather than quietly showing that list. */
+    const eventId = detail ? await outreach.resolveEventId(pool, req.query.event_id) : null;
+    if (!detail || detail.exhibitor.event_id !== eventId) {
+      return res.status(404).json({ error: 'not_found', message: 'Exhibitor not found.' });
+    }
+    res.json({ ok: true, ...detail });
+  } catch (err) { outreachFail(res, 'contacts', err); }
+});
+
+/* The two writes insist on a JSON body. Basic auth is sent by the browser on
+   any request to this origin, including a form another site submits; a form
+   cannot set Content-Type: application/json without a CORS preflight, which
+   this server never grants. So a third-party page cannot record or erase a
+   send in a signed-in user's name. */
+function requireJson(req, res) {
+  if (req.is('application/json')) return true;
+  res.status(415).json({ error: 'json_required', message: 'This request must be sent as JSON.' });
+  return false;
+}
+
+app.post('/api/outreach/contacts/:id/mark-sent', async (req, res) => {
+  try {
+    if (!requireJson(req, res)) return;
+    const contactId = Number(req.params.id);
+    if (!Number.isInteger(contactId) || contactId <= 0) return res.status(400).json({ error: 'bad_id' });
+    const b = req.body || {};
+    const row = await outreach.markSent(require('./db'), {
+      contactId, sentAt: b.sent_at, draftId: b.draft_id, notes: b.notes,
+      userId: reqUser(req), eventId: await outreach.resolveEventId(pool, req.query.event_id),
+    });
+    res.json({ ok: true, communication: { id: row.id, sent_at: row.sent_at, to_email: row.to_email, user_id: row.user_id } });
+  } catch (err) { outreachFail(res, 'mark-sent', err); }
+});
+
+app.post('/api/outreach/sent/:id/undo', async (req, res) => {
+  try {
+    if (!requireJson(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'bad_id' });
+    const out = await outreach.undoManualSent(require('./db'), { communicationId: id, userId: reqUser(req) });
+    res.json({ ok: true, ...out });
+  } catch (err) { outreachFail(res, 'undo', err); }
+});
+
+app.get('/api/outreach/export', async (req, res) => {
+  try {
+    const eventId = await outreachEvent(req, res);
+    if (!eventId) return;
+    const format = req.query.format === 'csv' ? 'csv' : 'xlsx';
+    const scope = req.query.scope === 'all' ? 'all' : 'view';
+    // "All" means every exhibitor: the view's filters and search are dropped.
+    const filters = scope === 'all' ? { include_withdrawn: req.query.include_withdrawn } : req.query;
+    const [event, rows] = await Promise.all([
+      outreach.eventMeta(pool, eventId),
+      outreach.exportRows(pool, eventId, filters),
+    ]);
+    const slug = String(event.name || `event-${eventId}`).replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '');
+    const name = `exhibitor-outreach_${slug}_${new Date().toISOString().slice(0, 10)}_${scope}.${format}`;
+    // Contact emails are leaving the system in a file; who took them is recorded.
+    logCrmActivity({ actor: reqUser(req), action: 'outreach.export',
+      metadata: { format, scope, rows: rows.length, event_id: eventId } });
+    res.set('Content-Disposition', `attachment; filename="${name}"`);
+    if (format === 'csv') {
+      res.set('Content-Type', 'text/csv; charset=utf-8');
+      return res.send(outreach.rowsToCsv(rows));
+    }
+    const buf = await outreach.rowsToXlsx(rows, { title: `Exhibitor Outreach — ${event.name || ''}` });
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(Buffer.from(buf));
+  } catch (err) { outreachFail(res, 'export', err); }
 });
 
 app.get('/api/me', (req, res) => {

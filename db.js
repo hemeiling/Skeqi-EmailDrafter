@@ -30,6 +30,16 @@ if (process.env.NODE_ENV === 'test') {
   }
 }
 
+/* ── Nor may a laptop open a remote database by accident ───────────────────
+   See dbTarget.js. Checked before the pool exists, so a refused target never
+   gets as far as initDb(). Deployed services (NODE_ENV=production or
+   RENDER=true) are unaffected. */
+const { assertSafeDatabaseTarget } = require('./dbTarget');
+const _dbTarget = assertSafeDatabaseTarget(process.env.DATABASE_URL || '');
+if (_dbTarget.reason === 'explicit') {
+  console.warn(`[db] connecting to remote database ${_dbTarget.host} (ALLOW_REMOTE_DB)`);
+}
+
 // Enable SSL for production, for managed Postgres (Neon), or whenever the URL
 // asks for it — otherwise Neon rejects the connection when running locally.
 const DB_URL = process.env.DATABASE_URL || '';
@@ -3244,8 +3254,8 @@ async function insertCommunication(e) {
       (contact_id, company_id, comm_type, subject, body, category, status, version,
        source, from_email, from_name, to_email, draft_mode, followup_text, rationale,
        sent_at, review_needed, raw_payload, extra_instructions, cc, bcc, notes,
-       parent_email_id, follow_up_sequence_number, draft_options)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+       parent_email_id, follow_up_sequence_number, draft_options, user_id)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
     RETURNING *
   `, [
     e.contact_id || null, e.company_id || null,
@@ -3255,7 +3265,9 @@ async function insertCommunication(e) {
     e.to_email || '', e.draft_mode || '', e.followup_text || '', e.rationale || '',
     e.sent_at || null, Boolean(e.review_needed), e.raw_payload || '', e.extra_instructions || '',
     e.cc || '', e.bcc || '', e.notes || '', e.parent_email_id || null, e.follow_up_sequence_number || null,
-    e.draft_options || ''
+    e.draft_options || '',
+    // Which CRM user caused this row. Optional: most writers predate it.
+    e.user_id || null
   ]);
   return row;
 }
@@ -3287,7 +3299,7 @@ async function getAttachmentsWithDataForCommunication(communicationId) {
 // Record the outcome of a send/schedule attempt on a communication.
 async function markCommunicationSend(id, patch) {
   const cols = []; const vals = []; let i = 1;
-  for (const k of ['delivery_status', 'message_id', 'send_error', 'status']) {
+  for (const k of ['delivery_status', 'message_id', 'send_error', 'status', 'user_id']) {
     if (k in patch) { cols.push(`${k} = $${i++}`); vals.push(patch[k]); }
   }
   if ('sent_at' in patch) { cols.push(`sent_at = $${i++}`); vals.push(patch.sent_at); }
@@ -3368,8 +3380,9 @@ async function duplicateCommunication(id) {
 
 // ── Manually-imported emails (sent outside this system, logged after the fact) ──
 
-async function insertManualEmail({ contactId, companyId, mode, subject, body, toEmail, sentAt, notes }) {
+async function insertManualEmail({ contactId, companyId, mode, subject, body, toEmail, sentAt, notes, userId }) {
   return insertCommunication({
+    user_id: userId || null,
     contact_id: contactId, company_id: companyId || null,
     comm_type: 'imported_email', source: 'manual_entry', status: 'sent',
     draft_mode: mode || 'cold_outreach', subject, body, to_email: toEmail || '',

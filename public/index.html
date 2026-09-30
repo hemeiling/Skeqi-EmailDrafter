@@ -2355,6 +2355,185 @@
     }
 
   </style>
+<style>
+  /* ══ Exhibitor Outreach · 展商拓展 ══════════════════════════════════════
+     Built from the CRM's own parts (page head, search bar, stat tiles,
+     buttons, badges) plus a grid row that folds into cards below 768px. */
+  .xo { min-width: 0; }
+  .xo-muted { color: var(--color-text-tertiary); font-size: 0.8rem; }
+  .xo-verified { font-size: 0.76rem; }
+
+  .xo-kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; min-height: 84px; }
+  .xo-kpis.xo-loading { opacity: 0.55; }
+  .xo-kpi { text-align: left; font: inherit; cursor: pointer; width: 100%; }
+  .xo-kpi:hover { border-color: var(--color-primary-border); }
+  .xo-kpi:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .xo-kpi-sub { display: block; font-size: 0.7rem; color: var(--color-text-tertiary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .xo-searchbar { margin-bottom: 10px; }
+  .xo-filter-toggle { display: none; }
+  .xo-filters { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-end; margin-bottom: 10px; }
+  .xo-filters-head { display: none; }
+  .xo-f { display: flex; flex-direction: column; gap: 3px; font-size: 0.72rem; color: var(--color-text-tertiary); font-weight: 600; }
+  .xo-f select, .xo-f input[type="text"] {
+    font: inherit; font-size: 0.82rem; font-weight: 400; color: var(--color-text); padding: 6px 8px;
+    border: 1px solid #d1d5db; border-radius: var(--radius-md); background: var(--color-surface); min-width: 120px; }
+  .xo-f input[type="text"] { width: 96px; min-width: 0; }
+  .xo-f-check { flex-direction: row; align-items: center; gap: 6px; padding-bottom: 7px; font-weight: 500; font-size: 0.8rem; color: var(--color-text-secondary); }
+
+  .xo-chipbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 26px; margin-bottom: 8px; }
+  .xo-fchip { font: inherit; font-size: 0.74rem; border: 1px solid var(--color-primary-border); background: var(--color-primary-soft);
+    color: var(--color-primary-text); border-radius: var(--radius-full); padding: 3px 10px; cursor: pointer; }
+  .xo-fchip-clear { background: var(--color-surface); color: var(--color-text-secondary); border-color: var(--color-border); }
+
+  .xo-list { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-xs); }
+  .xo-list[aria-busy="true"] { opacity: 0.6; }
+  .xo-row {
+    display: grid; align-items: center; gap: 10px; padding: 10px 14px;
+    grid-template-columns: minmax(0, 2.6fr) 88px minmax(0, 1.1fr) 84px 64px 52px 150px 196px; }
+  .xo-head { font-size: 0.72rem; font-weight: 700; color: var(--color-text-tertiary); text-transform: uppercase; letter-spacing: 0.03em;
+    background: var(--color-surface-alt); border-bottom: 1px solid var(--color-border); border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+  .xo-group { border-bottom: 1px solid var(--color-border-soft); }
+  .xo-group:last-child { border-bottom: 0; }
+  .xo-group.open > .xo-row { background: var(--color-surface-alt); }
+  .xo-num { text-align: right; font-variant-numeric: tabular-nums; }
+  .xo-c-company { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
+  .xo-caret { border: 0; background: none; font-size: 0.9rem; width: 24px; height: 24px; cursor: pointer; color: var(--color-text-secondary);
+    border-radius: 6px; flex-shrink: 0; line-height: 1; }
+  .xo-caret:hover { background: var(--color-primary-soft); color: var(--color-primary); }
+  .xo-caret-off { cursor: default; color: var(--color-border); text-align: center; line-height: 24px; }
+  .xo-name-wrap { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; }
+  .xo-name { font-weight: 600; color: var(--color-text); overflow-wrap: anywhere; }
+  .xo-zh { font-size: 0.78rem; color: var(--color-text-tertiary); }
+  .xo-sum { flex-basis: 100%; font-size: 0.76rem; color: var(--color-text-tertiary); }
+  .xo-class-inline { display: none; }
+  .xo-class { display: inline-block; font-size: 0.74rem; background: var(--color-surface-alt); border: 1px solid var(--color-border);
+    border-radius: var(--radius-full); padding: 1px 8px; color: var(--color-text-secondary); white-space: nowrap; max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis; }
+  .xo-c-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+
+  .xo-chip { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 0.72rem; font-weight: 700; white-space: nowrap; }
+  .xo-st-grey { background: #f3f4f6; color: #4b5563; }
+  .xo-st-amber { background: var(--color-warn-soft); color: var(--color-warn-text); }
+  .xo-st-purple { background: var(--color-primary-soft); color: var(--color-primary-text); }
+  .xo-st-blue { background: #E4F0FA; color: #0C579A; }
+  .xo-st-green-l { background: var(--color-success-soft); color: var(--color-success-text); border: 1px dashed var(--color-success-border); }
+  .xo-st-green { background: #dcfce7; color: #166534; }
+
+  .xo-detail { padding: 4px 14px 14px 46px; background: var(--color-surface-alt); }
+  .xo-detail-msg { padding: 10px 0; color: var(--color-text-secondary); font-size: 0.84rem; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .xo-contacts { border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); }
+  .xo-contact { display: grid; gap: 10px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--color-border-soft);
+    grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.2fr) auto; }
+  .xo-contact:last-child { border-bottom: 0; }
+  .xo-contact.is-best { box-shadow: inset 3px 0 0 var(--color-primary); }
+  .xo-ct-who { display: flex; flex-wrap: wrap; gap: 2px 6px; align-items: baseline; min-width: 0; }
+  .xo-ct-name { font-weight: 600; overflow-wrap: anywhere; }
+  .xo-ct-title { flex-basis: 100%; font-size: 0.78rem; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+  .xo-ct-email { min-width: 0; overflow-wrap: anywhere; font-size: 0.84rem; }
+  .xo-ct-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .xo-best { font-size: 0.7rem; font-weight: 700; color: var(--color-primary); background: var(--color-primary-soft);
+    border-radius: var(--radius-full); padding: 1px 8px; }
+  .xo-best-why { flex-basis: 100%; font-size: 0.72rem; color: var(--color-primary-text); }
+  .xo-best-why b { font-weight: 600; }
+  /* A title-only pick is weaker evidence, and looks it. */
+  .xo-best.xo-best-title { background: var(--color-surface); border: 1px dashed var(--color-primary-border); }
+  .xo-best-note { padding: 6px 0 8px; }
+  .xo-mark { grid-column: 1 / -1; }
+  .xo-mark-form { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; padding: 10px 12px; background: var(--color-primary-soft);
+    border: 1px solid var(--color-primary-border); border-radius: var(--radius-md); font-size: 0.82rem; }
+  .xo-mark-to { flex-basis: 100%; }
+  .xo-mark-form label { display: flex; flex-direction: column; gap: 3px; font-size: 0.72rem; font-weight: 600; color: var(--color-text-secondary); }
+  .xo-mark-form input { font: inherit; font-size: 0.84rem; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: var(--radius-sm); }
+  .xo-mark-notes { flex: 1; min-width: 160px; }
+  .xo-mark-btns { display: flex; gap: 6px; }
+  .xo-mark-err { flex-basis: 100%; color: var(--color-danger-text); font-size: 0.8rem; }
+  .xo-mark-err:empty { display: none; }
+
+  .xo-empty, .xo-error { padding: 22px 16px; text-align: center; color: var(--color-text-secondary); font-size: 0.88rem;
+    display: flex; gap: 10px; justify-content: center; align-items: center; flex-wrap: wrap; }
+  .xo-error { color: var(--color-danger-text); background: var(--color-danger-soft); border: 1px solid var(--color-danger-border);
+    border-radius: var(--radius-md); padding: 10px 14px; margin: 6px 0; }
+  #xo-list-status:not(:empty) { padding: 8px 2px; font-size: 0.84rem; color: var(--color-text-secondary); }
+  .xo-pager { display: flex; justify-content: center; align-items: center; gap: 12px; padding: 14px 0; flex-wrap: wrap; }
+
+  .xo-dl { position: relative; }
+  .xo-dl-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; min-width: 230px; background: var(--color-surface);
+    border: 1px solid var(--color-border); border-radius: var(--radius-md); box-shadow: 0 8px 24px rgba(16,24,40,0.12); padding: 6px; }
+  .xo-dl-menu button { display: block; width: 100%; text-align: left; font: inherit; font-size: 0.84rem; border: 0; background: none;
+    padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; color: var(--color-text); }
+  .xo-dl-menu button:hover, .xo-dl-menu button:focus-visible { background: var(--color-primary-soft); }
+  .xo-dl-head { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; color: var(--color-text-tertiary); padding: 6px 10px 2px; }
+  .xo-dl-foot { font-size: 0.7rem; color: var(--color-text-tertiary); padding: 6px 10px 2px; border-top: 1px solid var(--color-border-soft); margin-top: 4px; }
+
+  /* Layout follows the space the page actually has, not the screen: the
+     sidebar may be expanded, collapsed or a drawer, so the same 1024px
+     screen can leave 790px or 960px for this table. */
+  .xo { container-type: inline-size; container-name: xo; }
+
+  /* Narrower desktop / landscape tablet: classification moves under the
+     company name, the draft column folds into the contact's actions. */
+  @container xo (max-width: 1100px) {
+    .xo-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .xo-row { grid-template-columns: minmax(0, 2.4fr) 80px 84px 60px 52px 140px 170px; }
+    .xo-row > .xo-c-class { display: none; }
+    .xo-class-inline { display: inline; flex-basis: 100%; }
+    .xo-contact { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.3fr) minmax(0, 1.2fr) auto; }
+    .xo-ct-draft { display: none; }
+  }
+
+  /* Portrait tablet and phone: rows become cards. */
+  @container xo (max-width: 820px) {
+    .xo-list { background: none; border: 0; box-shadow: none; }
+    .xo-head { display: none; }
+    .xo-group { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); margin-bottom: 10px; }
+    .xo-row { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 12px; }
+    .xo-row > .xo-c-company { grid-column: 1 / -1; }
+    .xo-row > .xo-c-booth, .xo-row > .xo-num { text-align: left; font-size: 0.84rem; }
+    .xo-row > [data-label]::before { content: attr(data-label); display: block; font-size: 0.66rem; font-weight: 700;
+      text-transform: uppercase; color: var(--color-text-tertiary); }
+    .xo-row > .xo-c-status { grid-column: 1 / -1; }
+    .xo-row > .xo-c-actions { grid-column: 1 / -1; justify-content: stretch; }
+    .xo-row > .xo-c-actions .btn-sm { flex: 1; min-height: 40px; }
+    .xo-detail { padding: 0 10px 12px; border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
+    .xo-contact { grid-template-columns: 1fr; gap: 6px; }
+    .xo-ct-draft { display: block; }
+    .xo-ct-draft::before, .xo-ct-sent::before { content: attr(data-label) " · "; font-size: 0.72rem; color: var(--color-text-tertiary); }
+    .xo-ct-actions { justify-content: stretch; }
+    .xo-ct-actions .btn-sm { flex: 1; min-height: 40px; }
+  }
+
+  /* Phone: filters become a bottom sheet, and every control is a
+     comfortable touch target. */
+  @media (max-width: 767px) {
+    .xo-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .xo-kpi { padding: 10px 12px; }
+    .xo-kpi .dash-stat-value { font-size: 1.15rem; }
+    .xo .crm-head-actions { margin-left: 0; width: 100%; }
+    .xo .crm-head-actions .btn-sm, .xo-filter-toggle { min-height: 44px; }
+    .xo-dl { flex: 1; } .xo-dl #xo-dl-btn { width: 100%; }
+    .xo-dl-menu { left: 0; right: 0; }
+    .xo-dl-menu button { min-height: 44px; }
+    .xo-filter-toggle { display: inline-flex; align-items: center; }
+    .xo-filters { display: none; }
+    body.xo-filters-open .xo-filters {
+      display: flex; flex-direction: column; flex-wrap: nowrap; align-items: stretch; position: fixed; left: 0; right: 0; bottom: 0;
+      z-index: 1200; max-height: 80vh; overflow-y: auto; background: var(--color-surface);
+      padding: 14px 16px calc(16px + env(safe-area-inset-bottom)); border-radius: 16px 16px 0 0; margin: 0;
+      box-shadow: 0 0 0 100vmax rgba(16, 8, 32, 0.45); }
+    body.xo-filters-open .xo-filters-head { display: flex; justify-content: space-between; align-items: center; }
+    body.xo-filters-open .xo-filters-head .btn-sm { min-height: 44px; min-width: 72px; }
+    .xo-f select, .xo-f input[type="text"] { width: 100%; min-height: 44px; font-size: 16px; }
+    .xo-f-check { min-height: 44px; padding-bottom: 0; }
+    #xo-search { font-size: 16px; }
+    .xo-caret { width: 44px; height: 44px; font-size: 1.1rem; margin: -8px 0 -8px -8px; }
+    .xo-row > .xo-c-actions .btn-sm, .xo-ct-actions .btn-sm { min-height: 44px; }
+    .xo-mark-form { flex-direction: column; align-items: stretch; }
+    .xo-mark-form input { min-height: 44px; font-size: 16px; }
+    .xo-mark-btns .btn-sm { flex: 1; min-height: 44px; }
+    .xo-pager .btn-sm { min-height: 44px; }
+  }
+</style>
 </head>
 <body>
   <button class="mobile-nav-scrim" id="mobile-nav-scrim" aria-label="Close menu 关闭菜单" tabindex="-1"></button>
@@ -2374,6 +2553,9 @@
       </div>
       <div class="app-nav-item" data-nav-view="booth-map" title="展会地图 · Battery Show 2026">
         <span class="app-nav-icon">🗺️</span><span class="app-nav-label">展会地图</span>
+      </div>
+      <div class="app-nav-item" data-nav-view="outreach" title="展商拓展 · Exhibitor Outreach">
+        <span class="app-nav-icon">📣</span><span class="app-nav-label">展商拓展</span>
       </div>
       <div class="app-nav-item" data-nav-view="account-research" title="账户研究报告 · Account Intelligence Report">
         <span class="app-nav-icon">📄</span><span class="app-nav-label">账户研究报告</span>
@@ -3358,6 +3540,77 @@
   </div>
 
   <!-- ── Battery Show booth map view (ported Skeqi) ── -->
+  <!-- ── Exhibitor Outreach · 展商拓展 ──────────────────────────────────────
+       One row per exhibitor from the canonical exhibitor list; contacts load
+       underneath on demand. All data and statuses come from /api/outreach/*
+       (outreach.js on the server); public/outreach.js only renders them. -->
+  <div class="view-hidden xo" data-view="outreach">
+    <div class="crm-page-head">
+      <h1 class="crm-page-title">Exhibitor outreach</h1>
+      <span class="crm-count-pill" id="xo-event" data-no-i18n>—</span>
+      <span class="xo-muted xo-verified" id="xo-verified"></span>
+      <div class="crm-head-actions">
+        <button class="btn-ghost btn-sm" id="xo-refresh">Refresh</button>
+        <div class="xo-dl">
+          <button class="btn-primary btn-sm" id="xo-dl-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="xo-dl-menu">Download</button>
+          <div class="xo-dl-menu" id="xo-dl-menu" role="menu" hidden>
+            <div class="xo-dl-head">Excel (.xlsx)</div>
+            <button type="button" role="menuitem" data-scope="view" data-format="xlsx">Export current view</button>
+            <button type="button" role="menuitem" data-scope="all" data-format="xlsx">Export all exhibitors</button>
+            <div class="xo-dl-head">CSV</div>
+            <button type="button" role="menuitem" data-scope="view" data-format="csv">Export current view</button>
+            <button type="button" role="menuitem" data-scope="all" data-format="csv">Export all exhibitors</button>
+            <div class="xo-dl-foot">One row per contact. Exhibitors without contacts are included.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="xo-kpis" id="xo-kpis" aria-live="polite"></div>
+
+    <div class="crm-search-bar xo-searchbar">
+      <div class="crm-toolbar-search">
+        <input type="search" id="xo-search" placeholder="Search company, booth, contact or email" autocomplete="off" aria-label="Search exhibitors">
+      </div>
+      <button type="button" class="btn-ghost btn-sm xo-filter-toggle" id="xo-filter-toggle" aria-expanded="false" aria-controls="xo-filters">Filters</button>
+    </div>
+
+    <div class="xo-filters" id="xo-filters">
+      <div class="xo-filters-head"><b>Filters</b><button type="button" class="btn-ghost btn-sm" id="xo-filters-done">Done</button></div>
+      <label class="xo-f"><span>Booth</span><input type="text" id="xo-f-booth" placeholder="e.g. 3626" inputmode="numeric" autocomplete="off"></label>
+      <label class="xo-f"><span>Classification</span><select id="xo-f-classification"><option value="">Any classification</option></select></label>
+      <label class="xo-f"><span>Contacts</span><select id="xo-f-has_contacts"><option value="">Any</option><option value="yes">Has contacts</option><option value="no">No contacts</option></select></label>
+      <label class="xo-f"><span>Email</span><select id="xo-f-has_email"><option value="">Any</option><option value="yes">Has email</option><option value="no">No email</option></select></label>
+      <label class="xo-f"><span>Draft</span><select id="xo-f-drafted"><option value="">Any</option><option value="yes">Has drafts</option><option value="no">No drafts</option></select></label>
+      <label class="xo-f"><span>Sent</span><select id="xo-f-sent"><option value="">Any</option><option value="yes">Sent to someone</option><option value="no">Nobody sent</option></select></label>
+      <label class="xo-f"><span>Outreach status</span><select id="xo-f-status">
+        <option value="">Any status</option>
+        <option value="needs_outreach">Needs outreach</option>
+        <option value="unmatched">Unmatched</option>
+        <option value="no_contact">No contact</option>
+        <option value="no_email">No email</option>
+        <option value="needs_draft">Needs draft</option>
+        <option value="drafted">Drafted</option>
+        <option value="contacted">Contacted (any)</option>
+        <option value="contacted_partial">Contacted (partial)</option>
+        <option value="contacted_all">Contacted (all)</option>
+      </select></label>
+      <label class="xo-f"><span>Sort</span><select id="xo-f-sort">
+        <option value="company">Company A–Z</option>
+        <option value="booth">Booth number</option>
+        <option value="status">Outreach progress</option>
+        <option value="contacts">Most contacts</option>
+        <option value="sent">Recently sent</option>
+      </select></label>
+      <label class="xo-f xo-f-check"><input type="checkbox" id="xo-f-withdrawn"> <span>Include withdrawn</span></label>
+    </div>
+
+    <div class="xo-chipbar"><span class="xo-muted" id="xo-count"></span><span id="xo-chips"></span></div>
+    <div id="xo-list-status" aria-live="polite"></div>
+    <div class="xo-list" id="xo-list" role="table" aria-label="Exhibitors" aria-busy="false"></div>
+    <div class="xo-pager" id="xo-pager"></div>
+  </div>
+
   <div class="card view-hidden" data-view="booth-map" style="padding:0;overflow:hidden;">
     <!-- A thin strip ABOVE the map, in the shell's own chrome. The Booth Map is
          a designed product surface and nothing here touches it: no markup,
@@ -4500,6 +4753,7 @@
 <script src="/job-snapshot.js"></script>
 <script src="/qwen-research.js"></script>
   <script src="/app.js"></script>
+  <script src="/outreach.js"></script>
 <script src="/i18n.js"></script>
   <!-- The assistant. Mounted in the shell rather than in a view: Booth Map and
        Account Research are iframes, so anything inside them would vanish on

@@ -58,11 +58,24 @@ function senderInstructionBlock(context = {}) {
   );
 }
 
+/* The event line. When the recipient's company is a listed exhibitor
+   (context.exhibitorBooths is an array, possibly empty), say so and give the
+   booth, because "come by booth 3626" is the most concrete thing an event
+   email can offer. Without it the line is exactly what it always was. */
+function eventContextLine(context) {
+  const booths = context.exhibitorBooths;
+  if (!Array.isArray(booths)) return `- Event: ${context.eventName}`;
+  const where = booths.length
+    ? `booth ${booths.join(', ')}`
+    : 'booth not yet published';
+  return `- Event: ${context.eventName} (the recipient's company is an exhibitor — ${where})`;
+}
+
 /* Event / company notes. Shared by every mode so the default cold-outreach
    prompt stops being the only one that silently discards them. */
 function backgroundContextBlock(context = {}) {
   const lines = [];
-  if (context.eventName) lines.push(`- Event: ${context.eventName}`);
+  if (context.eventName) lines.push(eventContextLine(context));
   if (context.companyNotes) lines.push(`- Company notes: ${context.companyNotes}`);
   if (!lines.length) return '';
   return `\n\nAdditional context (use this to personalize the email; don't invent beyond it):\n${lines.join('\n')}\n`;
@@ -456,7 +469,7 @@ function buildContextBlocks(contact, sender, context) {
   const senderBlock = senderLines.length ? `\n\nSender (the person writing this email):\n${senderLines.join('\n')}` : '';
 
   const contextLines = [];
-  if (context.eventName) contextLines.push(`- Event: ${context.eventName}`);
+  if (context.eventName) contextLines.push(eventContextLine(context));
   if (context.companyNotes) contextLines.push(`- Company notes: ${context.companyNotes}`);
 
   const contextBlock = contextLines.length ? `\n\nAdditional context (use this to personalize the email; don't invent beyond it):\n${contextLines.join('\n')}` : '';

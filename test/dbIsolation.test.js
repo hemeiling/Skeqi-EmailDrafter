@@ -109,15 +109,41 @@ test('db.js loads happily when pointed at the test database', () => {
 /* The guard is scoped to NODE_ENV=test so it cannot affect the deployed app.
    That scoping is load-bearing and therefore tested: a backstop that also
    fired in production would be worse than none. */
-test('production and development are completely unaffected', () => {
-  for (const env of [{ NODE_ENV: 'production' }, { NODE_ENV: '' }]) {
+test('production is completely unaffected', () => {
+  for (const env of [{ NODE_ENV: 'production' }, { NODE_ENV: '', RENDER: 'true' }]) {
     const r = inChild(
       { ...env, DATABASE_URL: FAKE_PROD, TEST_DATABASE_URL: '' },
       "require('./db.js'); console.log('LOADED');",
     );
-    assert.equal(r.ok, true, `NODE_ENV=${env.NODE_ENV || 'unset'} must load normally: ${r.out}`);
+    assert.equal(r.ok, true, `${JSON.stringify(env)} must load normally: ${r.out}`);
     assert.match(r.out, /LOADED/);
   }
+});
+
+/* Development used to be "completely unaffected" too, which is how a plain
+   `node server.js` on a laptop came to run initDb() against the remote
+   database in .env. It is now refused unless the host is named (dbTarget.js). */
+test('development refuses a remote database unless the host is named', () => {
+  const refused = inChild(
+    { NODE_ENV: '', RENDER: '', DATABASE_URL: FAKE_PROD, TEST_DATABASE_URL: '', ALLOW_REMOTE_DB: '' },
+    "require('./db.js'); console.log('LOADED');",
+  );
+  assert.equal(refused.ok, false, 'a laptop must not open the remote database by default');
+  assert.match(refused.out, /Refusing to connect/);
+  assert.doesNotMatch(refused.out, /u:p@/, 'credentials never printed');
+
+  const named = inChild(
+    { NODE_ENV: '', RENDER: '', DATABASE_URL: FAKE_PROD, TEST_DATABASE_URL: '',
+      ALLOW_REMOTE_DB: 'ep-fake-prod-xyz.us-east-1.aws.neon.tech' },
+    "require('./db.js'); console.log('LOADED');",
+  );
+  assert.equal(named.ok, true, named.out);
+
+  const local = inChild(
+    { NODE_ENV: '', RENDER: '', DATABASE_URL: 'postgres://me@localhost:5432/dev', TEST_DATABASE_URL: '' },
+    "require('./db.js'); console.log('LOADED');",
+  );
+  assert.equal(local.ok, true, local.out);
 });
 
 // ── the guard itself, as a module ──────────────────────────────────────────
