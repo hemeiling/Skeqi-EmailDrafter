@@ -2439,6 +2439,10 @@
   .xo-ct-name { font-weight: 600; overflow-wrap: anywhere; }
   .xo-ct-title { flex-basis: 100%; font-size: 0.78rem; color: var(--color-text-secondary); overflow-wrap: anywhere; }
   .xo-ct-email { min-width: 0; overflow-wrap: anywhere; font-size: 0.84rem; }
+  /* The contact's status stays beside the name at every width — the draft
+     column folds away on narrower layouts, the badge does not. */
+  .xo-ct-badge { align-self: center; }
+  .xo-reveal-err { color: var(--color-danger-text); font-weight: 600; }
   .xo-ct-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
   .xo-best { font-size: 0.7rem; font-weight: 700; color: var(--color-primary); background: var(--color-primary-soft);
     border-radius: var(--radius-full); padding: 1px 8px; }
@@ -4830,6 +4834,7 @@
 <script src="/qwen-research.js"></script>
   <script src="/app.js"></script>
   <script src="/outreach-filters.js"></script>
+  <script src="/outreach-status.js"></script>
   <script src="/outreach.js"></script>
 <script src="/i18n.js"></script>
   <!-- The assistant. Mounted in the shell rather than in a view: Booth Map and

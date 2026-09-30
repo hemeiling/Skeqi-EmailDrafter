@@ -842,8 +842,10 @@ function renderContacts(contacts, companyLabel) {
     let emailCell;
     if (c.email && !c.email.startsWith("(email")) {
       emailCell = `<span id="email-cell-${i}">${escapeHtml(c.email)}</span>`;
+    } else if (c.email_lookup_status === "not_available") {
+      emailCell = `<span id="email-cell-${i}" class="email-note">Email unavailable</span>`;
     } else if (c.has_email) {
-      emailCell = `<span id="email-cell-${i}" class="email-note">(available) <button class="btn-sm btn-reveal reveal-btn" data-idx="${i}">Reveal</button></span>`;
+      emailCell = `<span id="email-cell-${i}" class="email-note">Email not revealed <button class="btn-sm btn-reveal reveal-btn" data-idx="${i}">Reveal email</button></span>`;
     } else {
       emailCell = `<span id="email-cell-${i}">${c.email ? escapeHtml(c.email) : "N/A"}</span>`;
     }
@@ -1007,11 +1009,19 @@ async function revealEmailsForContacts(contacts, onProgress) {
           // The caller has already shown the cost and had it accepted.
           body: JSON.stringify({ allowApollo: true }),
         });
-        const d = await r.json();
+        const d = await r.json().catch(() => null);
         const email = d && d.email && !String(d.email).startsWith("(") ? d.email : "";
-        result.emails[id] = email;
-        if (email) result.revealed++; else result.unavailable++;
         if (d && d.creditsUsed) result.credits = (result.credits || 0) + d.creditsUsed;
+        if (r.ok && email) {
+          result.emails[id] = email; result.revealed++;
+        } else if (r.ok && d && d.email_lookup_status === "not_available") {
+          // Apollo answered and holds no address — recorded on the contact.
+          result.emails[id] = ""; result.unavailable++;
+        } else {
+          // An error, or no answer at all (Apollo down, not configured):
+          // that says nothing about the address, so it is not "unavailable".
+          result.failed++;
+        }
       } catch (e) {
         result.failed++;
       }
@@ -1067,7 +1077,14 @@ async function revealBeforeUse(contacts, purposeEn = "continue", purposeCn = "�
     console.error("reveal-estimate:", e);
   }
 
-  if (plan && plan.estimatedCredits > 0) {
+  if (!plan || !Number.isFinite(Number(plan.estimatedCredits))) {
+    // The cost could not be worked out. Never spend unasked: confirm against
+    // the worst case, one credit per contact.
+    const ok = await confirmReveal(
+      `The cost of revealing ${ids.length} contact(s) could not be estimated.`,
+      `无法预估揭示 ${ids.length} 位联系人的费用。`, ids.length);
+    if (!ok) return { emails: {}, revealed: 0, unavailable: 0, failed: 0, skipped: 0, cancelled: true };
+  } else if (plan.estimatedCredits > 0) {
     const ok = await confirmReveal(
       `${plan.needsApollo} of ${plan.total} selected contacts need an Apollo reveal to ${purposeEn}.`
       + `\n${plan.alreadyStored} already have an address stored`
@@ -2622,34 +2639,54 @@ async function revealEmail(idx) {
     if (cell) cell.innerHTML = `<span class="email-note">No Apollo ID — cannot reveal</span>`;
     return;
   }
-  if (cell) cell.innerHTML = '<span class="spinner"></span> Revealing…';
-  try {
-    let d;
-    if (contact.contact_id) {
-      const r = await fetch(`/api/contacts/${contact.contact_id}/enrich-email`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-      });
-      d = await r.json();
+  const original = cell ? cell.innerHTML : "";
+  const rebind = () => {
+    const b = cell && cell.querySelector(".reveal-btn");
+    if (b) b.addEventListener("click", () => revealEmail(idx));
+  };
+  const failed = () => {
+    if (cell) cell.innerHTML = `<span class="email-note">Reveal failed · <button type="button" class="btn-ghost btn-sm reveal-btn" data-idx="${idx}">Retry</button></span>`;
+    rebind();
+  };
+  const show = (email) => {
+    if (email) {
+      _currentContacts[idx].email = email;
+      _currentContacts[idx].email_lookup_status = "found";
+      if (cell) { cell.className = ""; cell.innerHTML = escapeHtml(email); }
     } else {
-      const r = await fetch("/api/reveal-email", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apollo_id: contact.apollo_id }),
-      });
-      d = await r.json();
-    }
-    if (d.error) {
-      if (cell) cell.innerHTML = `<span class="email-note">Error: ${escapeHtml(d.error)}</span>`;
-      return;
-    }
-    const email = d.email || "(not returned by Apollo)";
-    _currentContacts[idx].email = email;
-    if (cell) {
-      cell.className = email.startsWith("(") ? "email-note" : "";
-      cell.innerHTML = escapeHtml(email);
+      _currentContacts[idx].email_lookup_status = "not_available";
+      if (cell) { cell.className = "email-note"; cell.innerHTML = "Email unavailable"; }
     }
     refreshUsage();
+  };
+  // A saved contact: the same estimate → confirm → reveal path as the CRM
+  // and Exhibitor Outreach, writing onto that canonical contact.
+  if (contact.contact_id) {
+    const row = { contact_id: contact.contact_id, email: "", apollo_person_id: contact.apollo_id || "",
+      email_lookup_status: contact.email_lookup_status };
+    if (cell) cell.innerHTML = '<span class="spinner"></span> Revealing…';
+    let res;
+    try { res = await revealBeforeUse([row], "reveal this address", "揭示邮箱"); } catch (e) { res = { failed: 1 }; }
+    if (res.cancelled) { if (cell) cell.innerHTML = original; rebind(); return; }
+    if (res.failed || !(contact.contact_id in (res.emails || {}))) { failed(); return; }
+    show(res.emails[contact.contact_id]);
+    return;
+  }
+  // Not saved (legacy): an explicit, confirmed reveal by Apollo id.
+  const ok = await confirmReveal(`Reveal the email address for ${contact.name || "this contact"}?`,
+    `揭示 ${contact.name || "该联系人"} 的邮箱？`, 1);
+  if (!ok) return;
+  if (cell) cell.innerHTML = '<span class="spinner"></span> Revealing…';
+  try {
+    const r = await fetch("/api/reveal-email", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apollo_id: contact.apollo_id, allowApollo: true }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error || d.needsApollo) { failed(); return; }
+    show(d.email && !String(d.email).startsWith("(") ? d.email : "");
   } catch (e) {
-    if (cell) cell.innerHTML = `<span class="email-note">Error: ${escapeHtml(e.message)}</span>`;
+    failed();
   }
 }
 

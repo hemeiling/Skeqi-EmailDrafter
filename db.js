@@ -1,6 +1,7 @@
 const { Pool } = require('pg');
 const { normalizeNameKey, isInvalidCompanyName } = require('./companyKey');
 const { classifyDepartment, classifySeniority } = require('./contactClassify');
+const { safeApolloReimport } = require('./contactReimport');
 const { buildWhere, buildOrderBy, LAST_ACTIVITY_SQL, OPTION_SQL, escapeLike, companySourceForContact } = require('./contact-query');
 
 /* ── Tests may not open the production database ────────────────────────────
@@ -79,6 +80,41 @@ async function q(text, params = []) {
 async function q1(text, params = []) {
   const { rows } = await pool.query(text, params);
   return rows[0] || null;
+}
+
+/* One Apollo person = one CRM contact.
+
+   A plain partial index always (lookups by Apollo id on every search). The
+   UNIQUE index is added only when the data already satisfies it: if two
+   contacts share an Apollo id they are left exactly as they are — no delete,
+   merge or re-parent — and startup logs them for a person to review.
+   Empty/NULL ids are outside both indexes, so contacts without an Apollo id
+   (manual, business-card, email-import) stay valid in any number. */
+const APOLLO_ID_PRESENT = `apollo_person_id IS NOT NULL AND apollo_person_id <> ''`;
+async function ensureApolloPersonIdIndexes() {
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_apollo_person_id ON contacts (apollo_person_id) WHERE ${APOLLO_ID_PRESENT}`);
+  const { rows: [have] } = await pool.query(`SELECT to_regclass('uq_contacts_apollo_person_id') IS NOT NULL AS ok`);
+  if (have.ok) return { unique: true, duplicates: [] };
+  const { rows: dups } = await pool.query(`
+    SELECT apollo_person_id, array_agg(id ORDER BY id) AS contact_ids
+      FROM contacts WHERE ${APOLLO_ID_PRESENT}
+     GROUP BY apollo_person_id HAVING count(*) > 1
+     ORDER BY apollo_person_id LIMIT 50`);
+  if (dups.length) {
+    console.warn(`[contacts] ${dups.length}${dups.length === 50 ? '+' : ''} Apollo person id(s) are shared by more than one contact; `
+      + 'the unique index was NOT created and no contact was changed. Review: '
+      + dups.slice(0, 10).map((d) => `[${d.contact_ids.join(',')}]`).join(' '));
+    return { unique: false, duplicates: dups };
+  }
+  try {
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_contacts_apollo_person_id ON contacts (apollo_person_id) WHERE ${APOLLO_ID_PRESENT}`);
+  } catch (e) {
+    // A duplicate written between the check and the build: the build fails
+    // atomically, nothing is changed, and the app runs on the plain index.
+    console.warn('[contacts] unique Apollo person id index not created:', e.message);
+    return { unique: false, duplicates: [] };
+  }
+  return { unique: true, duplicates: [] };
 }
 
 async function initDb() {
@@ -288,6 +324,7 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_company_lower ON contacts (LOWER(company))`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_company_id ON contacts (company_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_contacts_last_contacted ON contacts (last_contacted_at)`);
+  await ensureApolloPersonIdIndexes();
   /* Prefix/contains matching on names and email needs trigram support;
      pg_trgm is available on Neon. Skipped silently where it is not — the
      filters still work, just without the index. */
@@ -2717,7 +2754,16 @@ async function updateContactDraft(id, draft) {
   `, [draft.subject || '', draft.body || '', draft.followup || '', draft.rationale || '', id]);
 }
 
-async function findExistingContact(email, fullName, company, linkedinUrl) {
+async function findExistingContact(email, fullName, company, linkedinUrl, apolloPersonId) {
+  // Apollo's own person id is the strongest identity we have: it survives a
+  // renamed title, a masked surname and the missing email of a search result.
+  if (apolloPersonId && String(apolloPersonId).trim()) {
+    const row = await q1(
+      `SELECT * FROM contacts WHERE ${APOLLO_ID_PRESENT} AND apollo_person_id = $1 ORDER BY id LIMIT 1`,
+      [String(apolloPersonId).trim()]
+    );
+    if (row) return row;
+  }
   if (email && email.trim()) {
     const row = await q1(
       `SELECT * FROM contacts WHERE email != '' AND LOWER(email) = LOWER($1) LIMIT 1`,
@@ -2861,12 +2907,45 @@ async function updateContact(id, c) {
 }
 
 async function upsertContact(c) {
-  const existing = await findExistingContact(c.email, c.full_name, c.company, c.linkedin_url);
+  const existing = await findExistingContact(c.email, c.full_name, c.company, c.linkedin_url, c.apollo_person_id);
   if (existing) {
     await updateContact(existing.id, c);
     return { id: existing.id, updated: true };
   }
   return { id: await insertContact(c), updated: false };
+}
+
+/* Save a person found by an Apollo SEARCH (never a reveal). The same Apollo
+   person always lands on the same canonical contact, and an existing contact
+   is only ever filled in — see contactReimport.js for exactly what a search
+   may and may not change. New people are inserted as given. */
+async function upsertApolloSearchContact(c) {
+  const merge = async (row) => {
+    const patch = safeApolloReimport(row, c);
+    try {
+      await updateContact(row.id, patch);
+    } catch (e) {
+      // Filling in an Apollo id another contact took a moment ago: keep the
+      // rest of the refresh, leave this contact's id empty.
+      if (!(e && e.code === '23505' && patch.apollo_person_id)) throw e;
+      delete patch.apollo_person_id;
+      await updateContact(row.id, patch);
+    }
+    return { id: row.id, updated: true, existing: row };
+  };
+  const existing = await findExistingContact(c.email, c.full_name, c.company, c.linkedin_url, c.apollo_person_id);
+  if (existing) return merge(existing);
+  try {
+    return { id: await insertContact(c), updated: false, existing: null };
+  } catch (e) {
+    // Two searches saving the same person at once: the unique index turns the
+    // loser's insert into an update of the winner's row.
+    if (e && e.code === '23505' && c.apollo_person_id) {
+      const row = await findExistingContact('', '', '', '', c.apollo_person_id);
+      if (row) return merge(row);
+    }
+    throw e;
+  }
 }
 
 /* Contact list columns — every column except the Apollo blob.
@@ -5648,7 +5727,7 @@ module.exports = {
   upsertCompany, findCompanyByName, getCompany, listCompanies, listCompanySummaries, getCompanyContacts,
   // contacts
   insertContact, listContacts, getContact, listContactsByCompany, deleteContact, deleteContacts,
-  updateContact, updateContactDraft, findExistingContact, upsertContact, splitName,
+  updateContact, updateContactDraft, findExistingContact, upsertContact, upsertApolloSearchContact, ensureApolloPersonIdIndexes, splitName,
   searchContacts, filterContacts, patchContactCrmFields, logContactActivity, listContactActivity,
   listContactNamesForBrowse,
   // business cards

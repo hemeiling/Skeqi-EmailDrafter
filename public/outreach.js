@@ -32,13 +32,6 @@
     contacted_partial: { label: "Contacted",   cls: "xo-st-green-l", hint: "Some, not all, emailable contacts have been sent to" },
     contacted_all:     { label: "Contacted",   cls: "xo-st-green",  hint: "Every emailable contact has been sent to" },
   };
-  const CONTACT_STATUS = {
-    sent: { label: "Sent", cls: "xo-st-green" },
-    drafted: { label: "Drafted", cls: "xo-st-blue" },
-    no_draft: { label: "No draft", cls: "xo-st-purple" },
-    email_locked: { label: "Email locked", cls: "xo-st-amber" },
-    no_email: { label: "No email", cls: "xo-st-grey" },
-  };
 
   const state = {
     initialised: false,
@@ -49,6 +42,7 @@
     rows: [],
     expanded: new Set(),
     details: new Map(),       // exhibitor_id → { loading, error, data }
+    reveal: new Map(),        // contact_id → 'pending' | 'failed' (this page's reveals only)
     listSeq: 0,
     summarySeq: 0,
     facets: null,
@@ -416,33 +410,31 @@
   }
 
   function contactHtml(c, best, exId) {
-    const st = CONTACT_STATUS[c.status] || { label: c.status, cls: "xo-st-grey" };
+    const S = window.xoStatus;
+    const rs = state.reveal.get(c.id);
+    const st = S.contactBadge(c);
     const isBest = best && best.contact_id === c.id;
-    const email = c.has_email
-      ? `<a href="mailto:${esc(c.email.trim())}" data-no-i18n>${esc(c.email.trim())}</a>`
-      : `<span class="xo-muted">${c.revealable ? "🔒 Locked in Apollo" : "No email"}</span>`;
-    let draftCell = `<span class="xo-muted">No draft</span>`;
+    const es = S.emailState(c, rs);
+    const email = es.kind === "email"
+      ? `<a href="mailto:${esc(es.email)}" data-no-i18n>${esc(es.email)}</a>`
+      : es.kind === "pending" ? `<span class="xo-muted"><span class="spinner"></span> ${es.label}</span>`
+      : es.kind === "failed" ? `<span class="xo-reveal-err" role="alert">${es.label}</span>`
+      : `<span class="xo-muted">${es.label}</span>`;
+    let draftCell = `<span class="xo-muted">Not drafted</span>`;
     if (c.draft_id) draftCell = `<span class="xo-chip xo-st-blue">Drafted</span> <span class="xo-muted">v${c.draft_version || 1} · ${esc(fmtDate(c.draft_updated_at))}</span>`;
     else if (!c.has_email) draftCell = `<span class="xo-muted">—</span>`;
     const sentCell = c.last_sent_id
-      ? `<span class="xo-chip xo-st-green">Sent</span> <span class="xo-muted">${esc(fmtDate(c.last_sent_at))} · ${c.last_sent_source === "manual" ? "manual" : "system"}${c.last_sent_user ? ` · ${esc(c.last_sent_user)}` : ""}</span>`
+      ? `<span class="xo-muted">${esc(fmtDate(c.last_sent_at))} · ${c.last_sent_source === "manual" ? "manual" : "system"}${c.last_sent_user ? ` · ${esc(c.last_sent_user)}` : ""}${c.replied ? " · replied" : ""}</span>`
       : `<span class="xo-muted">Not sent</span>`;
 
-    const btn = (act, label, kind) =>
-      `<button type="button" class="btn-sm ${kind || "btn-ghost"}" data-act="${act}" data-cid="${c.id}">${label}</button>`;
-    const actions = [];
-    if (c.status === "no_draft") actions.push(btn("draft", "Draft email", "btn-primary"), btn("mark", "Mark sent"));
-    if (c.status === "drafted") actions.push(btn("draft", "View/Edit draft", "btn-primary"), btn("mark", "Mark sent"));
-    if (c.status === "sent") {
-      actions.push(btn("draft", "View emails"));
-      if (c.last_sent_source === "manual") actions.push(btn("undo", "Undo sent"));
-    }
-    if (c.status === "email_locked") actions.push(btn("draft", "Reveal & draft", "btn-primary"));
+    const actions = S.contactActions(c, rs).map((a) =>
+      `<button type="button" class="btn-sm ${a.primary ? "btn-primary" : "btn-ghost"}" data-act="${a.act}" data-cid="${c.id}">${a.label}</button>`);
 
     return `
       <div class="xo-contact${isBest ? " is-best" : ""}" role="row" data-cid="${c.id}">
         <span class="xo-ct-who" role="cell">
           <span class="xo-ct-name" data-no-i18n>${esc(c.full_name || "(no name)")}</span>
+          <span class="xo-chip xo-ct-badge ${st.cls}" data-status="${esc(c.status)}">${st.label}</span>
           ${isBest ? `<span class="xo-best${best.basis === "title" ? " xo-best-title" : ""}" title="${esc(best.basis_label || "")}">★ Best contact</span>` : ""}
           <span class="xo-ct-title" data-no-i18n>${esc(c.job_title || "")}</span>
           ${c.link_type === "reviewed" ? `<span class="xo-via">via reviewed record <span data-no-i18n>#${c.company_id}</span></span>` : ""}
@@ -466,22 +458,52 @@
   async function contactAction(exId, cid, act, btnEl) {
     const c = contactById(exId, cid);
     if (!c) return;
+    if (act === "reveal") return revealContact(exId, c);
     if (act === "draft") return openDrafter(exId, c);
     if (act === "mark") return showMarkForm(exId, c);
     if (act === "undo") return undoSent(exId, c, btnEl);
   }
 
+  /* Reveal is its own action: it asks what it would cost, has the user
+     confirm the credit, writes the address onto the same canonical CRM
+     contact (enrich-email with allowApollo) and stops there — the drafter
+     is never opened by it. The refreshed row then offers "Draft email", or
+     shows "Email unavailable" when Apollo had none. A failed request is not
+     recorded as unavailable: it shows "Reveal failed" with Retry. */
+  async function revealContact(exId, c) {
+    if (typeof revealBeforeUse !== "function" || state.reveal.get(c.id) === "pending") return;
+    state.reveal.set(c.id, "pending");
+    renderDetail(exId);
+    let res;
+    try {
+      res = await revealBeforeUse([c], "reveal this address", "揭示邮箱");
+    } catch (e) {
+      res = { failed: 1 };
+    }
+    if (res.cancelled) {
+      state.reveal.delete(c.id);
+      renderDetail(exId);
+      return;
+    }
+    if (res.failed) {
+      state.reveal.set(c.id, "failed");
+      renderDetail(exId);
+      if (typeof showMessage === "function") showMessage("Reveal failed. Nothing was saved; you can retry.", "error");
+      return;
+    }
+    state.reveal.delete(c.id);
+    if (typeof showMessage === "function") {
+      showMessage(res.revealed ? "Email revealed and saved to the contact." : "Apollo has no email for this contact.", "info");
+    }
+    await refreshExhibitor(exId);
+  }
+
   /* The existing drafter, fed the contact in the CRM row shape it already
-     accepts. Reveal first when the address is locked, exactly as the CRM
-     table does, so the Apollo charge is confirmed by the user. */
+     accepts. Only offered once an address is held: a reveal is a separate,
+     confirmed action and is never started from here. */
   async function openDrafter(exId, c) {
     if (typeof openDraftModalForContact !== "function") return;
-    if (typeof emailNeedsApolloReveal === "function" && emailNeedsApolloReveal(c)) {
-      const rev = await revealBeforeUse([c], "address the draft", "填写收件人");
-      if (rev.cancelled) return;
-      if (rev.emails && rev.emails[c.id]) c.email = rev.emails[c.id];
-      refreshExhibitor(exId);
-    }
+    if (!c.has_email && !c.last_sent_id) return;
     let provenance = "";
     if (c.link_type === "reviewed") {
       const st = state.details.get(exId);

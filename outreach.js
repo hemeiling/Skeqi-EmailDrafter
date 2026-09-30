@@ -26,7 +26,9 @@ const relations = require('./outreachRelations');
 
    Sent is deliberately narrow. Two kinds of row prove we sent something:
 
-     • a draft the app itself delivered (delivery_status='sent', sent_at set)
+     • a draft the app itself delivered (sent_at set; delivery_status 'sent',
+       or 'replied' once the recipient answered — db.js flips the sent row
+       to 'replied', and a reply is stronger proof of contact, not weaker)
      • an email someone logged by hand as sent outside the system
        (imported_email, source='manual_entry')
 
@@ -35,7 +37,7 @@ const relations = require('./outreachRelations');
    contact writing to us — and falls back to any contact at the same domain.
    Counting those would mark people as "Sent" who were never emailed. */
 const SENT_COND = `(m.sent_at IS NOT NULL AND (
-    (m.comm_type = 'draft' AND m.delivery_status = 'sent')
+    (m.comm_type = 'draft' AND m.delivery_status IN ('sent', 'replied'))
  OR (m.comm_type = 'imported_email' AND m.source = 'manual_entry')))`;
 
 /* Drafted = a live, unsent draft in any recognised mode. Follow-ups
@@ -43,7 +45,7 @@ const SENT_COND = `(m.sent_at IS NOT NULL AND (
    nothing about whether the first touch has been prepared. */
 function draftCond(modesParam) {
   return `(m.comm_type = 'draft' AND m.parent_email_id IS NULL AND m.archived_at IS NULL
-    AND m.sent_at IS NULL AND COALESCE(m.delivery_status, '') <> 'sent'
+    AND m.sent_at IS NULL AND COALESCE(m.delivery_status, '') NOT IN ('sent', 'replied')
     AND COALESCE(NULLIF(m.draft_mode, ''), 'cold_outreach') = ANY(${modesParam}::text[]))`;
 }
 

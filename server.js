@@ -10,7 +10,7 @@ const Tesseract = require('tesseract.js');
 const {
   initDb,
   insertContact, listContacts, getContact, listContactsByCompany, deleteContact, deleteContacts,
-  updateContactDraft, findExistingContact, upsertContact, updateContact,
+  updateContactDraft, findExistingContact, upsertContact, upsertApolloSearchContact, updateContact,
   upsertCompany, findCompanyByName, getCompany, listCompanies, listCompanySummaries, getCompanyContacts,
   getOrCreateAccount, getAccount, findAccountByName, contactCountsByAccountNames, listAccounts, listAccountGroups, getAccountContacts,
   listCompaniesForAccount, mergeAccounts,
@@ -2566,15 +2566,15 @@ app.post('/api/leads/search', async (req, res) => {
         const cleanEmail = cleanApolloEmail(c.email);
         const rawJson = c._apollo_raw ? JSON.stringify(c._apollo_raw) : undefined;
         console.log(`[leads/search] ${c.name} @ ${c.company}: apollo_email_fields={email:${JSON.stringify(c._apollo_raw && c._apollo_raw.email)}, personal_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.personal_emails)}, business_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.business_emails)}, has_email:${c._apollo_raw && c._apollo_raw.has_email}} cleanEmail=${JSON.stringify(cleanEmail)}`);
-        /* A person already in the CRM keeps the company they are filed under —
-           a search does not re-link existing records. Only new people are
-           attached to the searched company. */
-        const prior = await findExistingContact(cleanEmail || '', c.name, target.name || companyName, c.linkedin || '');
-        const keepCompany = prior && prior.company_id && prior.company_id !== lastCompanyId;
-        const { id, updated } = await upsertContact({
+        /* The same Apollo person always resolves to the same canonical
+           contact (Apollo id first, then email / LinkedIn / name). A person
+           already in the CRM keeps their company, name, revealed email and
+           lookup state — a search only fills gaps (contactReimport.js). Only
+           new people are attached to the searched company. */
+        const { id, updated, existing: prior } = await upsertApolloSearchContact({
           full_name: c.name, job_title: c.title, department: c.department, seniority: c.seniority,
-          company: keepCompany ? prior.company : (target.name || companyName),
-          company_id: keepCompany ? prior.company_id : lastCompanyId,
+          company: target.name || companyName,
+          company_id: lastCompanyId,
           website: c.company_website,
           email: cleanEmail, linkedin_url: c.linkedin, address: c.location,
           confidence: c.confidence, relevance: c.relevance,
@@ -2587,7 +2587,9 @@ app.post('/api/leads/search', async (req, res) => {
           email_source: cleanEmail ? 'apollo_search' : 'none'
         });
         c.contact_id = id;
-        c.email_lookup_status = cleanEmail ? 'found' : 'not_checked';
+        // Report what the CRM now holds, not what this search returned.
+        c.email_lookup_status = cleanEmail ? 'found' : ((prior && prior.email_lookup_status) || 'not_checked');
+        if (!cleanEmail && prior && prior.email) c.email = prior.email;
         if (updated) duplicatesSkipped++; else importedCount++;
         console.log(`[leads/search] -> contact_id=${id} updated=${updated} email_saved=${JSON.stringify(cleanEmail)}`);
         const basis = apolloIdentity.BASIS_TEXT[c.identity] || c.identity || 'unrecorded';
@@ -2637,7 +2639,7 @@ app.post('/api/leads/save', async (req, res) => {
   try {
     const c = req.body;
     const saveEmail = c.email && !String(c.email).includes('N/A') && !String(c.email).includes('not returned') ? c.email : '';
-    const { id, updated } = await upsertContact({
+    const { id, updated } = await upsertApolloSearchContact({
       full_name: c.name,
       job_title: c.title,
       company: c.company,
@@ -2671,6 +2673,11 @@ app.post('/api/reveal-email', async (req, res) => {
     const apolloId = (req.body.apollo_id || '').trim();
     const contactId = req.body.contact_id || null;
     if (!apolloId) return res.status(400).json({ error: 'No apollo_id provided' });
+    // Same rule as enrich-email: a paid reveal only on an explicit request.
+    if (!(req.body && req.body.allowApollo === true)) {
+      return res.json({ email: '', needsApollo: true, estimatedCredits: 1, creditsUsed: 0,
+        message: 'An Apollo reveal is required for this address and was not requested.' });
+    }
     if (!apolloConfigured()) return res.status(400).json({ error: 'Apollo API key not configured' });
 
     const result = await revealPersonEmail(apolloId, config.APOLLO_API_KEY);
