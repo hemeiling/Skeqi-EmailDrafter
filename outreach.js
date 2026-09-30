@@ -326,18 +326,30 @@ async function countOnly(pool, eventId, f) {
 async function summary(pool, eventId, input = {}) {
   const f = normalizeFilters({ include_withdrawn: input.include_withdrawn });
   const params = baseParams(eventId, f);
+  /* Two units, never mixed:
+       exhibitor counts — rows of the exhibitor list, the same rows the table,
+                          its filters and the export count;
+       contact counts   — distinct CRM contacts, read from cs (one row per
+                          contact), NOT summed across exhibitor rows. Two
+                          listings can point at one CRM company (production
+                          has "iTECH" and "ITECH" → company 896); summing per
+                          row would count that company's contacts twice. */
   const { rows: [k] } = await pool.query(`${baseRowsSql()}
     SELECT count(*)::int AS exhibitors,
            count(*) FILTER (WHERE company_id IS NULL)::int AS unmatched,
            count(*) FILTER (WHERE contacts > 0)::int AS with_contacts,
-           COALESCE(sum(contacts), 0)::int AS contacts,
+           (SELECT count(*) FROM cs)::int AS contacts,
            count(*) FILTER (WHERE emailable > 0)::int AS with_email,
-           COALESCE(sum(emailable), 0)::int AS emailable_contacts,
+           count(*) FILTER (WHERE emailable = 0)::int AS without_email,
+           (SELECT count(DISTINCT (cs.company_id, cs.email_norm)) FROM cs WHERE cs.has_email)::int AS emailable_contacts,
            count(*) FILTER (WHERE drafted > 0)::int AS drafted,
-           COALESCE(sum(drafted), 0)::int AS drafted_contacts,
+           (SELECT count(*) FROM cs WHERE cs.drafted AND NOT cs.sent)::int AS drafted_contacts,
            count(*) FILTER (WHERE sent > 0)::int AS sent,
-           COALESCE(sum(sent), 0)::int AS sent_contacts,
+           (SELECT count(*) FROM cs WHERE cs.sent)::int AS sent_contacts,
            count(*) FILTER (WHERE emailable > 0 AND sent = 0)::int AS needs_outreach,
+           (SELECT count(DISTINCT (cs.company_id, cs.email_norm)) FROM cs
+             WHERE cs.has_email AND cs.company_id IN (
+               SELECT company_id FROM rows WHERE emailable > 0 AND sent = 0))::int AS needs_outreach_contacts,
            count(*) FILTER (WHERE outreach_status IN ('no_contact', 'no_email'))::int AS needs_discovery
       FROM rows`, params);
   const { rows: classes } = await pool.query(`${baseRowsSql()}

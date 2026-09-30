@@ -48,6 +48,8 @@ const I18N_PAIRS = [
   ["With email", "有邮箱"],
   ["Drafted", "已起草"],
   ["Needs outreach", "待拓展"],
+  ["exhibitors", "家展商"],
+  ["exhibitor", "家展商"],
   ["Booth", "展位"],
   ["Classification", "分类"],
   ["Outreach status", "拓展状态"],

@@ -124,19 +124,34 @@
     $("xo-verified").textContent = ev && ev.verified_at ? `List verified ${fmtDate(ev.verified_at)}` : "";
   }
 
+  /* Every tile states two units and never mixes them: the big number counts
+     EXHIBITORS (rows of the exhibitor list — what the table, its filters and
+     the export count), the line under it counts individual CRM CONTACTS.
+     Clicking a tile applies the filter whose row total equals the big number. */
+  const n = (v) => Number(v || 0).toLocaleString();
   const KPI_DEFS = [
-    { key: "exhibitors", label: "Exhibitors", sub: (k) => `${k.unmatched} unmatched`, filter: {} ,
-      title: "Exhibitors currently listed for this show" },
-    { key: "with_contacts", label: "With contacts", sub: (k) => plural(k.contacts, "contact"), filter: { has_contacts: "yes" },
-      title: "Exhibitors with at least one CRM contact" },
-    { key: "with_email", label: "With email", sub: (k) => `${k.emailable_contacts} emailable`, filter: { has_email: "yes" },
-      title: "Exhibitors with at least one contact who has a usable email" },
-    { key: "drafted", label: "Drafted", sub: (k) => `${k.drafted_contacts} awaiting send`, filter: { drafted: "yes" },
-      title: "Exhibitors with at least one unsent draft" },
-    { key: "sent", label: "Sent", sub: (k) => plural(k.sent_contacts, "contact") + " sent", filter: { sent: "yes" },
-      title: "Exhibitors where at least one contact has been emailed (not necessarily all)" },
-    { key: "needs_outreach", label: "Needs outreach", sub: (k) => `+${k.needs_discovery} need contacts`, filter: { status: "needs_outreach" },
-      title: "Exhibitors with an emailable contact and nobody sent to yet" },
+    { key: "exhibitors", label: "Exhibitors", unit: "exhibitor",
+      sub: (k) => [`${n(k.unmatched)} not linked to a CRM company`, `${n(k.without_email)} without an emailable contact`],
+      filter: {},
+      title: "Exhibitors on the current show list. Not linked: no CRM company matched yet. "
+        + "Without an emailable contact: no contact at the company has a usable email address (includes the not-linked ones)." },
+    { key: "with_contacts", label: "With contacts", unit: "exhibitor",
+      sub: (k) => [plural(k.contacts, "individual contact")], filter: { has_contacts: "yes" },
+      title: "Exhibitors whose CRM company has at least one contact. Below: the number of distinct contacts at those exhibitors." },
+    { key: "with_email", label: "With email", unit: "exhibitor",
+      sub: (k) => [plural(k.emailable_contacts, "emailable contact")], filter: { has_email: "yes" },
+      title: "Exhibitors with at least one contact who has a usable email. Below: distinct usable addresses at those exhibitors." },
+    { key: "drafted", label: "Drafted", unit: "exhibitor",
+      sub: (k) => [`${plural(k.drafted_contacts, "contact")} with an unsent draft`], filter: { drafted: "yes" },
+      title: "Exhibitors where at least one contact has a draft that has not been sent. Below: how many contacts have one." },
+    { key: "sent", label: "Contacted", unit: "exhibitor",
+      sub: (k) => [`${plural(k.sent_contacts, "contact")} emailed`], filter: { sent: "yes" },
+      title: "Exhibitors where at least one contact has been emailed — not necessarily every contact. "
+        + "Below: individual contacts emailed, from SKQ or marked as sent." },
+    { key: "needs_outreach", label: "Needs outreach", unit: "exhibitor",
+      sub: (k) => [`${plural(k.needs_outreach_contacts, "emailable contact")}, none emailed yet`], filter: { status: "needs_outreach" },
+      title: "Exhibitors with at least one emailable contact where nobody has been emailed yet (drafted or not). "
+        + "Below: the emailable contacts at those exhibitors." },
   ];
 
   function renderKpis(k) {
@@ -144,8 +159,8 @@
       <button type="button" class="dash-stat xo-kpi" data-kpi="${d.key}" title="${esc(d.title)}">
         <span class="dash-stat-body">
           <span class="dash-stat-label">${esc(d.label)}</span>
-          <span class="dash-stat-value">${Number(k[d.key] || 0).toLocaleString()}</span>
-          <span class="xo-kpi-sub">${esc(d.sub(k))}</span>
+          <span class="dash-stat-value">${n(k[d.key])}<span class="dash-stat-unit">${esc(Number(k[d.key]) === 1 ? d.unit : d.unit + "s")}</span></span>
+          ${d.sub(k).map((line) => `<span class="xo-kpi-sub">${esc(line)}</span>`).join("")}
         </span>
       </button>`).join("");
     $("xo-kpis").querySelectorAll(".xo-kpi").forEach((b) => {
@@ -524,16 +539,31 @@
     has_contacts: { yes: "Has contacts", no: "No contacts" },
     has_email: { yes: "Has email", no: "No email" },
     drafted: { yes: "Has drafts", no: "No drafts" },
-    sent: { yes: "Sent to someone", no: "Nobody sent" },
+    sent: { yes: "Contacted", no: "Not contacted" },
     status: { needs_outreach: "Needs outreach", contacted: "Contacted", ...Object.fromEntries(
       Object.entries(STATUS).map(([k, v]) => [k, v.label + (k === "contacted_partial" ? " (partial)" : k === "contacted_all" ? " (all)" : "")])) },
   };
 
+  /* Debounce timers for the two text boxes. They carry no value: when one
+     fires it commits whatever the box holds at that moment. */
+  const textTimers = { q: null, booth: null };
+  const TEXT_INPUT = { q: "xo-search", booth: "xo-f-booth" };
+
+  /* Every filter change goes through here. Pending text is committed first
+     (see outreach-filters.js), so re-rendering the controls afterwards can
+     only write back what the user typed — never an older value over it. */
   function applyFilters(patch) {
-    Object.assign(state.filters, patch);
+    for (const key of Object.keys(textTimers)) { clearTimeout(textTimers[key]); textTimers[key] = null; }
+    const typed = { q: $(TEXT_INPUT.q).value, booth: $(TEXT_INPUT.booth).value };
+    state.filters = window.xoFilters.mergeFilters(state.filters, patch || {}, typed);
     state.page = 1;
     syncFilterInputs();
     loadList();
+  }
+
+  function scheduleTextFilter(key) {
+    clearTimeout(textTimers[key]);
+    textTimers[key] = setTimeout(() => { textTimers[key] = null; applyFilters({}); }, 300);
   }
 
   function clearFilters() {
@@ -543,8 +573,9 @@
 
   function syncFilterInputs() {
     const f = state.filters;
-    $("xo-search").value = f.q;
-    $("xo-f-booth").value = f.booth;
+    // Only when different: rewriting an identical value would still move the caret.
+    if ($("xo-search").value.trim() !== f.q) $("xo-search").value = f.q;
+    if ($("xo-f-booth").value.trim() !== f.booth) $("xo-f-booth").value = f.booth;
     $("xo-f-classification").value = f.classification;
     for (const k of ["has_contacts", "has_email", "drafted", "sent", "status", "sort"]) $(`xo-f-${k}`).value = f[k];
     $("xo-f-withdrawn").checked = f.include_withdrawn;
@@ -600,16 +631,14 @@
     if (state.initialised) return;
     state.initialised = true;
 
-    let t = null;
-    $("xo-search").addEventListener("input", (e) => {
-      clearTimeout(t);
-      t = setTimeout(() => applyFilters({ q: e.target.value.trim(), exhibitor: "" }), 300);
-    });
-    let tb = null;
-    $("xo-f-booth").addEventListener("input", (e) => {
-      clearTimeout(tb);
-      tb = setTimeout(() => applyFilters({ booth: e.target.value.trim() }), 300);
-    });
+    /* Chinese (and other IME) input sends input events for the unfinished
+       composition; searching on those would query half-typed pinyin. Wait for
+       the composition to end, then debounce as usual. */
+    for (const [key, id] of Object.entries(TEXT_INPUT)) {
+      const el = $(id);
+      el.addEventListener("input", (e) => { if (!e.isComposing) scheduleTextFilter(key); });
+      el.addEventListener("compositionend", () => scheduleTextFilter(key));
+    }
     for (const k of ["classification", "has_contacts", "has_email", "drafted", "sent", "status", "sort"]) {
       $(`xo-f-${k}`).addEventListener("change", (e) => applyFilters({ [k]: e.target.value }));
     }

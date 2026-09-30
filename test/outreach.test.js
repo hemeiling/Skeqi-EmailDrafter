@@ -362,10 +362,35 @@ test('summary KPIs are exact and company-level', async () => {
     with_email: kpis.with_email, drafted: kpis.drafted, sent: kpis.sent,
     needs_outreach: kpis.needs_outreach, sent_contacts: kpis.sent_contacts,
     needs_discovery: kpis.needs_discovery,
+    contacts: kpis.contacts, emailable_contacts: kpis.emailable_contacts, drafted_contacts: kpis.drafted_contacts,
+    needs_outreach_contacts: kpis.needs_outreach_contacts, without_email: kpis.without_email,
   }, {
     exhibitors: 8, unmatched: 1, with_contacts: 5, with_email: 4, drafted: 1, sent: 2,
     needs_outreach: 2, sent_contacts: 2, needs_discovery: 3,
+    // 7 contacts: locked 1, needs 1, drafted 1, partial 3 (one address twice), all 1.
+    contacts: 7, emailable_contacts: 5, drafted_contacts: 1,
+    needs_outreach_contacts: 2, without_email: 4,
   });
+  assert.equal(kpis.with_email + kpis.without_email, kpis.exhibitors, 'with + without email partition the list');
+});
+
+test('two listings pointing at one CRM company: exhibitors counted twice, contacts once', async () => {
+  const before = (await outreach.summary(pool, eventId)).kpis;
+  // As in production: "iTECH" and "ITECH" are separate listings matched to one company.
+  const twin = await exhibitor('Partial Co second listing', F.partialCo, ['3002']);
+  try {
+    const after = (await outreach.summary(pool, eventId)).kpis;
+    assert.equal(after.exhibitors, before.exhibitors + 1, 'the table has one more row');
+    assert.equal(after.with_contacts, before.with_contacts + 1, 'and that row has contacts');
+    assert.equal(after.contacts, before.contacts, 'no contact is counted twice');
+    assert.equal(after.emailable_contacts, before.emailable_contacts);
+    assert.equal(after.sent_contacts, before.sent_contacts);
+    assert.equal(after.drafted_contacts, before.drafted_contacts);
+    const { total } = await outreach.listExhibitors(pool, eventId, { has_contacts: 'yes' }, { page_size: 1 });
+    assert.equal(total, after.with_contacts, 'the KPI still equals its filter total');
+  } finally {
+    await pool.query('DELETE FROM event_exhibitors WHERE id = $1', [twin]);
+  }
 });
 
 test('contact detail: per-contact status, CRM row shape, best contact only with evidence', async () => {

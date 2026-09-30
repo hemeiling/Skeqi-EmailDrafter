@@ -2365,10 +2365,18 @@
 
   .xo-kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; min-height: 84px; }
   .xo-kpis.xo-loading { opacity: 0.55; }
-  .xo-kpi { text-align: left; font: inherit; cursor: pointer; width: 100%; }
+  /* min-width: 0 lets a tile shrink to its grid track; without it the
+     unit ("exhibitors 家展商") sets a minimum width and pushes the page wide. */
+  /* white-space: buttons inherit nowrap from the app's button styles; the
+     tile's lines must wrap instead of running out of the card. */
+  .xo-kpi { text-align: left; font: inherit; cursor: pointer; width: 100%; min-width: 0; white-space: normal; align-items: flex-start; }
+  .xo-kpi .dash-stat-body { min-width: 0; }
+  .xo-kpi .dash-stat-value { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 4px; }
   .xo-kpi:hover { border-color: var(--color-primary-border); }
   .xo-kpi:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
-  .xo-kpi-sub { display: block; font-size: 0.7rem; color: var(--color-text-tertiary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Wraps rather than truncating: the unit is the point of the line. */
+  .xo-kpi-sub { display: block; font-size: 0.7rem; color: var(--color-text-tertiary); margin-top: 2px; line-height: 1.3; }
+  .xo-kpi .dash-stat-unit { font-size: 0.72rem; font-weight: 600; margin-left: 0; letter-spacing: 0; }
 
   .xo-searchbar { margin-bottom: 10px; }
   .xo-filter-toggle { display: none; }
@@ -3582,7 +3590,7 @@
       <label class="xo-f"><span>Contacts</span><select id="xo-f-has_contacts"><option value="">Any</option><option value="yes">Has contacts</option><option value="no">No contacts</option></select></label>
       <label class="xo-f"><span>Email</span><select id="xo-f-has_email"><option value="">Any</option><option value="yes">Has email</option><option value="no">No email</option></select></label>
       <label class="xo-f"><span>Draft</span><select id="xo-f-drafted"><option value="">Any</option><option value="yes">Has drafts</option><option value="no">No drafts</option></select></label>
-      <label class="xo-f"><span>Sent</span><select id="xo-f-sent"><option value="">Any</option><option value="yes">Sent to someone</option><option value="no">Nobody sent</option></select></label>
+      <label class="xo-f"><span>Contacted</span><select id="xo-f-sent"><option value="">Any</option><option value="yes">Contacted</option><option value="no">Not contacted</option></select></label>
       <label class="xo-f"><span>Outreach status</span><select id="xo-f-status">
         <option value="">Any status</option>
         <option value="needs_outreach">Needs outreach</option>
@@ -4753,6 +4761,7 @@
 <script src="/job-snapshot.js"></script>
 <script src="/qwen-research.js"></script>
   <script src="/app.js"></script>
+  <script src="/outreach-filters.js"></script>
   <script src="/outreach.js"></script>
 <script src="/i18n.js"></script>
   <!-- The assistant. Mounted in the shell rather than in a view: Booth Map and
