@@ -316,3 +316,56 @@ test('initDb is additive and safe to re-run over existing decisions', async () =
   const { rows: [e] } = await pool.query('SELECT company_id FROM event_exhibitors WHERE id = $1', [F.ex]);
   assert.equal(e.company_id, F.direct, 'the canonical exhibitor link is untouched');
 });
+
+test('reviewed company later becomes the direct link: shadowed everywhere, history untouched — and applies again when it stops being direct', async () => {
+  const r = await rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.strong, decision: 'same_company',
+    reason: 'Shadowing test', user: 'reviewer', eventId: F.event, env: REVIEWER });
+  const strongContact = (await pool.query('SELECT id FROM contacts WHERE company_id = $1', [F.strong])).rows[0].id;
+  const row = async () => (await outreach.listExhibitors(pool, F.event, { exhibitor: F.ex }, { all: true })).rows[0];
+  const relRow = async () => (await pool.query('SELECT * FROM exhibitor_company_relations WHERE id = $1', [r.id])).rows[0];
+  const before = await relRow();
+  assert.equal((await row()).reviewed_contacts, 1, 'applies while the company is not the direct link');
+
+  // ── An Exhibitor Refresh links the exhibitor directly to the reviewed company.
+  await pool.query('UPDATE event_exhibitors SET company_id = $2 WHERE id = $1', [F.ex, F.strong]);
+  const shadowRow = await row();
+  assert.equal(shadowRow.contacts, 1, 'the contact counts once — as direct');
+  assert.equal(shadowRow.reviewed_contacts, 0, 'no "+N via reviewed records"');
+  const det = await outreach.exhibitorDetail(pool, F.ex);
+  assert.deepEqual(det.contacts.map((c) => [c.id, c.link_type]), [[strongContact, 'direct']]);
+  assert.deepEqual(det.reviewed, [], 'not repeated under reviewed records');
+  const exp = (await outreach.exportRows(pool, F.event, { exhibitor: F.ex })).filter((x) => x.exhibitor_id === F.ex);
+  assert.deepEqual(exp.map((x) => [x.contact_link_type, x.reviewed_relation_id]), [['Direct', null]], 'one export row, direct provenance');
+  const sentDirect = await outreach.markSent(db, { contactId: strongContact, sentAt: '2026-09-22', userId: 'reviewer', eventId: F.event });
+  const auditOf = async (id) => (await pool.query(`SELECT metadata FROM crm_activity WHERE action = 'outreach.mark_sent' AND object_id = $1`, [String(id)])).rows[0].metadata;
+  assert.deepEqual([(await auditOf(sentDirect.id)).link, (await auditOf(sentDirect.id)).relation_id], ['direct', null], 'Mark Sent goes through the direct link');
+  assert.equal((await outreach.draftEventContext(pool, { id: F.strong })).source, 'exhibitor', 'drafting uses the direct link');
+  const p = await panel(F.ex);
+  assert.equal(where(p, F.strong), null, 'not shown as a candidate or reviewed record');
+  assert.deepEqual(p.shadowed.map((s) => s.id), [r.id], 'listed as superseded, with an explanation');
+  assert.match(p.shadowed[0].note, /Superseded by the current direct company link/);
+  assert.deepEqual(await relRow(), before, 'the decision row itself is not changed');
+  const kp = (await outreach.summary(pool, F.event)).kpis;
+  const { rows: [distinct] } = await pool.query(
+    `SELECT count(DISTINCT c.id)::int n FROM contacts c JOIN event_exhibitors e ON e.company_id = c.company_id WHERE e.event_id = $1 AND e.attendance_status = 'listed'`, [F.event]);
+  assert.equal(kp.contacts, distinct.n, 'KPI contacts are distinct direct contacts — nothing counted twice');
+
+  // ── Reverse: the direct link moves back; the still-live decision applies again.
+  await pool.query('UPDATE event_exhibitors SET company_id = $2 WHERE id = $1', [F.ex, F.direct]);
+  assert.equal((await row()).reviewed_contacts, 1);
+  const det2 = await outreach.exhibitorDetail(pool, F.ex);
+  assert.deepEqual(det2.reviewed.map((g) => g.relation.id), [r.id]);
+  const exp2 = (await outreach.exportRows(pool, F.event, { exhibitor: F.ex })).filter((x) => x.exhibitor_id === F.ex);
+  assert.deepEqual(exp2.map((x) => [x.contact_link_type, x.reviewed_relation_id]), [['Reviewed', r.id]]);
+  const sentReviewed = await outreach.markSent(db, { contactId: strongContact, sentAt: '2026-09-23', userId: 'reviewer', eventId: F.event });
+  assert.deepEqual([(await auditOf(sentReviewed.id)).link, (await auditOf(sentReviewed.id)).relation_id], ['reviewed', r.id]);
+  assert.equal((await outreach.draftEventContext(pool, { id: F.strong })).source, 'reviewed_relation');
+  const p2 = await panel(F.ex);
+  assert.equal(where(p2, F.strong), 'reviewed');
+  assert.deepEqual(p2.shadowed, []);
+  assert.deepEqual(await relRow(), before, 'still the same, untouched decision');
+  // Both recorded sends remain as history.
+  for (const id of [sentDirect.id, sentReviewed.id]) assert.ok(!(await db.getCommunication(id)).deleted_at);
+
+  await rel.revokeDecision(pool, { relationId: r.id, user: 'reviewer', eventId: F.event, env: REVIEWER });
+});

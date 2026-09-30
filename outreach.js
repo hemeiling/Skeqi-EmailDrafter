@@ -225,9 +225,11 @@ function baseRowsSql() {
     SELECT r.exhibitor_id, count(DISTINCT c.id)::int AS reviewed_contacts,
            count(DISTINCT r.related_company_id)::int AS reviewed_records
       FROM exhibitor_company_relations r
+      JOIN event_exhibitors e ON e.id = r.exhibitor_id
       JOIN contacts c ON c.company_id = r.related_company_id
      WHERE r.decision = 'same_company' AND r.revoked_at IS NULL
        AND r.exhibitor_id IN (SELECT exhibitor_id FROM ex)
+       AND ${relations.APPLIES_SQL}
      GROUP BY r.exhibitor_id
   ),
   rows AS (
@@ -587,7 +589,7 @@ async function markSent(db, { contactId, sentAt, draftId, notes, userId, eventId
        SELECT 'reviewed', r.id, 1
          FROM exhibitor_company_relations r JOIN event_exhibitors e ON e.id = r.exhibitor_id
         WHERE e.event_id = $1 AND r.related_company_id = $2
-          AND r.decision = 'same_company' AND r.revoked_at IS NULL
+          AND r.decision = 'same_company' AND r.revoked_at IS NULL AND ${relations.APPLIES_SQL}
      ) x ORDER BY pref LIMIT 1`,
     [eventId, contact.company_id || -1]);
   if (!atShow) {
@@ -855,7 +857,7 @@ async function draftEventContext(pool, company) {
          LEFT JOIN exhibitor_booths b ON b.exhibitor_id = e.id AND b.retired_at IS NULL
          LEFT JOIN companies xco ON xco.id = e.company_id
         WHERE r.related_company_id = $1 AND r.decision = 'same_company' AND r.revoked_at IS NULL
-          AND e.event_id = $2 AND e.attendance_status = 'listed'
+          AND e.event_id = $2 AND e.attendance_status = 'listed' AND ${relations.APPLIES_SQL}
         GROUP BY ev.name`, [company.id, currentEventId]);
     if (rv) {
       return { eventName: rv.event_name, booths: rv.booths || [], source: 'reviewed_relation',

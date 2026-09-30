@@ -875,6 +875,12 @@
       ${relSection("Unlikely matches", "Similar name, but the domain evidence points elsewhere.", d.unlikely, "unlikely", true)}
       ${relSection("Reviewed — same company", "Their contacts appear under this exhibitor, labelled, and keep their own company.", d.reviewed, "reviewed", false)}
       ${relSection("Marked not the same company", "Not suggested again unless the decision is reversed.", d.rejected, "rejected", true)}
+      ${(d.shadowed || []).length ? `<section class="xo-rel-sec" data-sec="shadowed"><h3><span class="xo-rel-h">Superseded by the direct link</span> <span class="xo-count-pill">${d.shadowed.length}</span></h3>
+        ${d.shadowed.map((s) => `<div class="xo-cand"><div><b data-no-i18n>#${s.company_id} ${esc(s.company_name || "")}</b>
+          <span class="xo-chip xo-st-grey">${s.decision === "same_company" ? "Same company" : "Not the same company"} — superseded</span></div>
+          <div class="xo-muted">Decided by <span data-no-i18n>${esc(s.decided_by)}</span>, ${esc(fmtDate(s.decided_at))}${s.reason ? `: “<span data-no-i18n>${esc(s.reason)}</span>”` : ""}</div>
+          <div class="xo-muted">${esc(s.note)}</div>
+          ${d.can_review ? `<div><button type="button" class="btn-ghost btn-sm" data-rel-revoke="${s.id}">Revoke this decision</button></div>` : ""}</div>`).join("")}</section>` : ""}
       <details class="xo-rel-sec" data-sec="history"><summary><span class="xo-rel-h">Decision history</span></summary><div id="xo-rel-history"><div class="xo-detail-msg">Open to load.</div></div></details>`;
     wireRelated();
     localize($("xo-rel"));
@@ -893,6 +899,14 @@
           relState.contacts.set(id, Array.isArray(r) ? r : (r.contacts || []));
         } catch (e) { relState.contacts.set(id, { error: true }); }
         renderRelated();
+      };
+    });
+    body.querySelectorAll("[data-rel-revoke]").forEach((b) => {
+      b.onclick = async () => {
+        b.disabled = true;
+        const res = await postJson(`/api/outreach/relations/${b.dataset.relRevoke}/revoke`, { reason: "Superseded by the direct company link" });
+        if (!res.ok) { b.disabled = false; alert((res.j && res.j.message) || "Couldn't revoke."); return; }
+        await loadRelated(); refreshExhibitor(relState.exId);
       };
     });
     const hist = body.querySelector('[data-sec="history"]');

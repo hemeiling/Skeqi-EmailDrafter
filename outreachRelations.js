@@ -23,6 +23,21 @@ const { escapeLike } = require('./contact-query');
 const { registrableDomain, companyEmailDomain } = require('./domains');
 
 const DECISIONS = ['same_company', 'not_same_company'];
+
+/* When a live "same company" decision APPLIES.
+
+   The exhibitor's direct link (event_exhibitors.company_id) always wins. If
+   an Exhibitor Refresh later links the exhibitor to the very company a
+   reviewer had marked "same company", that decision is SHADOWED: its
+   contacts are direct contacts now and are shown, counted, exported, drafted
+   and marked sent through the direct link only. The decision row is not
+   touched — no automatic revoke, no history rewritten. If the company later
+   stops being the direct link while the decision is still live, it applies
+   again: it is a person's standing judgement that nobody revoked.
+
+   Every read of live relations uses this one predicate (r = the relation,
+   e = its event_exhibitors row), so the rule cannot drift between views. */
+const APPLIES_SQL = `(e.company_id IS DISTINCT FROM r.related_company_id)`;
 const MAX_CANDIDATES = 40;
 
 class RelationError extends Error {
@@ -175,6 +190,11 @@ async function relatedPanel(pool, { exhibitorId, eventId, user, env }) {
   }
   const [cands, live] = await Promise.all([loadCandidates(pool, ex), liveRelationsFor(pool, ex.exhibitor_id)]);
   const out = { strong: [], possible: [], unlikely: [], reviewed: [], rejected: [] };
+  // A live decision about the company that is now the direct link: shown, not applied.
+  const shadowed = [...live.values()].filter((r) => ex.company_id && r.related_company_id === ex.company_id)
+    .map((r) => ({ id: r.id, decision: r.decision, reason: r.reason, decided_by: r.decided_by, decided_at: r.decided_at,
+      company_id: r.related_company_id, company_name: ex.company_name,
+      note: 'Superseded by the current direct company link. The decision is kept unchanged; it applies again only if this company stops being the direct link.' }));
   for (const c of cands) {
     const ev = evaluateCandidate(ex, c);
     const rel = live.get(c.id);
@@ -190,7 +210,7 @@ async function relatedPanel(pool, { exhibitorId, eventId, user, env }) {
   for (const k of ['strong', 'possible', 'unlikely']) out[k] = out[k].slice(0, MAX_CANDIDATES);
   return {
     exhibitor: { id: ex.exhibitor_id, name: ex.name, source_name: ex.source_name, domain: ex.domain, website: ex.website || null },
-    direct, ...out,
+    direct, ...out, shadowed,
     can_review: canReviewRelations(user, env),
     account_note: 'Sharing an account is not evidence of identity: the CRM files every company an Apollo name search returns under the account that was searched.',
   };
@@ -300,8 +320,11 @@ async function liveSameCompany(pool, exhibitorIds) {
   const { rows } = await pool.query(
     `SELECT r.id AS relation_id, r.exhibitor_id, r.related_company_id, co.name AS company_name,
             r.decided_by, r.decided_at, r.reason
-       FROM exhibitor_company_relations r JOIN companies co ON co.id = r.related_company_id
+       FROM exhibitor_company_relations r
+       JOIN event_exhibitors e ON e.id = r.exhibitor_id
+       JOIN companies co ON co.id = r.related_company_id
       WHERE r.exhibitor_id = ANY($1::int[]) AND r.decision = 'same_company' AND r.revoked_at IS NULL
+        AND ${APPLIES_SQL}
       ORDER BY r.exhibitor_id, co.name`, [exhibitorIds]);
   return rows;
 }
@@ -312,12 +335,13 @@ async function exhibitorsReviewedForCompany(pool, companyId, eventId) {
   const { rows } = await pool.query(
     `SELECT r.id AS relation_id, e.id AS exhibitor_id, e.attendance_status
        FROM exhibitor_company_relations r JOIN event_exhibitors e ON e.id = r.exhibitor_id
-      WHERE r.related_company_id = $1 AND r.decision = 'same_company' AND r.revoked_at IS NULL AND e.event_id = $2`,
+      WHERE r.related_company_id = $1 AND r.decision = 'same_company' AND r.revoked_at IS NULL AND e.event_id = $2
+        AND ${APPLIES_SQL}`,
     [companyId, eventId]);
   return rows;
 }
 
 module.exports = {
   canReviewRelations, evaluateCandidate, relatedPanel, setDecision, revokeDecision, relationHistory,
-  liveSameCompany, exhibitorsReviewedForCompany, RelationError, DECISIONS,
+  liveSameCompany, exhibitorsReviewedForCompany, RelationError, DECISIONS, APPLIES_SQL,
 };
