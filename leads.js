@@ -3,8 +3,11 @@
 // Ported from EmailDrafter (app.py) -- same title/department term lists,
 // same scoring formula, same relevance tags.
 
-const APOLLO_PEOPLE_URL = 'https://api.apollo.io/api/v1/mixed_people/api_search';
-const APOLLO_ORG_URL = 'https://api.apollo.io/api/v1/organizations/search';
+// Overridable only so tests can point at a local mock; production leaves it unset.
+const APOLLO_BASE = (process.env.APOLLO_BASE_URL || 'https://api.apollo.io').replace(/\/+$/, '');
+const APOLLO_PEOPLE_URL = `${APOLLO_BASE}/api/v1/mixed_people/api_search`;
+const APOLLO_ORG_URL = `${APOLLO_BASE}/api/v1/organizations/search`;
+const identity = require('./apolloIdentity');
 const { recordApolloPeopleCall, recordApolloOrgCall } = require('./usage');
 const { classifyDepartment, titleTermsForDepartments } = require('./contactClassify');
 
@@ -223,10 +226,25 @@ function apolloHeaders(apiKey) {
   };
 }
 
-async function searchPeople(company, apiKey, page = 1, titleFilters) {
+/* One people-search request. With a target that has a reliable domain the
+   query is constrained to that organisation's domain instead of a fuzzy name,
+   and there is no keyword fallback: "nobody at aitechnology.com" is an
+   answer, not a reason to go looking for similar names. */
+async function searchPeople(company, apiKey, page = 1, titleFilters, target) {
+  const titles = (titleFilters && titleFilters.length) ? titleFilters : APOLLO_TITLE_FILTERS;
+  if (target && target.mode === 'domain') {
+    const res = await fetch(APOLLO_PEOPLE_URL, {
+      method: 'POST',
+      headers: apolloHeaders(apiKey),
+      body: JSON.stringify({ q_organization_domains_list: [target.domain], person_titles: titles, page, per_page: APOLLO_PAGE_SIZE })
+    });
+    recordApolloPeopleCall();
+    const data = await res.json().catch(() => ({}));
+    return { status: res.status, data };
+  }
   const primaryPayload = {
     q_organization_name: company,
-    person_titles: (titleFilters && titleFilters.length) ? titleFilters : APOLLO_TITLE_FILTERS,
+    person_titles: titles,
     page,
     per_page: APOLLO_PAGE_SIZE
   };
@@ -282,13 +300,15 @@ async function searchOrgs(company, apiKey) {
 // existing behavior is unchanged for callers who don't pass it.
 async function doCompanySearch(company, apiKey, options = {}) {
   const perCompanyLimit = Math.max(1, Math.min(Number(options.perCompanyLimit) || 25, 500));
+  // Who we mean. Without one (older callers), it is the typed name, no domain.
+  const target = options.target || identity.buildTarget({ name: company, company: null });
   const departmentTitles = titleTermsForDepartments(options.departments);
   const titleFilters = departmentTitles.length ? departmentTitles : null;
 
   let page = 1;
   let firstPageResult;
   try {
-    firstPageResult = await searchPeople(company, apiKey, page, titleFilters);
+    firstPageResult = await searchPeople(company, apiKey, page, titleFilters, target);
   } catch (err) {
     return { contacts: [], orgs: [], error: `Network error: ${err.message}` };
   }
@@ -313,7 +333,7 @@ async function doCompanySearch(company, apiKey, options = {}) {
     while (rawPeople.length < perCompanyLimit && rawPeople.length < totalEntries && (page * APOLLO_PAGE_SIZE) < totalEntries) {
       page += 1;
       try {
-        const nextResult = await searchPeople(company, apiKey, page, titleFilters);
+        const nextResult = await searchPeople(company, apiKey, page, titleFilters, target);
         if (nextResult.status !== 200) break;
         const nextRaw = nextResult.data.people || [];
         if (!nextRaw.length) break;
@@ -323,12 +343,24 @@ async function doCompanySearch(company, apiKey, options = {}) {
       }
     }
 
-    const trimmed = rawPeople.slice(0, perCompanyLimit);
-    const contacts = trimmed
-      .filter(isLeadershipContact)
-      .map((p) => formatPerson(p, company))
-      .filter((c) => isPlausiblyRelatedCompany(c.company, company));
-    return { contacts, orgs: [], total: totalEntries, page };
+    const trimmed = rawPeople.slice(0, perCompanyLimit).filter(isLeadershipContact);
+    /* Identity first, then formatting. Accepted people are labelled as the
+       TARGET company — never as whatever organisation name Apollo spelled —
+       so nothing downstream can create a new company from them. Everyone
+       else is returned, unsaved, with the reason. */
+    const verdict = identity.classifyPeople(trimmed, target);
+    const shape = (r) => ({
+      ...formatPerson(r.person, ''),
+      apollo_org_name: r.org.name || '', apollo_org_domain: r.org.domain || '',
+      identity: r.basis, identity_reason: r.reason,
+    });
+    const contacts = verdict.results.filter((r) => r.decision === 'accept')
+      .map((r) => ({ ...shape(r), company: target.name, company_id: target.companyId || null }));
+    const review = verdict.results.filter((r) => r.decision === 'review').map(shape);
+    const rejected = verdict.results.filter((r) => r.decision === 'reject').map(shape);
+    return { contacts, review, rejected, orgs: [], total: totalEntries, page,
+      identity: { mode: target.mode, domain: target.domain, inconsistent: verdict.inconsistent, orgNames: verdict.orgNames,
+        unusableWebsite: target.unusableWebsite } };
   }
 
   // Apollo states the reason plainly in the body ("…not included in your Free

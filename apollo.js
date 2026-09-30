@@ -11,7 +11,8 @@
 // so a full record of what Apollo returned is kept and never needs to be
 // re-fetched for the same person.
 
-const APOLLO_ENDPOINT = 'https://api.apollo.io/api/v1/people/match';
+// Overridable only so tests can point at a local mock; production leaves it unset.
+const APOLLO_ENDPOINT = `${(process.env.APOLLO_BASE_URL || 'https://api.apollo.io').replace(/\/+$/, '')}/api/v1/people/match`;
 const { recordApolloPeopleCall } = require('./usage');
 
 const { isApolloConfigured, APOLLO_API_KEY } = require('./config');

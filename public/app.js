@@ -2715,7 +2715,13 @@ function renderSearchSummary(summaries) {
         <span>Already in CRM (kept as-is): <b>${alreadyHeld}</b></span>
         <span>Newly imported: <b>${s.importedCount}</b></span>
         ${s.totalCount !== undefined ? `<span>Total for this company: <b>${s.totalCount}</b>${s.target ? ` / ${s.target} requested` : ""}</span>` : ""}
-      </div>`;
+      </div>
+      ${s.identityMode ? `<div class="msg-summary-row">Company identity: ${s.identityMode === "domain"
+        ? `matched by website domain <b>${escapeHtml(s.identityDomain || "")}</b>`
+        : "matched by exact company name only (no reliable website on file)"}${
+        s.heldForReview ? ` · <b>${s.heldForReview}</b> held for review (not saved)` : ""}${
+        s.rejectedCount ? ` · <b>${s.rejectedCount}</b> from other organisations discarded` : ""}${
+        s.inconsistent ? " · Apollo returned several organisations for this domain, so none was saved" : ""}</div>` : ""}`;
     container.appendChild(div);
   });
 }

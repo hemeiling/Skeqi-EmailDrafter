@@ -53,6 +53,31 @@ const {
   revealPersonEmail
 } = require('./apollo');
 const { doCompanySearch, CRM_FIELDS } = require('./leads');
+const apolloIdentity = require('./apolloIdentity');
+
+/* The CRM company a Find Contacts search is for, and whether its website can
+   anchor the Apollo query. Callers may name it explicitly (targets:
+   [{ name, company_id }]); otherwise it is the company already in the CRM
+   under that name. If several same-name records carry DIFFERENT usable
+   domains, none of them is assumed — the search falls back to strict name
+   matching and says why. */
+async function resolveSearchTarget(companyName, explicitTargets) {
+  const explicit = (Array.isArray(explicitTargets) ? explicitTargets : [])
+    .find((t) => t && String(t.name || '').trim().toLowerCase() === companyName.toLowerCase() && Number(t.company_id) > 0);
+  if (explicit) {
+    const co = await getCompany(Number(explicit.company_id));
+    if (co) return { target: apolloIdentity.buildTarget({ name: companyName, company: co }), note: null };
+  }
+  const co = await findCompanyByName(companyName);
+  if (!co) return { target: apolloIdentity.buildTarget({ name: companyName, company: null }), note: null };
+  const { rows: twins } = await pool.query('SELECT id, website FROM companies WHERE name_key = $1', [co.name_key || '']);
+  const domains = new Set(twins.map((t) => apolloIdentity.reliableCompanyDomain(t.website)).filter(Boolean));
+  if (domains.size > 1) {
+    return { target: apolloIdentity.buildTarget({ name: companyName, company: { ...co, website: null } }),
+      note: `several CRM records named like "${companyName}" have different websites (${[...domains].join(', ')}), so none was used` };
+  }
+  return { target: apolloIdentity.buildTarget({ name: companyName, company: co }), note: null };
+}
 const { DEPARTMENT_TAXONOMY, SENIORITY_TAXONOMY } = require('./contactClassify');
 const {
   draftEmail, listDraftModes, categorizeEmail, EMAIL_CATEGORIES, buildPromptForMode, CLAUDE_MODEL,
@@ -2382,6 +2407,7 @@ app.post('/api/leads/search', async (req, res) => {
 
     let allContacts = [];
     let allOrgs = [];
+    let allReview = [];
     const messages = [];
     const summaries = [];
 
@@ -2453,9 +2479,11 @@ app.post('/api/leads/search', async (req, res) => {
       // occupy the earlier rows of Apollo's result order, so asking for the
       // target (rather than just the shortfall) is what surfaces the extra
       // records beyond page one.
+      const { target, note: targetNote } = await resolveSearchTarget(companyName, req.body.targets);
       const result = await doCompanySearch(companyName, apiKey, {
         perCompanyLimit,
-        departments
+        departments,
+        target,
       });
       if (result.error) {
         messages.push(`${companyName}: ${result.error}`);
@@ -2501,24 +2529,36 @@ app.post('/api/leads/search', async (req, res) => {
       // already own costs the user nothing and shouldn't consume their cap.
       remainingBudget -= contacts.length;
 
-      // Pre-upsert one company (legal-entity) row per distinct name Apollo
-      // actually returned, parented to this Account -- so the per-contact
-      // upsertContact() below (which resolves company_id from c.company text)
-      // attaches to a row that's already correctly grouped under the Account.
-      let lastCompanyId = null;
-      const seenCompanyNames = new Set();
-      for (const companyName2 of contacts.map((c) => c.company || companyName)) {
-        if (seenCompanyNames.has(companyName2.toLowerCase())) continue;
-        seenCompanyNames.add(companyName2.toLowerCase());
-        const compResult = await upsertCompany({ name: companyName2, account_name: companyName, source: 'apollo' });
+      /* Every saved contact belongs to the ONE company this search was for.
+         An existing CRM company is used as it is — a search never renames
+         or re-parents it. Only when the CRM has no such company is it
+         created, once, under the searched name. Organisations Apollo
+         returned under other names are not saved as companies at all
+         (they are in result.review / result.rejected, unsaved). */
+      let lastCompanyId = target.companyId || null;
+      if (!lastCompanyId) {
+        const compResult = await upsertCompany({ name: target.name || companyName, account_name: companyName, source: 'apollo' });
         if (compResult) lastCompanyId = compResult.id;
       }
-      if (!seenCompanyNames.size) {
-        // No contacts came back at all -- still ensure a company row exists
-        // under this Account so the search isn't a total no-op.
-        const compResult = await upsertCompany({ name: companyName, account_name: companyName, source: 'apollo' });
-        if (compResult) lastCompanyId = compResult.id;
+      const review = result.review || [];
+      const rejected = result.rejected || [];
+      const idn = result.identity || {};
+      if (idn.mode === 'domain') {
+        messages.push(`${companyName}: searched Apollo by website domain ${idn.domain}.`);
+        if (idn.inconsistent) {
+          messages.push(`${companyName}: Apollo returned ${idn.orgNames.length} different organisations for ${idn.domain}, so none could be tied to it — nothing was saved from them; ${review.length} held for review.`);
+        }
+        if (!fetched.length && !review.length && !rejected.length) {
+          messages.push(`${companyName}: Apollo has no matching people at ${idn.domain}. No name-based search was tried, to avoid similarly named companies.`);
+        }
+      } else {
+        messages.push(`${companyName}: no reliable website on file${idn.unusableWebsite ? ` (${idn.unusableWebsite} cannot identify the company)` : ''}${targetNote ? ` — ${targetNote}` : ''}; only people at an organisation with exactly this name were saved.`);
       }
+      if (review.length) {
+        const names = [...new Set(review.map((r) => r.apollo_org_name || '(no organisation)'))];
+        messages.push(`${companyName}: ${review.length} result(s) not saved, held for review — ${names.slice(0, 6).join(', ')}${names.length > 6 ? ', …' : ''}.`);
+      }
+      if (rejected.length) messages.push(`${companyName}: ${rejected.length} result(s) from a different organisation were discarded.`);
 
       let importedCount = 0;
       let duplicatesSkipped = 0;
@@ -2526,9 +2566,16 @@ app.post('/api/leads/search', async (req, res) => {
         const cleanEmail = cleanApolloEmail(c.email);
         const rawJson = c._apollo_raw ? JSON.stringify(c._apollo_raw) : undefined;
         console.log(`[leads/search] ${c.name} @ ${c.company}: apollo_email_fields={email:${JSON.stringify(c._apollo_raw && c._apollo_raw.email)}, personal_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.personal_emails)}, business_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.business_emails)}, has_email:${c._apollo_raw && c._apollo_raw.has_email}} cleanEmail=${JSON.stringify(cleanEmail)}`);
+        /* A person already in the CRM keeps the company they are filed under —
+           a search does not re-link existing records. Only new people are
+           attached to the searched company. */
+        const prior = await findExistingContact(cleanEmail || '', c.name, target.name || companyName, c.linkedin || '');
+        const keepCompany = prior && prior.company_id && prior.company_id !== lastCompanyId;
         const { id, updated } = await upsertContact({
           full_name: c.name, job_title: c.title, department: c.department, seniority: c.seniority,
-          company: c.company || companyName, website: c.company_website,
+          company: keepCompany ? prior.company : (target.name || companyName),
+          company_id: keepCompany ? prior.company_id : lastCompanyId,
+          website: c.company_website,
           email: cleanEmail, linkedin_url: c.linkedin, address: c.location,
           confidence: c.confidence, relevance: c.relevance,
           apollo_person_id: c.apollo_id, source: 'apollo',
@@ -2543,10 +2590,15 @@ app.post('/api/leads/search', async (req, res) => {
         c.email_lookup_status = cleanEmail ? 'found' : 'not_checked';
         if (updated) duplicatesSkipped++; else importedCount++;
         console.log(`[leads/search] -> contact_id=${id} updated=${updated} email_saved=${JSON.stringify(cleanEmail)}`);
-        await logContactActivity(id, 'apollo_search', updated ? `Refreshed via Apollo search for ${companyName}` : `Found via Apollo search for ${companyName}`);
+        const basis = apolloIdentity.BASIS_TEXT[c.identity] || c.identity || 'unrecorded';
+        await logContactActivity(id, 'apollo_search',
+          `${updated ? 'Refreshed' : 'Found'} via Apollo search for ${companyName} — identity: ${basis}`
+          + `${idn.domain ? ` (${idn.domain})` : ''}${c.apollo_org_name ? `; Apollo organisation "${c.apollo_org_name}"` : ''}`);
       }
 
-      await logApolloResult('people_search', lastCompanyId, null, companyName, JSON.stringify({ contacts, orgs }));
+      await logApolloResult('people_search', lastCompanyId, null, companyName, JSON.stringify({ contacts, orgs, identity: idn,
+        review: review.map((r) => ({ name: r.name, org: r.apollo_org_name, basis: r.identity, reason: r.identity_reason })),
+        rejected: rejected.map((r) => ({ name: r.name, org: r.apollo_org_name, basis: r.identity, reason: r.identity_reason })) }));
       // `total` is Apollo's own match count for this query. Persisting it is
       // what lets the import planner tell the user how much more is available
       // without spending a request to find out.
@@ -2558,8 +2610,12 @@ app.post('/api/leads/search', async (req, res) => {
         company: companyName, departments: departmentLabels,
         foundCount: fetched.length, importedCount, duplicatesSkipped,
         alreadyHeldCount, existingCount, totalCount: existingCount + importedCount,
-        target: perCompanyLimit, forced: forceRefresh
+        target: perCompanyLimit, forced: forceRefresh,
+        identityMode: idn.mode, identityDomain: idn.domain || null,
+        heldForReview: review.length, rejectedCount: rejected.length, inconsistent: Boolean(idn.inconsistent),
       });
+      allReview = allReview.concat(review.map((r) => ({ searched: companyName, name: r.name, title: r.title,
+        organization: r.apollo_org_name || '', reason: r.identity_reason, basis: r.identity })));
 
       // Hand back the account's full current roster, not just this batch, so
       // the caller sees the CRM's actual state after the import rather than
@@ -2569,7 +2625,7 @@ app.post('/api/leads/search', async (req, res) => {
       if (result.fallback_message) messages.push(result.fallback_message);
     }
 
-    res.json({ ok: true, contacts: allContacts, orgs: allOrgs, messages, companies: companyNames, summaries });
+    res.json({ ok: true, contacts: allContacts, orgs: allOrgs, review: allReview, messages, companies: companyNames, summaries });
   } catch (err) {
     console.error('Lead search error:', err);
     res.status(500).json({ error: 'Lead search failed', details: err.message });
