@@ -28,14 +28,15 @@ test('free-mail and placeholder addresses are never company evidence', () => {
   assert.equal(domains.companyEmailDomain('d@sales.enpack.com.cn'), 'enpack.com.cn');
 });
 
-test('only users explicitly listed in ADMIN_USERS may decide — fail closed', () => {
-  assert.equal(rel.canReviewRelations('casey', {}), false, 'unset → nobody');
-  assert.equal(rel.canReviewRelations('casey', { ADMIN_USERS: '' }), false);
-  assert.equal(rel.canReviewRelations('casey', { ADMIN_USERS: 'boss, casey' }), true);
-  assert.equal(rel.canReviewRelations('casey', { ADMIN_USERS: 'boss' }), false);
-  assert.equal(rel.canReviewRelations('', { ADMIN_USERS: 'boss' }), false);
-  // The login-gate user is NOT implicitly a reviewer (unlike the older isAdmin()).
-  assert.equal(rel.canReviewRelations('casey', { APP_USERNAME: 'casey' }), false);
+test('decide and revoke require canReview === true (the server passes isAdmin(req)); anything else is 403', async () => {
+  // Refused before any database access, so no pool is needed.
+  for (const canReview of [false, undefined, null, 'true', 1, {}]) {
+    await assert.rejects(rel.setDecision(null, { exhibitorId: 1, companyId: 2, decision: 'same_company', user: 'x', canReview }),
+      { status: 403, code: 'forbidden', message: /Only administrators can record/ }, String(canReview));
+    await assert.rejects(rel.revokeDecision(null, { relationId: 1, user: 'x', canReview }),
+      { status: 403, code: 'forbidden', message: /Only administrators can revoke/ }, String(canReview));
+  }
+  assert.equal('canReviewRelations' in rel, false, 'no separate ADMIN_USERS allowlist in the relation feature');
 });
 
 test('evaluateCandidate: evidence for and against, tiers, shared account is only a note', () => {
@@ -69,7 +70,6 @@ const outreach = require('../outreach');
 const { pool } = db;
 const RUN = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 const T = (s) => `ZZREL${RUN} ${s}`;
-const REVIEWER = { ADMIN_USERS: 'reviewer' };
 const ids = { companies: [], contacts: [], exhibitors: [], runs: [], events: [] };
 const F = {};
 
@@ -91,7 +91,7 @@ async function exhibitor(eventId, name, companyId, booths) {
   for (const b of booths || []) await pool.query('INSERT INTO exhibitor_booths (exhibitor_id, booth_number) VALUES ($1,$2)', [r.id, b]);
   return r.id;
 }
-const panel = (exhibitorId, env = REVIEWER) => rel.relatedPanel(pool, { exhibitorId, eventId: F.event, user: 'reviewer', env });
+const panel = (exhibitorId, canReview = true) => rel.relatedPanel(pool, { exhibitorId, eventId: F.event, canReview });
 const where = (p, companyId) => ['strong', 'possible', 'unlikely', 'reviewed', 'rejected'].find((k) => p[k].some((c) => c.candidate.id === companyId)) || null;
 
 test.before(async () => {
@@ -154,22 +154,22 @@ test('panel: direct company first, then strong / possible / unlikely; suffix-onl
   assert.ok(p.strong[0].for.length && p.strong[0].against.length === 0);
   assert.ok(p.unlikely[0].against.length > 0, 'every unlikely candidate says why');
   assert.equal(p.can_review, true);
-  assert.equal((await panel(F.ex, {})).can_review, false);
+  assert.equal((await panel(F.ex, false)).can_review, false);
   assert.match(p.account_note, /not evidence of identity/);
 });
 
 test('authorization is enforced in the module: non-reviewers cannot decide or revoke, and nothing is written', async () => {
-  for (const env of [{}, { ADMIN_USERS: '' }, { ADMIN_USERS: 'someone_else' }]) {
-    await assert.rejects(rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.strong, decision: 'same_company', user: 'reviewer', eventId: F.event, env }),
+  for (const canReview of [false, undefined]) {
+    await assert.rejects(rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.strong, decision: 'same_company', user: 'reviewer', eventId: F.event, canReview }),
       { status: 403, code: 'forbidden' });
   }
-  await assert.rejects(rel.revokeDecision(pool, { relationId: 1, user: 'reviewer', eventId: F.event, env: {} }), { status: 403 });
+  await assert.rejects(rel.revokeDecision(pool, { relationId: 1, user: 'reviewer', eventId: F.event, canReview: false }), { status: 403 });
   const { rows: [n] } = await pool.query('SELECT count(*)::int n FROM exhibitor_company_relations WHERE exhibitor_id = $1', [F.ex]);
   assert.equal(n.n, 0);
 });
 
 test('bad decisions are refused: direct company, non-candidate, other event, unknown decision, missing reason', async () => {
-  const d = (over) => rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.strong, decision: 'same_company', user: 'reviewer', eventId: F.event, env: REVIEWER, ...over });
+  const d = (over) => rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.strong, decision: 'same_company', user: 'reviewer', eventId: F.event, canReview: true, ...over });
   await assert.rejects(d({ companyId: F.direct }), { code: 'direct_company' });
   await assert.rejects(d({ companyId: F.gotion }), { code: 'not_candidate' });
   await assert.rejects(d({ companyId: F.accountOnly }), { code: 'not_candidate' });
@@ -184,7 +184,7 @@ test('lifecycle: undecided → same company → outreach → revoke → gone fro
   assert.equal(rowBefore.reviewed_contacts, 0);
 
   const r = await rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.possible, decision: 'same_company',
-    reason: 'Trade registry lists Enpack Trading as the export arm', user: 'reviewer', eventId: F.event, env: REVIEWER });
+    reason: 'Trade registry lists Enpack Trading as the export arm', user: 'reviewer', eventId: F.event, canReview: true });
   assert.equal(r.decided_by, 'reviewer');
   assert.equal(r.evidence.tier, 'possible', 'evidence snapshot is server-computed');
   assert.equal(r.evidence.shared_account, true);
@@ -237,7 +237,7 @@ test('lifecycle: undecided → same company → outreach → revoke → gone fro
   assert.ok(exp.every((x) => x.best_contact === ''), 'best contact stays a direct-contact judgement');
 
   // Revoke → undecided.
-  const rv = await rel.revokeDecision(pool, { relationId: r.id, reason: 'Registry entry was a different firm', user: 'reviewer', eventId: F.event, env: REVIEWER });
+  const rv = await rel.revokeDecision(pool, { relationId: r.id, reason: 'Registry entry was a different firm', user: 'reviewer', eventId: F.event, canReview: true });
   assert.equal(rv.revoked_by, 'reviewer');
   assert.equal(where(await panel(F.ex), F.possible), 'possible', 'reviewable again');
   assert.equal((await outreach.exhibitorDetail(pool, F.ex)).reviewed.length, 0);
@@ -258,25 +258,25 @@ test('lifecycle: undecided → same company → outreach → revoke → gone fro
   assert.equal(h.length, 1);
   assert.equal(h[0].decision, 'same_company');
   assert.equal(h[0].revoke_reason, 'Registry entry was a different firm');
-  await assert.rejects(rel.revokeDecision(pool, { relationId: r.id, user: 'reviewer', eventId: F.event, env: REVIEWER }), { code: 'already_revoked' });
+  await assert.rejects(rel.revokeDecision(pool, { relationId: r.id, user: 'reviewer', eventId: F.event, canReview: true }), { code: 'already_revoked' });
 });
 
 test('lifecycle: undecided → not same company → rejected → revoke → reviewable again', async () => {
   const r = await rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.unlikely, decision: 'not_same_company',
-    reason: 'German plastics firm, unrelated', user: 'reviewer', eventId: F.event, env: REVIEWER });
+    reason: 'German plastics firm, unrelated', user: 'reviewer', eventId: F.event, canReview: true });
   let p = await panel(F.ex);
   assert.equal(where(p, F.unlikely), 'rejected');
   assert.equal(p.rejected[0].relation.decision, 'not_same_company');
-  await assert.rejects(rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.unlikely, decision: 'not_same_company', user: 'reviewer', eventId: F.event, env: REVIEWER }),
+  await assert.rejects(rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.unlikely, decision: 'not_same_company', user: 'reviewer', eventId: F.event, canReview: true }),
     { status: 409, code: 'unchanged' });
-  await rel.revokeDecision(pool, { relationId: r.id, user: 'reviewer', eventId: F.event, env: REVIEWER });
+  await rel.revokeDecision(pool, { relationId: r.id, user: 'reviewer', eventId: F.event, canReview: true });
   p = await panel(F.ex);
   assert.equal(where(p, F.unlikely), 'unlikely');
 });
 
 test('changing a decision revokes the old row and inserts a new one in one step; history is the full timeline', async () => {
-  const a = await rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.strong, decision: 'same_company', user: 'reviewer', eventId: F.event, env: REVIEWER });
-  const b = await rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.strong, decision: 'not_same_company', reason: 'Checked: separate legal entity', user: 'reviewer', eventId: F.event, env: REVIEWER });
+  const a = await rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.strong, decision: 'same_company', user: 'reviewer', eventId: F.event, canReview: true });
+  const b = await rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.strong, decision: 'not_same_company', reason: 'Checked: separate legal entity', user: 'reviewer', eventId: F.event, canReview: true });
   const { rows } = await pool.query(
     'SELECT id, decision, decided_at, revoked_at, revoke_reason FROM exhibitor_company_relations WHERE exhibitor_id = $1 AND related_company_id = $2 ORDER BY decided_at, id',
     [F.ex, F.strong]);
@@ -287,7 +287,7 @@ test('changing a decision revokes the old row and inserts a new one in one step;
   const { rows: [live] } = await pool.query(
     'SELECT count(*)::int n FROM exhibitor_company_relations WHERE exhibitor_id = $1 AND related_company_id = $2 AND revoked_at IS NULL', [F.ex, F.strong]);
   assert.equal(live.n, 1, 'never two live decisions for one pair');
-  await rel.revokeDecision(pool, { relationId: b.id, user: 'reviewer', eventId: F.event, env: REVIEWER });
+  await rel.revokeDecision(pool, { relationId: b.id, user: 'reviewer', eventId: F.event, canReview: true });
 });
 
 test('the database itself refuses a second live decision for the same pair', async () => {
@@ -319,7 +319,7 @@ test('initDb is additive and safe to re-run over existing decisions', async () =
 
 test('reviewed company later becomes the direct link: shadowed everywhere, history untouched — and applies again when it stops being direct', async () => {
   const r = await rel.setDecision(pool, { exhibitorId: F.ex, companyId: F.strong, decision: 'same_company',
-    reason: 'Shadowing test', user: 'reviewer', eventId: F.event, env: REVIEWER });
+    reason: 'Shadowing test', user: 'reviewer', eventId: F.event, canReview: true });
   const strongContact = (await pool.query('SELECT id FROM contacts WHERE company_id = $1', [F.strong])).rows[0].id;
   const row = async () => (await outreach.listExhibitors(pool, F.event, { exhibitor: F.ex }, { all: true })).rows[0];
   const relRow = async () => (await pool.query('SELECT * FROM exhibitor_company_relations WHERE id = $1', [r.id])).rows[0];
@@ -367,5 +367,5 @@ test('reviewed company later becomes the direct link: shadowed everywhere, histo
   // Both recorded sends remain as history.
   for (const id of [sentDirect.id, sentReviewed.id]) assert.ok(!(await db.getCommunication(id)).deleted_at);
 
-  await rel.revokeDecision(pool, { relationId: r.id, user: 'reviewer', eventId: F.event, env: REVIEWER });
+  await rel.revokeDecision(pool, { relationId: r.id, user: 'reviewer', eventId: F.event, canReview: true });
 });

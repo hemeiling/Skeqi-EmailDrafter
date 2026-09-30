@@ -14,8 +14,9 @@
      • a "same company" decision never merges companies, moves contacts or
        changes any company_id. Its contacts stay where they are and are
        labelled with the relationship wherever they appear;
-     • only users listed in ADMIN_USERS may record or revoke a decision, and
-       that is enforced here, not only in the page.
+     • only an administrator (the application's isAdmin(), decided by the
+       server and passed in as canReview) may record or revoke a decision,
+       and that is enforced here, not only in the page.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 const { normalizeNameKey } = require('./companyKey');
@@ -44,12 +45,14 @@ class RelationError extends Error {
   constructor(status, code, message, extra) { super(message); this.status = status; this.code = code; this.extra = extra || {}; }
 }
 
-/* Fail closed. The app's login gate has one shared credential and the older
-   isAdmin() treats that login as admin, so it can never say no. Identity
-   decisions need an explicit list: unset or empty ADMIN_USERS → nobody. */
-function canReviewRelations(user, env = process.env) {
-  const list = String(env.ADMIN_USERS || '').split(',').map((s) => s.trim()).filter(Boolean);
-  return Boolean(user) && list.includes(String(user));
+/* Who may decide is the application's admin rule, evaluated by the server
+   (isAdmin(req)) and passed in. Anything other than exactly `true` — missing,
+   false, a truthy string — is refused, so a caller that forgets to pass it
+   cannot write. */
+function assertCanReview(canReview, verb) {
+  if (canReview !== true) {
+    throw new RelationError(403, 'forbidden', `Only administrators can ${verb} company-identity decisions.`);
+  }
 }
 
 const usableEmail = (e) => /^[^\s@()]+@[^\s@()]+\.[^\s@()]+$/.test(String(e || '').trim());
@@ -177,7 +180,7 @@ async function liveRelationsFor(pool, exhibitorId) {
 
 /* ── Panel ───────────────────────────────────────────────────────────────── */
 
-async function relatedPanel(pool, { exhibitorId, eventId, user, env }) {
+async function relatedPanel(pool, { exhibitorId, eventId, canReview }) {
   const ex = await loadExhibitor(pool, exhibitorId);
   assertExhibitorInEvent(ex, eventId);
   let direct = null;
@@ -211,7 +214,7 @@ async function relatedPanel(pool, { exhibitorId, eventId, user, env }) {
   return {
     exhibitor: { id: ex.exhibitor_id, name: ex.name, source_name: ex.source_name, domain: ex.domain, website: ex.website || null },
     direct, ...out, shadowed,
-    can_review: canReviewRelations(user, env),
+    can_review: canReview === true,
     account_note: 'Sharing an account is not evidence of identity: the CRM files every company an Apollo name search returns under the account that was searched.',
   };
 }
@@ -224,8 +227,8 @@ async function audit(client, entry) {
     [entry.actor, entry.action, 'exhibitor_company_relation', String(entry.objectId), entry.companyId || null, JSON.stringify(entry.metadata || {})]);
 }
 
-async function setDecision(pool, { exhibitorId, companyId, decision, reason, user, eventId, env }) {
-  if (!canReviewRelations(user, env)) throw new RelationError(403, 'forbidden', 'Only users listed in ADMIN_USERS can record company-identity decisions.');
+async function setDecision(pool, { exhibitorId, companyId, decision, reason, user, eventId, canReview }) {
+  assertCanReview(canReview, 'record');
   if (!DECISIONS.includes(decision)) throw new RelationError(400, 'bad_decision', 'Decision must be same_company or not_same_company.');
   const why = String(reason || '').trim().slice(0, 1000);
   const ex = await loadExhibitor(pool, exhibitorId);
@@ -274,8 +277,8 @@ async function setDecision(pool, { exhibitorId, companyId, decision, reason, use
   }
 }
 
-async function revokeDecision(pool, { relationId, reason, user, eventId, env }) {
-  if (!canReviewRelations(user, env)) throw new RelationError(403, 'forbidden', 'Only users listed in ADMIN_USERS can revoke company-identity decisions.');
+async function revokeDecision(pool, { relationId, reason, user, eventId, canReview }) {
+  assertCanReview(canReview, 'revoke');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -342,6 +345,6 @@ async function exhibitorsReviewedForCompany(pool, companyId, eventId) {
 }
 
 module.exports = {
-  canReviewRelations, evaluateCandidate, relatedPanel, setDecision, revokeDecision, relationHistory,
+  evaluateCandidate, relatedPanel, setDecision, revokeDecision, relationHistory,
   liveSameCompany, exhibitorsReviewedForCompany, RelationError, DECISIONS, APPLIES_SQL,
 };

@@ -865,7 +865,7 @@
            <button type="button" class="btn-ghost btn-sm" data-xo-crm="${esc(d.direct.name)}">Open in CRM</button></div>`
       : `<div class="xo-cand xo-direct"><p>This exhibitor is not linked to a CRM company.</p></div>`;
     const readOnly = d.can_review ? ""
-      : `<div class="xo-rel-note">Read-only. Only users listed in ADMIN_USERS can record whether a record is the same company.</div>`;
+      : `<div class="xo-rel-note">Read-only. Only administrators can record whether a record is the same company.</div>`;
     $("xo-rel-body").innerHTML = `
       ${readOnly}
       <div class="xo-rel-note">⚠ ${esc(d.account_note)}</div>

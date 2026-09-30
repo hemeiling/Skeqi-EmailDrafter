@@ -1,6 +1,12 @@
 /* Authorization over real HTTP: the server itself, not the page, decides who
-   may record or revoke a company-identity decision. Starts server.js against
-   the test database three times with different ADMIN_USERS settings. */
+   may record or revoke a company-identity decision — the application's
+   isAdmin(req), the same rule as every other admin action.
+
+   With today's single shared login, the only credential that can sign in is
+   APP_USERNAME, and isAdmin() treats it as the administrator; an
+   authenticated NON-admin cannot exist over HTTP. That case is covered by the
+   module-level test (anything but canReview === true → 403) and by the wiring
+   check below that every write route passes isAdmin(req). */
 require('dotenv').config();
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -85,32 +91,25 @@ test.after(async () => {
   } finally { await pool.end(); }
 });
 
-for (const [label, adminUsers] of [['ADMIN_USERS unset', ''], ['ADMIN_USERS lists someone else', 'boss']]) {
-  test(`${label}: the signed-in user can read candidates but every write is 403`, async () => {
-    const s = startServer(adminUsers);
-    try {
-      await s.ready;
-      const p = await s.call('GET', `/api/outreach/exhibitors/${F.ex}/related`);
-      assert.equal(p.status, 200);
-      assert.equal(p.j.can_review, false);
-      assert.ok(p.j.strong.some((c) => c.candidate.id === F.cand), 'evidence is visible read-only');
-      const d = await s.call('POST', `/api/outreach/exhibitors/${F.ex}/relations`, { body: { related_company_id: F.cand, decision: 'same_company' } });
-      assert.equal(d.status, 403);
-      assert.equal(d.j.error, 'forbidden');
-      const r = await s.call('POST', '/api/outreach/relations/1/revoke', { body: {} });
-      assert.equal(r.status, 403);
-      assert.equal(await liveCount(), 0, 'nothing written');
-    } finally { await s.stop(); }
-  });
-}
+test('the relation routes pass exactly isAdmin(req) as the write permission', () => {
+  const src = require('node:fs').readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = (route) => { const i = src.indexOf(route); assert.ok(i > 0, route); return src.slice(i, src.indexOf('\n});', i)); };
+  for (const route of ["app.post('/api/outreach/exhibitors/:id/relations'", "app.post('/api/outreach/relations/:id/revoke'",
+    "app.get('/api/outreach/exhibitors/:id/related'"]) {
+    assert.match(block(route), /canReview: isAdmin\(req\)/, route);
+  }
+});
 
-test('ADMIN_USERS lists the signed-in user: decide, change, revoke; still JSON-only and login-gated', async () => {
-  const s = startServer(USER);
+test('signed out → 401; the APP_USERNAME administrator can decide, change and revoke (ADMIN_USERS not needed)', async () => {
+  const s = startServer('');
   try {
     await s.ready;
     assert.equal((await s.call('GET', `/api/outreach/exhibitors/${F.ex}/related`)).j.can_review, true);
-    // Not signed in.
+    // Not signed in: every relation route is behind the login gate.
+    assert.equal((await s.call('GET', `/api/outreach/exhibitors/${F.ex}/related`, { login: false })).status, 401);
     assert.equal((await s.call('POST', `/api/outreach/exhibitors/${F.ex}/relations`, { body: { related_company_id: F.cand, decision: 'same_company' }, login: false })).status, 401);
+    assert.equal((await s.call('POST', '/api/outreach/relations/1/revoke', { body: {}, login: false })).status, 401);
+    assert.equal(await liveCount(), 0);
     // Cross-site form shape.
     const form = await s.call('POST', `/api/outreach/exhibitors/${F.ex}/relations`, { body: `related_company_id=${F.cand}&decision=same_company`, type: 'application/x-www-form-urlencoded' });
     assert.equal(form.status, 415);

@@ -4924,8 +4924,9 @@ app.post('/api/outreach/sent/:id/undo', async (req, res) => {
 
 /* ── Related company records (human-reviewed) ─────────────────────────────
    Reading candidates and evidence: any signed-in user. Recording or revoking
-   a decision: only users listed in ADMIN_USERS — checked inside
-   outreachRelations, so no route can skip it. Nothing here touches
+   a decision: administrators only — isAdmin(req), the same rule as every
+   other admin action, enforced inside outreachRelations so no route can skip
+   it. Nothing here touches
    event_exhibitors.company_id, merges a company or moves a contact. */
 const positiveId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null; };
 
@@ -4935,7 +4936,7 @@ app.get('/api/outreach/exhibitors/:id/related', async (req, res) => {
     if (!id) return res.status(400).json({ error: 'bad_id' });
     const eventId = await outreachEvent(req, res);
     if (!eventId) return;
-    res.json({ ok: true, ...(await outreachRelations.relatedPanel(pool, { exhibitorId: id, eventId, user: reqUser(req) })) });
+    res.json({ ok: true, ...(await outreachRelations.relatedPanel(pool, { exhibitorId: id, eventId, canReview: isAdmin(req) })) });
   } catch (err) { outreachFail(res, 'related', err); }
 });
 
@@ -4959,6 +4960,7 @@ app.post('/api/outreach/exhibitors/:id/relations', async (req, res) => {
     if (!eventId) return;
     const row = await outreachRelations.setDecision(pool, {
       exhibitorId: id, companyId, decision: req.body.decision, reason: req.body.reason, user: reqUser(req), eventId,
+      canReview: isAdmin(req),
     });
     res.json({ ok: true, relation: row });
   } catch (err) { outreachFail(res, 'relation-decide', err); }
@@ -4971,7 +4973,8 @@ app.post('/api/outreach/relations/:id/revoke', async (req, res) => {
     if (!id) return res.status(400).json({ error: 'bad_id' });
     const eventId = await outreachEvent(req, res);
     if (!eventId) return;
-    const row = await outreachRelations.revokeDecision(pool, { relationId: id, reason: req.body && req.body.reason, user: reqUser(req), eventId });
+    const row = await outreachRelations.revokeDecision(pool, { relationId: id, reason: req.body && req.body.reason, user: reqUser(req), eventId,
+      canReview: isAdmin(req) });
     res.json({ ok: true, relation: row });
   } catch (err) { outreachFail(res, 'relation-revoke', err); }
 });
