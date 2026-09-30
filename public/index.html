@@ -2474,6 +2474,74 @@
   .xo-dl-head { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; color: var(--color-text-tertiary); padding: 6px 10px 2px; }
   .xo-dl-foot { font-size: 0.7rem; color: var(--color-text-tertiary); padding: 6px 10px 2px; border-top: 1px solid var(--color-border-soft); margin-top: 4px; }
 
+  /* Drafter: why this contact is being written to (reviewed related record). */
+  .modal-provenance { margin: 6px 0 0; font-size: 0.78rem; color: var(--color-primary-text); background: var(--color-primary-soft);
+    border: 1px solid var(--color-primary-border); border-radius: var(--radius-sm); padding: 6px 10px; }
+  .modal-provenance[hidden] { display: none; }
+
+  /* ── Direct vs reviewed contacts in an expanded exhibitor ── */
+  .xo-sec-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 10px 2px 6px; font-size: 0.84rem; }
+  .xo-sec-rev { margin-top: 10px; border-top: 1px dashed var(--color-primary-border); }
+  .xo-rev-group { margin: 6px 0 10px; }
+  .xo-rev-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 6px 2px; font-size: 0.82rem; }
+  .xo-via { flex-basis: 100%; font-size: 0.72rem; color: var(--color-primary-text); }
+  .xo-detail-foot { padding-top: 8px; }
+
+  /* ── Find contacts in CRM: review drawer ── */
+  .xo-rel { position: fixed; inset: 0; z-index: 1400; }
+  .xo-rel[hidden] { display: none; }
+  .xo-rel-scrim { position: absolute; inset: 0; background: rgba(16, 8, 32, 0.45); }
+  .xo-rel-panel { position: absolute; top: 0; right: 0; bottom: 0; width: min(620px, 100vw); background: var(--color-bg);
+    display: flex; flex-direction: column; box-shadow: -12px 0 32px rgba(16,24,40,0.18); }
+  .xo-rel-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 14px 16px;
+    background: var(--color-surface); border-bottom: 1px solid var(--color-border); }
+  .xo-rel-top h2 { font-size: 1.05rem; margin: 0; }
+  .xo-rel-sub { font-size: 0.8rem; color: var(--color-text-secondary); margin-top: 2px; overflow-wrap: anywhere; }
+  .xo-rel-body { overflow-y: auto; padding: 12px 16px 24px; -webkit-overflow-scrolling: touch; }
+  .xo-rel-note { font-size: 0.78rem; background: var(--color-warn-soft); border: 1px solid var(--color-warn-border); color: var(--color-warn-text);
+    border-radius: var(--radius-md); padding: 8px 10px; margin-bottom: 8px; }
+  .xo-rel-sec { margin: 14px 0; }
+  .xo-rel-sec > h3, .xo-rel-sec > summary { font-size: 0.86rem; margin: 0 0 6px; cursor: default; }
+  .xo-rel-sec > summary { cursor: pointer; padding: 6px 0; }
+  .xo-rel-h { font-weight: 700; }
+  .xo-count-pill { font-size: 0.7rem; background: var(--color-surface-alt); border: 1px solid var(--color-border); border-radius: var(--radius-full); padding: 0 8px; }
+  .xo-cand { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 10px 12px; margin-bottom: 8px;
+    display: flex; flex-direction: column; gap: 6px; font-size: 0.82rem; }
+  .xo-cand.xo-direct { border-left: 3px solid var(--color-success); }
+  .xo-cand-head { display: flex; flex-direction: column; gap: 2px; }
+  .xo-cand-head b { overflow-wrap: anywhere; }
+  .xo-ev { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .xo-ev-h { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; color: var(--color-text-tertiary); margin-bottom: 2px; }
+  .xo-ev ul { margin: 0; padding-left: 0; list-style: none; }
+  .xo-ev li { padding-left: 18px; position: relative; margin: 2px 0; overflow-wrap: anywhere; }
+  .xo-ev li::before { position: absolute; left: 0; }
+  .xo-ev-for::before { content: "✓"; color: var(--color-success); }
+  .xo-ev-against::before { content: "✗"; color: var(--color-danger); }
+  .xo-ev-caveat { color: var(--color-text-secondary); }
+  .xo-ev-caveat::before { content: "?"; color: var(--color-text-tertiary); }
+  .xo-ev-none { color: var(--color-text-tertiary); padding-left: 0 !important; }
+  .xo-rel-warn { font-size: 0.76rem; color: var(--color-warn-text); background: var(--color-warn-soft); border-radius: var(--radius-sm); padding: 5px 8px; }
+  .xo-prov { font-size: 0.74rem; color: var(--color-text-tertiary); overflow-wrap: anywhere; }
+  .xo-rel-people { margin: 0; padding-left: 16px; font-size: 0.78rem; }
+  .xo-rel-current { font-size: 0.78rem; background: var(--color-primary-soft); border-radius: var(--radius-sm); padding: 5px 8px; }
+  .xo-rel-form fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+  .xo-rel-form label { display: flex; gap: 6px; align-items: center; font-size: 0.8rem; }
+  .xo-rel-reason { flex-direction: column; align-items: stretch !important; margin-top: 4px; }
+  .xo-rel-reason input { font: inherit; font-size: 0.82rem; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: var(--radius-sm); }
+  .xo-rel-actions { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+  .xo-rel-msg { font-size: 0.78rem; color: var(--color-danger-text); }
+  .xo-rel-hist { margin: 0; padding-left: 18px; font-size: 0.8rem; }
+  .xo-rel-hist li { margin-bottom: 6px; }
+  .xo-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  body.xo-rel-open { overflow: hidden; }
+  @media (max-width: 767px) {
+    .xo-rel-panel { width: 100vw; }
+    .xo-ev { grid-template-columns: 1fr; }
+    .xo-rel-form label { min-height: 44px; }
+    .xo-rel-reason input { min-height: 44px; font-size: 16px; }
+    .xo-rel-top .btn-sm, .xo-rel-actions .btn-sm, .xo-cand .btn-sm { min-height: 44px; }
+  }
+
   /* Layout follows the space the page actually has, not the screen: the
      sidebar may be expanded, collapsed or a drawer, so the same 1024px
      screen can leave 790px or 960px for this table. */

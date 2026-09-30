@@ -30,6 +30,10 @@
     "pg": "^8.22.0",
     "pptxgenjs": "^4.0.1",
     "tesseract.js": "^7.0.0",
+    "tldts": "^6.1.86",
     "undici": "^8.10.0"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0"
   }
 }

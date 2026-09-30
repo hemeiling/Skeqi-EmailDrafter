@@ -216,12 +216,15 @@
     return `<span class="xo-chip ${s.cls}" title="${esc(s.hint || "")}">${esc(s.label)}${frac}</span>`;
   }
 
+  /* Direct figures first; reviewed-record contacts are said separately so a
+     reader never mistakes them for the exhibitor's own company's people. */
   function summaryLine(r) {
-    if (!r.company_id) return "Not linked to a CRM company";
-    const parts = [plural(r.contacts, "contact"), plural(r.emailable, "email")];
+    const reviewed = r.reviewed_contacts ? ` · +${plural(r.reviewed_contacts, "contact")} via reviewed records` : "";
+    if (!r.company_id) return "Not linked to a CRM company" + reviewed;
+    const parts = [plural(r.contacts, "direct contact"), plural(r.emailable, "email")];
     if (r.drafted) parts.push(`${r.drafted} drafted`);
     if (r.sent) parts.push(`${r.sent} sent`);
-    return parts.join(" · ");
+    return parts.join(" · ") + reviewed;
   }
 
   function renderList() {
@@ -257,7 +260,7 @@
     const cls = r.classification ? (CLASS_LABELS[r.classification] || r.classification) : "";
     const withdrawn = r.attendance_status !== "listed" ? `<span class="xo-chip xo-st-grey">Withdrawn</span>` : "";
     const zh = r.chinese_name && r.chinese_name !== r.display_name ? `<span class="xo-zh">${esc(r.chinese_name)}</span>` : "";
-    const canExpand = Boolean(r.company_id);
+    const canExpand = Boolean(r.company_id) || r.reviewed_contacts > 0;
     return `
       <div class="xo-group${open ? " open" : ""}" data-ex="${r.exhibitor_id}">
         <div class="xo-row" role="row">
@@ -284,7 +287,7 @@
             ${canExpand
               ? `<button type="button" class="btn-ghost btn-sm" data-xo-toggle="${r.exhibitor_id}">${open ? "Hide contacts" : "Contacts"}</button>`
               : ""}
-            <button type="button" class="btn-ghost btn-sm" data-xo-crm="${esc(r.display_name)}">Open in CRM</button>
+            <button type="button" class="btn-ghost btn-sm" data-xo-rel="${r.exhibitor_id}">Find contacts in CRM</button>
           </span>
         </div>
         <div class="xo-detail" id="xo-detail-${r.exhibitor_id}" ${open ? "" : "hidden"}></div>
@@ -383,13 +386,27 @@
     const bestNote = best ? "" : (d.best_contact_note === "insufficient_evidence"
       ? `<div class="xo-muted xo-best-note">No best contact: the CRM doesn't hold enough to tell these contacts apart.</div>` : "");
     const errNote = st.error ? `<div class="xo-error" role="alert">Refresh failed: showing earlier data. <button class="btn-ghost btn-sm" data-retry>Retry</button></div>` : "";
-    if (!d.contacts.length) {
-      box.innerHTML = `${errNote}<div class="xo-detail-msg">No CRM contacts at this company yet.
-        <button class="btn-ghost btn-sm" data-xo-crm="${esc(d.exhibitor.company_name || d.exhibitor.source_name)}">Find contacts in CRM</button></div>`;
-    } else {
-      box.innerHTML = errNote + bestNote + `<div class="xo-contacts" role="table" aria-label="Contacts">` +
-        d.contacts.map((c) => contactHtml(c, best, id)).join("") + `</div>`;
-    }
+    const coName = d.exhibitor.company_name || d.exhibitor.source_name;
+    const directHead = d.exhibitor.company_id
+      ? `<div class="xo-sec-head"><b>Direct CRM contacts</b> <span class="xo-muted" data-no-i18n>#${d.exhibitor.company_id} ${esc(coName)}</span></div>`
+      : `<div class="xo-sec-head"><b>Direct CRM contacts</b> <span class="xo-muted">This exhibitor is not linked to a CRM company</span></div>`;
+    const direct = d.contacts.length
+      ? bestNote + `<div class="xo-contacts" role="table" aria-label="Direct contacts">` + d.contacts.map((c) => contactHtml(c, best, id)).join("") + `</div>`
+      : `<div class="xo-detail-msg">No direct contacts.</div>`;
+    const reviewed = (d.reviewed || []).map((g) => `
+      <div class="xo-rev-group">
+        <div class="xo-rev-head">
+          <span class="xo-chip xo-st-purple">Reviewed: same company</span>
+          <b data-no-i18n>#${g.relation.company_id} ${esc(g.relation.company_name)}</b>
+          <span class="xo-muted">Linked by <span data-no-i18n>${esc(g.relation.decided_by)}</span> on ${esc(fmtDate(g.relation.decided_at))}${g.relation.reason ? ` — “<span data-no-i18n>${esc(g.relation.reason)}</span>”` : ""}</span>
+        </div>
+        <div class="xo-contacts" role="table" aria-label="Contacts from reviewed record">${g.contacts.map((c) => contactHtml(c, null, id)).join("") || `<div class="xo-detail-msg">No contacts on this record.</div>`}</div>
+      </div>`).join("");
+    const reviewedSec = reviewed
+      ? `<div class="xo-sec-head xo-sec-rev"><b>From reviewed related records</b> <span class="xo-muted">Separate CRM companies a reviewer marked as the same company. Their contacts keep their own company.</span></div>${reviewed}`
+      : "";
+    box.innerHTML = errNote + directHead + direct + reviewedSec +
+      `<div class="xo-detail-foot"><button class="btn-ghost btn-sm" data-xo-rel="${id}">Find contacts in CRM</button></div>`;
     const r = box.querySelector("[data-retry]"); if (r) r.onclick = () => loadDetail(id);
     box.querySelectorAll("[data-xo-crm]").forEach((b) => { b.onclick = () => openInCrm(b.dataset.xoCrm); });
     box.querySelectorAll("[data-act]").forEach((b) => {
@@ -428,6 +445,7 @@
           <span class="xo-ct-name" data-no-i18n>${esc(c.full_name || "(no name)")}</span>
           ${isBest ? `<span class="xo-best${best.basis === "title" ? " xo-best-title" : ""}" title="${esc(best.basis_label || "")}">★ Best contact</span>` : ""}
           <span class="xo-ct-title" data-no-i18n>${esc(c.job_title || "")}</span>
+          ${c.link_type === "reviewed" ? `<span class="xo-via">via reviewed record <span data-no-i18n>#${c.company_id}</span></span>` : ""}
           ${isBest ? `<span class="xo-best-why"><b>Based on ${esc(String(best.basis_label || "").toLowerCase())}:</b> ${esc(best.reasons.join(" · "))}</span>` : ""}
         </span>
         <span class="xo-ct-email" role="cell">${email}</span>
@@ -440,7 +458,9 @@
 
   function contactById(exId, cid) {
     const st = state.details.get(exId);
-    return st && st.data ? st.data.contacts.find((c) => c.id === cid) : null;
+    if (!st || !st.data) return null;
+    return st.data.contacts.find((c) => c.id === cid)
+      || (st.data.reviewed || []).flatMap((g) => g.contacts).find((c) => c.id === cid) || null;
   }
 
   async function contactAction(exId, cid, act, btnEl) {
@@ -462,8 +482,17 @@
       if (rev.emails && rev.emails[c.id]) c.email = rev.emails[c.id];
       refreshExhibitor(exId);
     }
+    let provenance = "";
+    if (c.link_type === "reviewed") {
+      const st = state.details.get(exId);
+      const g = st && st.data && (st.data.reviewed || []).find((x) => x.relation.id === c.relation_id);
+      const exName = st && st.data ? (st.data.exhibitor.company_name || st.data.exhibitor.source_name) : "this exhibitor";
+      provenance = g
+        ? `Reviewed related record: ${g.relation.company_name} (#${g.relation.company_id}) was marked the same company as exhibitor ${exName} by ${g.relation.decided_by} on ${fmtDate(g.relation.decided_at)} (relation #${g.relation.id}). This contact stays on their own CRM company.`
+        : `Reached through a reviewed related-company record (relation #${c.relation_id}).`;
+    }
     await openDraftModalForContact(crmRowToDraftFormat(c), () => refreshExhibitor(exId),
-      { preferredMode: "conference_outreach" });
+      { preferredMode: "conference_outreach", provenance });
   }
 
   function showMarkForm(exId, c) {
@@ -655,6 +684,12 @@
       $("xo-filter-toggle").setAttribute("aria-expanded", "false");
     });
     $("xo-refresh").addEventListener("click", () => { loadSummary(); loadList(); });
+    // "Find contacts in CRM" lives in rows and in expanded details, which are
+    // re-rendered often — one delegated listener serves all of them.
+    $("xo-list").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-xo-rel]");
+      if (b) openRelated(Number(b.dataset.xoRel));
+    });
 
     $("xo-dl-btn").addEventListener("click", (e) => {
       e.stopPropagation();
@@ -678,6 +713,227 @@
       loadDetail(ex);
     }
     syncFilterInputs();
+  }
+
+  /* ── Find contacts in CRM: related-record review ─────────────────────────
+     Shows the exhibitor's own (direct) company, then other CRM records that
+     might be the same company — each with the evidence FOR and AGAINST, never
+     a bare score — and, for users the server says may review, the decision
+     controls. The server decides what counts as evidence and who may decide;
+     this only renders what it returns. */
+  const relState = { exId: null, data: null, contacts: new Map(), history: null, lastFocus: null };
+
+  async function postJson(url, body) {
+    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    let j = null; try { j = await r.json(); } catch (e) { /* not JSON */ }
+    return { ok: r.ok, status: r.status, j };
+  }
+
+  function relShell() {
+    let el = $("xo-rel");
+    if (el) return el;
+    el = document.createElement("div");
+    el.id = "xo-rel"; el.className = "xo-rel"; el.hidden = true;
+    el.innerHTML = `
+      <div class="xo-rel-scrim" data-rel-close></div>
+      <aside class="xo-rel-panel" role="dialog" aria-modal="true" aria-labelledby="xo-rel-title">
+        <header class="xo-rel-top">
+          <div class="xo-rel-titles"><h2 id="xo-rel-title">Find contacts in CRM</h2><div class="xo-rel-sub" id="xo-rel-sub" data-no-i18n></div></div>
+          <button type="button" class="btn-ghost btn-sm" data-rel-close>Close</button>
+        </header>
+        <div class="xo-rel-body" id="xo-rel-body" aria-live="polite"></div>
+      </aside>`;
+    document.body.appendChild(el);
+    el.addEventListener("click", (e) => { if (e.target.closest("[data-rel-close]")) closeRelated(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !el.hidden) closeRelated(); });
+    return el;
+  }
+
+  async function openRelated(exId) {
+    relState.exId = exId; relState.contacts.clear(); relState.history = null; relState.lastFocus = document.activeElement;
+    const el = relShell();
+    el.hidden = false; document.body.classList.add("xo-rel-open");
+    $("xo-rel-sub").textContent = "";
+    $("xo-rel-body").innerHTML = `<div class="xo-detail-msg"><span class="spinner"></span> Looking for related CRM records…</div>`;
+    el.querySelector("[data-rel-close]").focus();
+    await loadRelated();
+  }
+
+  function closeRelated() {
+    const el = $("xo-rel"); if (!el) return;
+    el.hidden = true; document.body.classList.remove("xo-rel-open");
+    if (relState.lastFocus && relState.lastFocus.focus) relState.lastFocus.focus();
+  }
+
+  async function loadRelated() {
+    const exId = relState.exId;
+    try {
+      const d = await getJson(`/api/outreach/exhibitors/${exId}/related`);
+      if (exId !== relState.exId) return;
+      relState.data = d;
+      renderRelated();
+    } catch (e) {
+      $("xo-rel-body").innerHTML = `<div class="xo-error" role="alert">Couldn't load related records. <button class="btn-ghost btn-sm" data-rel-retry>Retry</button></div>`;
+      $("xo-rel-body").querySelector("[data-rel-retry]").onclick = loadRelated;
+    }
+  }
+
+  const TIER_LABEL = { strong: "Strong", possible: "Possible", unlikely: "Unlikely" };
+
+  function evidenceList(items, cls, empty) {
+    if (!items.length) return `<li class="xo-ev-none">${esc(empty)}</li>`;
+    return items.map((i) => `<li class="${cls}" data-no-i18n>${esc(i.label)}</li>`).join("");
+  }
+
+  function provenanceLine(p) {
+    if (!p) return "";
+    const src = Object.entries(p.contact_sources || {}).map(([k, n]) => `${k} ×${n}`).join(", ");
+    const bits = [];
+    if (p.created_at) bits.push(`record created ${fmtDate(p.created_at)}`);
+    if (p.company_source) bits.push(`company source: ${p.company_source}${p.source_file ? ` (${p.source_file})` : ""}`);
+    if (src) bits.push(`contacts from ${src}`);
+    if (p.first_activity) bits.push(`first log entry: “${p.first_activity}”`);
+    return bits.join(" · ");
+  }
+
+  function candidateHtml(item, section) {
+    const c = item.candidate;
+    const d = relState.data;
+    const rel = item.relation;
+    const tierChip = section === "reviewed" ? `<span class="xo-chip xo-st-purple">Reviewed: same company</span>`
+      : section === "rejected" ? `<span class="xo-chip xo-st-grey">Not the same company</span>`
+      : `<span class="xo-chip ${item.tier === "strong" ? "xo-st-green" : item.tier === "possible" ? "xo-st-amber" : "xo-st-grey"}">${TIER_LABEL[item.tier] || ""}</span>`
+        + (item.conflicting ? ` <span class="xo-chip xo-st-amber">Conflicting evidence</span>` : "");
+    const shown = relState.contacts.get(c.id);
+    const people = shown === undefined ? "" : shown === null
+      ? `<div class="xo-detail-msg"><span class="spinner"></span> Loading…</div>`
+      : shown.error ? `<div class="xo-error">Couldn't load contacts.</div>`
+      : `<ul class="xo-rel-people" data-no-i18n>${shown.map((p) => `<li><b>${esc(p.full_name || "(no name)")}</b> · ${esc(p.job_title || "")} · ${
+          /@/.test(p.email || "") && !String(p.email).startsWith("(") ? esc(p.email) : `<span class="xo-muted">no usable email</span>`}</li>`).join("")}</ul>`;
+    const current = rel ? `<div class="xo-rel-current">Current decision: <b>${rel.decision === "same_company" ? "Same company" : "Not the same company"}</b>
+        — <span data-no-i18n>${esc(rel.decided_by)}</span>, ${esc(fmtDate(rel.decided_at))}${rel.reason ? `: “<span data-no-i18n>${esc(rel.reason)}</span>”` : ""}</div>` : "";
+    const cur = rel ? rel.decision : "undecided";
+    const needsReason = item.tier !== "strong";
+    const form = d.can_review ? `
+      <form class="xo-rel-form" data-company="${c.id}">
+        <fieldset>
+          <legend class="xo-sr">Decision for record #${c.id}</legend>
+          <label><input type="radio" name="decision" value="same_company" ${cur === "same_company" ? "checked" : ""}> <span>Same company — include these contacts</span></label>
+          <label><input type="radio" name="decision" value="not_same_company" ${cur === "not_same_company" ? "checked" : ""}> <span>Not the same company</span></label>
+          <label><input type="radio" name="decision" value="undecided" ${cur === "undecided" ? "checked" : ""}> <span>Leave undecided</span></label>
+        </fieldset>
+        <label class="xo-rel-reason"><span>Reason${needsReason ? " (required to mark as same company — the evidence here is not strong)" : ""}</span>
+          <input type="text" name="reason" maxlength="1000" placeholder="What makes you sure? e.g. same domain on their website, registry entry, confirmed by phone"></label>
+        <div class="xo-rel-actions"><button type="submit" class="btn-primary btn-sm">Save decision</button><span class="xo-rel-msg" role="status"></span></div>
+      </form>` : "";
+    return `
+      <article class="xo-cand" data-company="${c.id}">
+        <header class="xo-cand-head">
+          <div><b data-no-i18n>#${c.id} ${esc(c.name)}</b> ${tierChip}</div>
+          <div class="xo-muted">${plural(c.contacts, "contact")} · ${plural(c.emailable, "emailable contact")}${c.domain ? ` · <span data-no-i18n>${esc(c.domain)}</span>` : " · no website on record"}</div>
+        </header>
+        <div class="xo-ev">
+          <div class="xo-ev-col"><div class="xo-ev-h">Evidence for</div><ul>${evidenceList(item.for, "xo-ev-for", "None")}</ul></div>
+          <div class="xo-ev-col"><div class="xo-ev-h">Evidence against</div><ul>${evidenceList(item.against, "xo-ev-against", "None found")}${
+            item.caveats.map((k) => `<li class="xo-ev-caveat" data-no-i18n>${esc(k.label)}</li>`).join("")}</ul></div>
+        </div>
+        ${item.shared_account ? `<div class="xo-rel-warn">⚠ Same CRM account as the exhibitor. <span>That is not evidence of identity</span> — the CRM files every company an Apollo name search returns under the account that was searched.</div>` : ""}
+        <div class="xo-prov" data-no-i18n>${esc(provenanceLine(item.provenance))}</div>
+        ${item.sample_titles && item.sample_titles.length ? `<div class="xo-muted" data-no-i18n>Titles: ${esc(item.sample_titles.join(" · "))}</div>` : ""}
+        <div><button type="button" class="btn-ghost btn-sm" data-rel-people="${c.id}">${shown === undefined ? "Show contacts" : "Hide contacts"}</button></div>
+        ${people}
+        ${current}
+        ${form}
+      </article>`;
+  }
+
+  function relSection(title, note, items, section, collapsed) {
+    const body = items.length ? items.map((i) => candidateHtml(i, section)).join("") : `<div class="xo-detail-msg">None.</div>`;
+    const head = `<span class="xo-rel-h">${esc(title)}</span> <span class="xo-count-pill">${items.length}</span>`;
+    if (collapsed) return `<details class="xo-rel-sec" data-sec="${section}"><summary>${head}</summary>${note ? `<p class="xo-muted">${esc(note)}</p>` : ""}${body}</details>`;
+    return `<section class="xo-rel-sec" data-sec="${section}"><h3>${head}</h3>${note ? `<p class="xo-muted">${esc(note)}</p>` : ""}${body}</section>`;
+  }
+
+  function renderRelated() {
+    const d = relState.data;
+    $("xo-rel-sub").textContent = `${d.exhibitor.name}${d.exhibitor.domain ? ` · ${d.exhibitor.domain}` : " · no website on file"}`;
+    const direct = d.direct
+      ? `<div class="xo-cand xo-direct"><header class="xo-cand-head"><div><b data-no-i18n>#${d.direct.company_id} ${esc(d.direct.name)}</b>
+           <span class="xo-chip xo-st-green">Linked company</span></div>
+           <div class="xo-muted">${plural(d.direct.contacts, "direct contact")} · ${plural(d.direct.emailable, "emailable contact")}${d.direct.domain ? ` · <span data-no-i18n>${esc(d.direct.domain)}</span>` : " · no website on file"}</div></header>
+           <p class="xo-muted">This is the company the official exhibitor listing is linked to. Only its contacts count in the KPIs.</p>
+           <button type="button" class="btn-ghost btn-sm" data-xo-crm="${esc(d.direct.name)}">Open in CRM</button></div>`
+      : `<div class="xo-cand xo-direct"><p>This exhibitor is not linked to a CRM company.</p></div>`;
+    const readOnly = d.can_review ? ""
+      : `<div class="xo-rel-note">Read-only. Only users listed in ADMIN_USERS can record whether a record is the same company.</div>`;
+    $("xo-rel-body").innerHTML = `
+      ${readOnly}
+      <div class="xo-rel-note">⚠ ${esc(d.account_note)}</div>
+      <section class="xo-rel-sec"><h3><span class="xo-rel-h">Linked company</span></h3>${direct}</section>
+      ${relSection("Strong candidates", "Same website or work-email domain, or the same legal name — and nothing against.", d.strong, "strong", false)}
+      ${relSection("Possible candidates", "Similar name only, or strong signals with something against. Needs a person to check.", d.possible, "possible", false)}
+      ${relSection("Unlikely matches", "Similar name, but the domain evidence points elsewhere.", d.unlikely, "unlikely", true)}
+      ${relSection("Reviewed — same company", "Their contacts appear under this exhibitor, labelled, and keep their own company.", d.reviewed, "reviewed", false)}
+      ${relSection("Marked not the same company", "Not suggested again unless the decision is reversed.", d.rejected, "rejected", true)}
+      <details class="xo-rel-sec" data-sec="history"><summary><span class="xo-rel-h">Decision history</span></summary><div id="xo-rel-history"><div class="xo-detail-msg">Open to load.</div></div></details>`;
+    wireRelated();
+    localize($("xo-rel"));
+  }
+
+  function wireRelated() {
+    const body = $("xo-rel-body");
+    body.querySelectorAll("[data-xo-crm]").forEach((b) => { b.onclick = () => { closeRelated(); openInCrm(b.dataset.xoCrm); }; });
+    body.querySelectorAll("[data-rel-people]").forEach((b) => {
+      b.onclick = async () => {
+        const id = Number(b.dataset.relPeople);
+        if (relState.contacts.has(id)) { relState.contacts.delete(id); renderRelated(); return; }
+        relState.contacts.set(id, null); renderRelated();
+        try {
+          const r = await getJson(`/api/companies/${id}/contacts`);
+          relState.contacts.set(id, Array.isArray(r) ? r : (r.contacts || []));
+        } catch (e) { relState.contacts.set(id, { error: true }); }
+        renderRelated();
+      };
+    });
+    const hist = body.querySelector('[data-sec="history"]');
+    if (hist) hist.addEventListener("toggle", () => { if (hist.open) loadHistory(); });
+    body.querySelectorAll("form.xo-rel-form").forEach((form) => {
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const companyId = Number(form.dataset.company);
+        const all = ["strong", "possible", "unlikely", "reviewed", "rejected"].flatMap((k) => relState.data[k]);
+        const item = all.find((i) => i.candidate.id === companyId);
+        const choice = form.decision.value;
+        const reason = form.reason.value.trim();
+        const msg = form.querySelector(".xo-rel-msg");
+        const cur = item && item.relation;
+        if (choice === (cur ? cur.decision : "undecided")) { msg.textContent = "No change to save."; return; }
+        const btn = form.querySelector('[type="submit"]'); btn.disabled = true; msg.textContent = "";
+        const res = choice === "undecided"
+          ? await postJson(`/api/outreach/relations/${cur.id}/revoke`, { reason: reason || "Returned to undecided" })
+          : await postJson(`/api/outreach/exhibitors/${relState.exId}/relations`, { related_company_id: companyId, decision: choice, reason });
+        if (!res.ok) { btn.disabled = false; msg.textContent = (res.j && res.j.message) || "Couldn't save the decision."; return; }
+        await loadRelated();
+        refreshExhibitor(relState.exId);
+      };
+    });
+  }
+
+  async function loadHistory() {
+    const box = $("xo-rel-history"); if (!box) return;
+    box.innerHTML = `<div class="xo-detail-msg"><span class="spinner"></span> Loading…</div>`;
+    try {
+      const d = await getJson(`/api/outreach/exhibitors/${relState.exId}/relations/history`);
+      box.innerHTML = d.history.length ? `<ol class="xo-rel-hist">${d.history.map((h) => `
+        <li><b data-no-i18n>#${h.related_company_id} ${esc(h.company_name)}</b> —
+          ${h.decision === "same_company" ? "Same company" : "Not the same company"}
+          by <span data-no-i18n>${esc(h.decided_by)}</span>, ${esc(fmtDate(h.decided_at))}${h.reason ? `: “<span data-no-i18n>${esc(h.reason)}</span>”` : ""}
+          ${h.revoked_at ? `<div class="xo-muted">Revoked by <span data-no-i18n>${esc(h.revoked_by)}</span>, ${esc(fmtDate(h.revoked_at))}${h.revoke_reason ? `: “<span data-no-i18n>${esc(h.revoke_reason)}</span>”` : ""}</div>` : `<div class="xo-muted">Live</div>`}
+        </li>`).join("")}</ol>` : `<div class="xo-detail-msg">No decisions recorded for this exhibitor.</div>`;
+      localize(box);
+    } catch (e) {
+      box.innerHTML = `<div class="xo-error">Couldn't load the history.</div>`;
+    }
   }
 
   window.outreachShow = function () {

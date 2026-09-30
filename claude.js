@@ -68,6 +68,14 @@ function eventContextLine(context) {
   const where = booths.length
     ? `booth ${booths.join(', ')}`
     : 'booth not yet published';
+  /* Reached through a reviewed relationship: the recipient's own company record
+     is a different CRM entry that a person judged to be the same company. Say
+     so, rather than asserting their record is the listed exhibitor. */
+  const via = context.exhibitorVia && context.exhibitorVia.exhibitors && context.exhibitorVia.exhibitors.length
+    ? context.exhibitorVia.exhibitors : null;
+  if (via) {
+    return `- Event: ${context.eventName} (the recipient's company was reviewed as the same company as the exhibitor ${via.map((n) => `"${n}"`).join(', ')} — ${where})`;
+  }
   return `- Event: ${context.eventName} (the recipient's company is an exhibitor — ${where})`;
 }
 

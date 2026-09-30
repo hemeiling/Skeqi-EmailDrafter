@@ -1454,6 +1454,47 @@ async function initDb() {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_bir_started ON booth_import_runs (started_at DESC)`);
 
+  /* Human-reviewed relationships between an exhibitor and a CRM company OTHER
+     than the one it is linked to (event_exhibitors.company_id, which stays the
+     canonical link and is never changed by this). Supplemental only: a row
+     here never merges companies or moves a contact.
+
+       same_company      a reviewer decided the record is the same company —
+                         its contacts may be worked for this exhibitor, and
+                         keep their own company_id throughout
+       not_same_company  a reviewer decided it is not; it stops being suggested
+       (no live row)     undecided
+
+     History is append-only. A decision is never edited: it is revoked once
+     (who/when/why) and, when changed, a new row is inserted in the same
+     transaction. Ordering a pair's rows by (decided_at, id) is the full
+     timeline, so no back-pointer column is kept. The foreign keys block
+     deleting a company or exhibitor that has review history. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS exhibitor_company_relations (
+      id SERIAL PRIMARY KEY,
+      exhibitor_id INTEGER NOT NULL REFERENCES event_exhibitors(id),
+      related_company_id INTEGER NOT NULL REFERENCES companies(id),
+      decision TEXT NOT NULL CHECK (decision IN ('same_company', 'not_same_company')),
+      reason TEXT,
+      -- Server-computed at decision time: signals for/against, tier, domains
+      -- compared, both companies' names/websites, contact counts.
+      evidence JSONB NOT NULL,
+      decided_by TEXT NOT NULL,
+      decided_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      revoked_by TEXT,
+      revoked_at TIMESTAMPTZ,
+      revoke_reason TEXT,
+      CHECK ((revoked_at IS NULL) = (revoked_by IS NULL))
+    )
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ecr_live
+    ON exhibitor_company_relations (exhibitor_id, related_company_id) WHERE revoked_at IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ecr_exhibitor
+    ON exhibitor_company_relations (exhibitor_id) WHERE revoked_at IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ecr_company
+    ON exhibitor_company_relations (related_company_id) WHERE revoked_at IS NULL`);
+
   await seedTagTaxonomy();
   await seedSkqSystems();
 }

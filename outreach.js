@@ -20,6 +20,7 @@
 
 const ExcelJS = require('exceljs');
 const { listDraftModes } = require('./claude');
+const relations = require('./outreachRelations');
 
 /* ── What counts as what ─────────────────────────────────────────────────────
 
@@ -217,6 +218,18 @@ function baseRowsSql() {
            max(last_sent_at) AS last_sent_at
       FROM cs GROUP BY company_id
   ),
+  /* Contacts on company records a reviewer marked "same company" for this
+     exhibitor. Shown beside the direct count, never folded into it: KPIs and
+     outreach_status below stay direct-contact only. */
+  reviewed AS (
+    SELECT r.exhibitor_id, count(DISTINCT c.id)::int AS reviewed_contacts,
+           count(DISTINCT r.related_company_id)::int AS reviewed_records
+      FROM exhibitor_company_relations r
+      JOIN contacts c ON c.company_id = r.related_company_id
+     WHERE r.decision = 'same_company' AND r.revoked_at IS NULL
+       AND r.exhibitor_id IN (SELECT exhibitor_id FROM ex)
+     GROUP BY r.exhibitor_id
+  ),
   rows AS (
     SELECT ex.exhibitor_id, ex.source_name, ex.company_id, ex.company_name, ex.chinese_name,
            ex.attendance_status, ex.match_confidence, ex.hall,
@@ -233,6 +246,8 @@ function baseRowsSql() {
            COALESCE(s.sent, 0) AS sent,
            COALESCE(s.sent_emailable, 0) AS sent_emailable,
            s.last_sent_at,
+           COALESCE(rv.reviewed_contacts, 0) AS reviewed_contacts,
+           COALESCE(rv.reviewed_records, 0) AS reviewed_records,
            CASE
              WHEN ex.company_id IS NULL THEN 'unmatched'
              WHEN COALESCE(s.contacts, 0) = 0 THEN 'no_contact'
@@ -248,6 +263,7 @@ function baseRowsSql() {
       LEFT JOIN intel it ON it.exhibitor_id = ex.exhibitor_id
       LEFT JOIN mapcat mc ON mc.exhibitor_id = ex.exhibitor_id
       LEFT JOIN cstats s ON s.company_id = ex.company_id
+      LEFT JOIN reviewed rv ON rv.exhibitor_id = ex.exhibitor_id
   )`;
 }
 
@@ -494,14 +510,26 @@ async function exhibitorDetail(pool, exhibitorId) {
       WHERE e.id = $1`, [exhibitorId]);
   if (!ex) return null;
   const contacts = ex.company_id ? await contactsForCompanies(pool, [ex.company_id]) : [];
+  // Best contact is a judgement about the DIRECT company's people only.
   const best = pickBestContact(contacts);
   const emailable = contacts.filter((c) => c.has_email).length;
+  /* Reviewed related records: their contacts keep their own company and are
+     returned in their own groups, each carrying the decision that put it here. */
+  const rels = await relations.liveSameCompany(pool, [ex.exhibitor_id]);
+  const relContacts = rels.length ? await contactsForCompanies(pool, [...new Set(rels.map((r) => r.related_company_id))]) : [];
+  const reviewed = rels.map((r) => ({
+    relation: { id: r.relation_id, company_id: r.related_company_id, company_name: r.company_name,
+      decided_by: r.decided_by, decided_at: r.decided_at, reason: r.reason },
+    contacts: relContacts.filter((c) => c.company_id === r.related_company_id)
+      .map((c) => ({ ...publicContact(c), link_type: 'reviewed', relation_id: r.relation_id })),
+  }));
   return {
     exhibitor: ex,
-    contacts: contacts.map(publicContact),
+    contacts: contacts.map((c) => ({ ...publicContact(c), link_type: 'direct' })),
     best_contact: best,
     // Said, not implied: two or more candidates and still no pick.
     best_contact_note: !best && emailable >= 2 ? 'insufficient_evidence' : null,
+    reviewed,
   };
 }
 
@@ -548,10 +576,24 @@ async function markSent(db, { contactId, sentAt, draftId, notes, userId, eventId
   /* This endpoint serves the outreach page, so it only acts on contacts at an
      exhibitor of the show — not on any contact id someone types in. */
   if (!eventId) throw new OutreachError(404, 'no_event', 'No exhibitor list has been imported yet.');
+  /* Direct: the contact's company is an exhibitor's linked company.
+     Reviewed: a live "same company" decision links the contact's company to
+     an exhibitor of this show. Nothing else qualifies. */
   const { rows: [atShow] } = await db.pool.query(
-    'SELECT 1 FROM event_exhibitors WHERE event_id = $1 AND company_id = $2 LIMIT 1',
+    `SELECT link, relation_id FROM (
+       SELECT 'direct' AS link, NULL::int AS relation_id, 0 AS pref
+         FROM event_exhibitors WHERE event_id = $1 AND company_id = $2
+       UNION ALL
+       SELECT 'reviewed', r.id, 1
+         FROM exhibitor_company_relations r JOIN event_exhibitors e ON e.id = r.exhibitor_id
+        WHERE e.event_id = $1 AND r.related_company_id = $2
+          AND r.decision = 'same_company' AND r.revoked_at IS NULL
+     ) x ORDER BY pref LIMIT 1`,
     [eventId, contact.company_id || -1]);
-  if (!atShow) throw new OutreachError(404, 'not_exhibitor_contact', 'This contact is not at an exhibitor of this show.');
+  if (!atShow) {
+    throw new OutreachError(404, 'not_exhibitor_contact',
+      'This contact is not at an exhibitor of this show, directly or through a reviewed related record.');
+  }
 
   /* Always the contact's own address. Accepting one from the request would
      let a caller record a "send" to any address against any contact. */
@@ -591,11 +633,12 @@ async function markSent(db, { contactId, sentAt, draftId, notes, userId, eventId
     userId,
   });
   await db.logContactActivity(contact.id, 'email_logged',
-    `Marked as sent to ${to} (${when.toISOString().slice(0, 10)}) from Exhibitor Outreach`);
+    `Marked as sent to ${to} (${when.toISOString().slice(0, 10)}) from Exhibitor Outreach`
+    + (atShow.link === 'reviewed' ? ` — via reviewed related-company relation #${atShow.relation_id}` : ''));
   await db.logCrmActivity({
     actor: userId, action: 'outreach.mark_sent', objectType: 'communication', objectId: row.id,
     companyId: contact.company_id, contactId: contact.id,
-    metadata: { source: 'manual', draft_id: draft ? draft.id : null },
+    metadata: { source: 'manual', draft_id: draft ? draft.id : null, link: atShow.link, relation_id: atShow.relation_id },
   });
   return row;
 }
@@ -649,6 +692,9 @@ const EXPORT_COLUMNS = [
   { key: 'sent_status', header: 'Sent Status', width: 12 },
   { key: 'sent_date', header: 'Sent Date', width: 12 },
   { key: 'outreach_status', header: 'Outreach Status', width: 20 },
+  { key: 'contact_link_type', header: 'Contact Link Type', width: 16 },
+  { key: 'reviewed_relation_id', header: 'Reviewed Relation ID', width: 14 },
+  { key: 'contact_company', header: 'Contact CRM Company', width: 30 },
   { key: 'best_contact', header: 'Best Contact', width: 12 },
   { key: 'best_contact_reason', header: 'Best Contact Reason', width: 40 },
   { key: 'sent_source', header: 'Sent Source', width: 12 },
@@ -662,7 +708,9 @@ const EXPORT_COLUMNS = [
    columns blank, so the file is a complete list of the show. */
 async function exportRows(pool, eventId, input = {}) {
   const { rows: exhibitors } = await listExhibitors(pool, eventId, input, { all: true });
-  const companyIds = [...new Set(exhibitors.map((e) => e.company_id).filter(Boolean))];
+  const rels = await relations.liveSameCompany(pool, exhibitors.map((e) => e.exhibitor_id));
+  const relByEx = new Map(); for (const r of rels) relByEx.set(r.exhibitor_id, [...(relByEx.get(r.exhibitor_id) || []), r]);
+  const companyIds = [...new Set([...exhibitors.map((e) => e.company_id), ...rels.map((r) => r.related_company_id)].filter(Boolean))];
   const contacts = await contactsForCompanies(pool, companyIds);
   const byCompany = new Map();
   for (const c of contacts) {
@@ -681,23 +729,33 @@ async function exportRows(pool, eventId, input = {}) {
       exhibitor_id: e.exhibitor_id,
     };
     const list = e.company_id ? (byCompany.get(e.company_id) || []) : [];
-    if (!list.length) {
+    const reviewedGroups = (relByEx.get(e.exhibitor_id) || []).map((r) => ({ r, people: byCompany.get(r.related_company_id) || [] }));
+    if (!list.length && !reviewedGroups.some((g) => g.people.length)) {
       out.push({ ...base, contact_name: '', title: '', email: '', draft_status: '', sent_status: '',
-        sent_date: null, best_contact: '', best_contact_reason: '', sent_source: '', draft_mode: '' });
+        sent_date: null, best_contact: '', best_contact_reason: '', sent_source: '', draft_mode: '',
+        contact_link_type: '', reviewed_relation_id: null, contact_company: '' });
       continue;
     }
     const best = pickBestContact(list);
-    for (const c of list) {
+    // Direct contacts first, then each reviewed record's — every row says which.
+    const tagged = [
+      ...list.map((c) => ({ c, link: 'Direct', relationId: null, company: e.company_name || '' })),
+      ...reviewedGroups.flatMap((g) => g.people.map((c) => ({ c, link: 'Reviewed', relationId: g.r.relation_id, company: g.r.company_name }))),
+    ];
+    for (const { c, link, relationId, company } of tagged) {
       out.push({
         ...base,
+        contact_link_type: link,
+        reviewed_relation_id: relationId,
+        contact_company: company,
         contact_name: c.full_name || '',
         title: c.job_title || '',
         email: c.has_email ? c.email.trim() : '',
         draft_status: c.draft_id ? 'Drafted' : (c.has_email ? 'No draft' : ''),
         sent_status: c.last_sent_id ? 'Sent' : 'Not sent',
         sent_date: c.last_sent_at ? new Date(c.last_sent_at) : null,
-        best_contact: best && best.contact_id === c.id ? 'Yes' : '',
-        best_contact_reason: best && best.contact_id === c.id
+        best_contact: link === 'Direct' && best && best.contact_id === c.id ? 'Yes' : '',
+        best_contact_reason: link === 'Direct' && best && best.contact_id === c.id
           ? `${best.basis_label}: ${best.reasons.join('; ')}` : '',
         sent_source: c.last_sent_source || '',
         draft_mode: c.draft_id ? (modeLabels[c.draft_mode] || c.draft_mode) : '',
@@ -784,6 +842,25 @@ async function draftEventContext(pool, company) {
   if (currentEventId) {
     const ex = await exhibitorContextForCompany(pool, company.id, currentEventId);
     if (ex) return { eventName: ex.eventName, booths: ex.booths, source: 'exhibitor' };
+    /* A company a reviewer marked "same company" as a listed exhibitor gets
+       that exhibitor's show and booth — only while the decision is live. */
+    const { rows: [rv] } = await pool.query(
+      `SELECT ev.name AS event_name,
+              array_remove(array_agg(DISTINCT b.booth_number ORDER BY b.booth_number), NULL) AS booths,
+              array_agg(DISTINCT COALESCE(xco.name, e.source_name)) AS exhibitors,
+              array_agg(DISTINCT r.id) AS relation_ids
+         FROM exhibitor_company_relations r
+         JOIN event_exhibitors e ON e.id = r.exhibitor_id
+         JOIN events ev ON ev.id = e.event_id
+         LEFT JOIN exhibitor_booths b ON b.exhibitor_id = e.id AND b.retired_at IS NULL
+         LEFT JOIN companies xco ON xco.id = e.company_id
+        WHERE r.related_company_id = $1 AND r.decision = 'same_company' AND r.revoked_at IS NULL
+          AND e.event_id = $2 AND e.attendance_status = 'listed'
+        GROUP BY ev.name`, [company.id, currentEventId]);
+    if (rv) {
+      return { eventName: rv.event_name, booths: rv.booths || [], source: 'reviewed_relation',
+        viaExhibitors: rv.exhibitors || [], relationIds: rv.relation_ids || [] };
+    }
   }
   if (company.event_id && company.event_id !== currentEventId) {
     const { rows: [ev] } = await pool.query('SELECT name FROM events WHERE id = $1', [company.event_id]);

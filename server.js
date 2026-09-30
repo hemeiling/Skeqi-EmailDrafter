@@ -70,6 +70,7 @@ const emailSvc = require('./email');
 const accountResearch = require('./accountResearch');
 const providers = require('./providers');
 const outreach = require('./outreach');
+const outreachRelations = require('./outreachRelations');
 const {
   recordAiUsage, aiUsageTotals, aiUsageByFeature, aiUsageByCompany, estimateAiSaved,
   getAiBudget, setAiBudget, listActivePricing, buildPeriodFilter,
@@ -3750,7 +3751,10 @@ async function buildDraftContext(contact, mode, extraInstructions, resolvedConta
       catch (e) { console.warn('draft context: event lookup failed:', e.message); }
       if (ev) {
         context.eventName = ev.eventName;
-        if (ev.source === 'exhibitor') context.exhibitorBooths = ev.booths;
+        if (ev.source === 'exhibitor' || ev.source === 'reviewed_relation') context.exhibitorBooths = ev.booths;
+        // Why this contact gets the show: a reviewer linked their company to the exhibitor.
+        if (ev.source === 'reviewed_relation') context.exhibitorVia = { exhibitors: ev.viaExhibitors, relationIds: ev.relationIds };
+        context.eventSource = ev.source;
       }
     }
   }
@@ -4004,6 +4008,8 @@ app.post('/api/draft-email/inspect', async (req, res) => {
       skq_modules: (built.skqModules || []).map((m) => m.name_en),
       company_notes: built.context.companyNotes || null,
       event_name: built.context.eventName || null,
+      event_source: built.context.eventSource || null,
+      event_relation_ids: built.context.exhibitorVia ? built.context.exhibitorVia.relationIds : null,
       extra_instructions: built.context.extraInstructions || null,
       prior_interactions: priorSummary,
       prompt,
@@ -4781,7 +4787,7 @@ async function outreachEvent(req, res) {
 }
 
 function outreachFail(res, where, err) {
-  if (err instanceof outreach.OutreachError) {
+  if (err instanceof outreach.OutreachError || err instanceof outreachRelations.RelationError) {
     return res.status(err.status).json({ error: err.code, message: err.message, ...err.extra });
   }
   console.error(`[outreach] ${where}:`, err.message);
@@ -4858,6 +4864,60 @@ app.post('/api/outreach/sent/:id/undo', async (req, res) => {
     const out = await outreach.undoManualSent(require('./db'), { communicationId: id, userId: reqUser(req) });
     res.json({ ok: true, ...out });
   } catch (err) { outreachFail(res, 'undo', err); }
+});
+
+/* ── Related company records (human-reviewed) ─────────────────────────────
+   Reading candidates and evidence: any signed-in user. Recording or revoking
+   a decision: only users listed in ADMIN_USERS — checked inside
+   outreachRelations, so no route can skip it. Nothing here touches
+   event_exhibitors.company_id, merges a company or moves a contact. */
+const positiveId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null; };
+
+app.get('/api/outreach/exhibitors/:id/related', async (req, res) => {
+  try {
+    const id = positiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+    const eventId = await outreachEvent(req, res);
+    if (!eventId) return;
+    res.json({ ok: true, ...(await outreachRelations.relatedPanel(pool, { exhibitorId: id, eventId, user: reqUser(req) })) });
+  } catch (err) { outreachFail(res, 'related', err); }
+});
+
+app.get('/api/outreach/exhibitors/:id/relations/history', async (req, res) => {
+  try {
+    const id = positiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+    const eventId = await outreachEvent(req, res);
+    if (!eventId) return;
+    res.json({ ok: true, history: await outreachRelations.relationHistory(pool, { exhibitorId: id, eventId }) });
+  } catch (err) { outreachFail(res, 'relation-history', err); }
+});
+
+app.post('/api/outreach/exhibitors/:id/relations', async (req, res) => {
+  try {
+    if (!requireJson(req, res)) return;
+    const id = positiveId(req.params.id);
+    const companyId = positiveId(req.body && req.body.related_company_id);
+    if (!id || !companyId) return res.status(400).json({ error: 'bad_id' });
+    const eventId = await outreachEvent(req, res);
+    if (!eventId) return;
+    const row = await outreachRelations.setDecision(pool, {
+      exhibitorId: id, companyId, decision: req.body.decision, reason: req.body.reason, user: reqUser(req), eventId,
+    });
+    res.json({ ok: true, relation: row });
+  } catch (err) { outreachFail(res, 'relation-decide', err); }
+});
+
+app.post('/api/outreach/relations/:id/revoke', async (req, res) => {
+  try {
+    if (!requireJson(req, res)) return;
+    const id = positiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+    const eventId = await outreachEvent(req, res);
+    if (!eventId) return;
+    const row = await outreachRelations.revokeDecision(pool, { relationId: id, reason: req.body && req.body.reason, user: reqUser(req), eventId });
+    res.json({ ok: true, relation: row });
+  } catch (err) { outreachFail(res, 'relation-revoke', err); }
 });
 
 app.get('/api/outreach/export', async (req, res) => {

@@ -1249,6 +1249,18 @@ async function openDraftModalForContact(contact, refreshFn, options = {}) {
   document.getElementById("modal-title").textContent = `Draft email to ${contact.name}`;
   document.getElementById("modal-contact-info").textContent =
     `${contact.title || ""} · ${contact.company || ""} · ${contact.department || ""}`;
+  /* Why this person is being drafted to, when the caller knows (Exhibitor
+     Outreach: a contact reached through a reviewed related-company record).
+     Reset on every open so it never leaks onto an unrelated draft. */
+  let prov = document.getElementById("modal-provenance");
+  if (!prov) {
+    prov = document.createElement("div");
+    prov.id = "modal-provenance";
+    prov.className = "modal-provenance";
+    document.getElementById("modal-contact-info").insertAdjacentElement("afterend", prov);
+  }
+  prov.textContent = options.provenance || "";
+  prov.hidden = !options.provenance;
   document.getElementById("modal-extra-instructions").value = "";
   document.getElementById("modal-extra-instructions").oninput = refreshPromptInspectorSoon;
   // Re-rendered per open so it reflects options changed elsewhere (e.g. in
