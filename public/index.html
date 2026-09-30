@@ -2443,6 +2443,19 @@
      column folds away on narrower layouts, the badge does not. */
   .xo-ct-badge { align-self: center; }
   .xo-reveal-err { color: var(--color-danger-text); font-weight: 600; }
+  /* Automatic contact discovery: a status line under the company, and a block
+     at the top of the expanded row with the queue actions. */
+  .xo-disc { display: block; font-size: 0.74rem; font-weight: 600; overflow-wrap: anywhere; }
+  .xo-disc-box .xo-disc { display: inline; }
+  .xo-disc-grey { color: var(--color-text-secondary); }
+  .xo-disc-blue { color: #0C579A; }
+  .xo-disc-green { color: var(--color-success-text); }
+  .xo-disc-amber { color: var(--color-warn-text); }
+  .xo-disc-red { color: var(--color-danger-text); }
+  .xo-disc-box { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding: 8px 0 10px; font-size: 0.84rem; }
+  .xo-disc-box > div { flex-basis: 100%; font-size: 0.78rem; }
+  .xo-disc-acts { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+  @media (max-width: 767px) { .xo-disc-acts { margin-left: 0; width: 100%; } .xo-disc-acts .btn-sm { flex: 1; min-height: 44px; } }
   .xo-ct-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
   .xo-best { font-size: 0.7rem; font-weight: 700; color: var(--color-primary); background: var(--color-primary-soft);
     border-radius: var(--radius-full); padding: 1px 8px; }
@@ -4835,6 +4848,7 @@
   <script src="/app.js"></script>
   <script src="/outreach-filters.js"></script>
   <script src="/outreach-status.js"></script>
+  <script src="/outreach-discovery.js"></script>
   <script src="/outreach.js"></script>
 <script src="/i18n.js"></script>
   <!-- The assistant. Mounted in the shell rather than in a view: Booth Map and

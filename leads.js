@@ -278,6 +278,58 @@ async function searchPeople(company, apiKey, page = 1, titleFilters, target) {
   return { status: res2.status, data: data2 };
 }
 
+/* ONE page of an Apollo people SEARCH for automatic discovery — the same
+   query Find Contacts sends, and nothing more:
+     • reliable domain → q_organization_domains_list (domain-first, f98c70c)
+     • otherwise       → q_organization_name, with NO keyword fallback: the
+                         broad q_keywords query is what surfaced "AI Technology
+                         Futures/Partners/…"; discovery never sends it
+     • no organisation-search fallback: a failure is reported as a failure
+   people search only — this never calls people/match or any reveal endpoint.
+   Returns { status, data, retryAfterMs } or throws on a network error. */
+async function searchPeoplePage(target, apiKey, page, options = {}) {
+  const titles = (options.titleFilters && options.titleFilters.length) ? options.titleFilters : APOLLO_TITLE_FILTERS;
+  const body = target.mode === 'domain'
+    ? { q_organization_domains_list: [target.domain], person_titles: titles, page, per_page: APOLLO_PAGE_SIZE }
+    : { q_organization_name: target.name, person_titles: titles, page, per_page: APOLLO_PAGE_SIZE };
+  const res = await fetch(APOLLO_PEOPLE_URL, {
+    method: 'POST', headers: apolloHeaders(apiKey), body: JSON.stringify(body),
+    signal: options.signal,
+  });
+  recordApolloPeopleCall();
+  const data = await res.json().catch(() => ({}));
+  return { status: res.status, data, retryAfterMs: parseRetryAfter(res.headers.get('retry-after')) };
+}
+
+/* Retry-After is either delta-seconds or an HTTP date. */
+function parseRetryAfter(v, now = Date.now()) {
+  if (v == null || String(v).trim() === '') return null;
+  const n = Number(v);
+  if (Number.isFinite(n) && n >= 0) return Math.round(n * 1000);
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? Math.max(0, t - now) : null;
+}
+
+/* Identity + leadership filtering for one page, exactly as doCompanySearch
+   applies them: accepted people are labelled as the TARGET company. */
+function classifySearchPage(rawPeople, target) {
+  const leaders = (rawPeople || []).filter(isLeadershipContact);
+  const verdict = identity.classifyPeople(leaders, target);
+  const shape = (r) => ({
+    ...formatPerson(r.person, ''),
+    apollo_org_name: r.org.name || '', apollo_org_domain: r.org.domain || '',
+    identity: r.basis, identity_reason: r.reason,
+  });
+  return {
+    contacts: verdict.results.filter((r) => r.decision === 'accept')
+      .map((r) => ({ ...shape(r), company: target.name, company_id: target.companyId || null })),
+    review: verdict.results.filter((r) => r.decision === 'review').map(shape),
+    rejected: verdict.results.filter((r) => r.decision === 'reject').map(shape),
+    notLeadership: (rawPeople || []).length - leaders.length,
+    inconsistent: verdict.inconsistent, orgNames: verdict.orgNames,
+  };
+}
+
 async function searchOrgs(company, apiKey) {
   const res = await fetch(APOLLO_ORG_URL, {
     method: 'POST',
@@ -397,4 +449,5 @@ async function doCompanySearch(company, apiKey, options = {}) {
 
 const CRM_FIELDS = ['name', 'title', 'company', 'department', 'email', 'linkedin', 'confidence', 'relevance', 'location'];
 
-module.exports = { doCompanySearch, CRM_FIELDS, isLeadershipContact, isPlausiblyRelatedCompany };
+module.exports = { doCompanySearch, searchPeoplePage, classifySearchPage, parseRetryAfter, APOLLO_PAGE_SIZE,
+  CRM_FIELDS, isLeadershipContact, isPlausiblyRelatedCompany };

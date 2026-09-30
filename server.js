@@ -96,6 +96,8 @@ const accountResearch = require('./accountResearch');
 const providers = require('./providers');
 const outreach = require('./outreach');
 const outreachRelations = require('./outreachRelations');
+const { saveApolloContact } = require('./apolloContactStore');
+const contactDiscovery = require('./contactDiscovery');
 const {
   recordAiUsage, aiUsageTotals, aiUsageByFeature, aiUsageByCompany, estimateAiSaved,
   getAiBudget, setAiBudget, listActivePricing, buildPeriodFilter,
@@ -2563,39 +2565,18 @@ app.post('/api/leads/search', async (req, res) => {
       let importedCount = 0;
       let duplicatesSkipped = 0;
       for (const c of contacts) {
-        const cleanEmail = cleanApolloEmail(c.email);
-        const rawJson = c._apollo_raw ? JSON.stringify(c._apollo_raw) : undefined;
-        console.log(`[leads/search] ${c.name} @ ${c.company}: apollo_email_fields={email:${JSON.stringify(c._apollo_raw && c._apollo_raw.email)}, personal_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.personal_emails)}, business_emails:${JSON.stringify(c._apollo_raw && c._apollo_raw.business_emails)}, has_email:${c._apollo_raw && c._apollo_raw.has_email}} cleanEmail=${JSON.stringify(cleanEmail)}`);
-        /* The same Apollo person always resolves to the same canonical
-           contact (Apollo id first, then email / LinkedIn / name). A person
-           already in the CRM keeps their company, name, revealed email and
-           lookup state — a search only fills gaps (contactReimport.js). Only
+        /* The shared save path (apolloContactStore.js): the same Apollo person
+           always resolves to the same canonical contact, an existing contact
+           keeps its company, name, revealed email and lookup state, and only
            new people are attached to the searched company. */
-        const { id, updated, existing: prior } = await upsertApolloSearchContact({
-          full_name: c.name, job_title: c.title, department: c.department, seniority: c.seniority,
-          company: target.name || companyName,
-          company_id: lastCompanyId,
-          website: c.company_website,
-          email: cleanEmail, linkedin_url: c.linkedin, address: c.location,
-          confidence: c.confidence, relevance: c.relevance,
-          apollo_person_id: c.apollo_id, source: 'apollo',
-          has_email: Boolean(c.has_email) || Boolean(cleanEmail),
-          apollo_raw_json: rawJson,
-          email_lookup_status: cleanEmail ? 'found' : 'not_checked',
-          // Search-supplied, which costs no reveal credit — a distinction the
-          // details panel and the export both surface.
-          email_source: cleanEmail ? 'apollo_search' : 'none'
-        });
-        c.contact_id = id;
+        const saved = await saveApolloContact(c, { companyId: lastCompanyId, companyName: target.name || companyName,
+          searchLabel: 'Apollo search', domain: idn.domain });
+        c.contact_id = saved.id;
         // Report what the CRM now holds, not what this search returned.
-        c.email_lookup_status = cleanEmail ? 'found' : ((prior && prior.email_lookup_status) || 'not_checked');
-        if (!cleanEmail && prior && prior.email) c.email = prior.email;
-        if (updated) duplicatesSkipped++; else importedCount++;
-        console.log(`[leads/search] -> contact_id=${id} updated=${updated} email_saved=${JSON.stringify(cleanEmail)}`);
-        const basis = apolloIdentity.BASIS_TEXT[c.identity] || c.identity || 'unrecorded';
-        await logContactActivity(id, 'apollo_search',
-          `${updated ? 'Refreshed' : 'Found'} via Apollo search for ${companyName} — identity: ${basis}`
-          + `${idn.domain ? ` (${idn.domain})` : ''}${c.apollo_org_name ? `; Apollo organisation "${c.apollo_org_name}"` : ''}`);
+        c.email_lookup_status = saved.email_lookup_status;
+        if (saved.email) c.email = saved.email;
+        if (saved.updated) duplicatesSkipped++; else importedCount++;
+        console.log(`[leads/search] -> contact_id=${saved.id} updated=${saved.updated}`);
       }
 
       await logApolloResult('people_search', lastCompanyId, null, companyName, JSON.stringify({ contacts, orgs, identity: idn,
@@ -4986,6 +4967,77 @@ app.post('/api/outreach/relations/:id/revoke', async (req, res) => {
   } catch (err) { outreachFail(res, 'relation-revoke', err); }
 });
 
+/* ── Automatic contact discovery (contactDiscovery.js) ────────────────────
+   People search only: nothing here reveals, drafts or sends. Every write is
+   administrator-only and JSON-only (same rules as the relation decisions). */
+let contactDiscoveryWorker = null;
+
+function discoveryFail(res, where, err) {
+  if (err instanceof contactDiscovery.DiscoveryError) return res.status(err.status).json({ error: err.code, message: err.message });
+  console.error(`[contact-discovery] ${where}:`, err.message);
+  return res.status(500).json({ error: 'discovery_failed', message: 'Contact discovery request failed. Please retry.' });
+}
+
+function adminOnly(req, res) {
+  if (isAdmin(req)) return true;
+  res.status(403).json({ error: 'forbidden', message: 'Only an administrator can change contact discovery.' });
+  return false;
+}
+
+app.get('/api/contact-discovery/status', async (req, res) => {
+  try {
+    const o = await contactDiscovery.overview();
+    res.json({ ok: true, ...o, apollo_configured: apolloConfigured(), can_manage: isAdmin(req) });
+  } catch (err) { discoveryFail(res, 'status', err); }
+});
+
+app.post('/api/contact-discovery/settings', async (req, res) => {
+  try {
+    if (!requireJson(req, res) || !adminOnly(req, res)) return;
+    const settings = await contactDiscovery.updateSettings(req.body, reqUser(req));
+    console.log(`[contact-discovery] settings changed by ${reqUser(req)}: ${JSON.stringify(req.body)}`);
+    res.json({ ok: true, settings });
+  } catch (err) { discoveryFail(res, 'settings', err); }
+});
+
+app.post('/api/contact-discovery/queue', async (req, res) => {
+  try {
+    if (!requireJson(req, res) || !adminOnly(req, res)) return;
+    const kind = req.body.kind || 'search';
+    const results = await contactDiscovery.queueCompanies(req.body.company_ids, { kind, user: reqUser(req) });
+    res.json({ ok: true, results });
+  } catch (err) { discoveryFail(res, 'queue', err); }
+});
+
+/* The eligibility policy, previewed. A read: nothing is queued. */
+app.get('/api/contact-discovery/eligible', async (req, res) => {
+  try {
+    if (!adminOnly(req, res)) return;
+    const eventId = await outreach.resolveEventId(pool, req.query.event_id);
+    if (!eventId) return res.status(404).json({ error: 'no_event' });
+    const rows = await contactDiscovery.eligibleCompanies(eventId, {
+      limit: req.query.limit, includeWithContacts: req.query.include_with_contacts === 'true' });
+    res.json({ ok: true, event_id: eventId, count: rows.length, companies: rows });
+  } catch (err) { discoveryFail(res, 'eligible', err); }
+});
+
+/* One exhibitor's company, from the Outreach row: search, retry, refresh, find more. */
+app.post('/api/outreach/exhibitors/:id/discovery', async (req, res) => {
+  try {
+    if (!requireJson(req, res) || !adminOnly(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'bad_id' });
+    const { rows: [ex] } = await pool.query('SELECT company_id FROM event_exhibitors WHERE id = $1', [id]);
+    if (!ex) return res.status(404).json({ error: 'not_found', message: 'Exhibitor not found.' });
+    if (!ex.company_id) return res.status(409).json({ error: 'unmatched', message: 'This exhibitor is not linked to a CRM company.' });
+    const kind = { search: 'search', retry: 'retry', refresh: 'refresh', more: 'more' }[req.body.action];
+    if (!kind) return res.status(400).json({ error: 'bad_action' });
+    const [result] = await contactDiscovery.queueCompanies([ex.company_id], { kind, user: reqUser(req) });
+    const state = (await contactDiscovery.statesFor([ex.company_id])).get(ex.company_id) || null;
+    res.json({ ok: true, result, discovery: state });
+  } catch (err) { discoveryFail(res, 'exhibitor', err); }
+});
+
 app.get('/api/outreach/export', async (req, res) => {
   try {
     const eventId = await outreachEvent(req, res);
@@ -5647,6 +5699,14 @@ initDb()
     };
     await sweepJobs();
     setInterval(sweepJobs, 5 * 60 * 1000).unref();
+
+    /* Automatic contact discovery. The worker only reads its switch until an
+       administrator enables it (contact_discovery_settings.worker_enabled is
+       FALSE on creation); starting it queues nothing and calls nothing. */
+    contactDiscoveryWorker = contactDiscovery.createWorker({
+      apiKey: () => (apolloConfigured() ? config.APOLLO_API_KEY : ''),
+      eventIdFn: () => outreach.resolveEventId(pool),
+    }).start();
 
     initOcrWorker();
     app.listen(PORT, '0.0.0.0', () => {

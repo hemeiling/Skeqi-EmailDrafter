@@ -43,6 +43,8 @@
     expanded: new Set(),
     details: new Map(),       // exhibitor_id → { loading, error, data }
     reveal: new Map(),        // contact_id → 'pending' | 'failed' (this page's reveals only)
+    discovery: { enabled: false, canManage: false, pausedReason: null }, // automatic contact discovery
+    pollTimer: null,
     listSeq: 0,
     summarySeq: 0,
     facets: null,
@@ -215,7 +217,11 @@
   function summaryLine(r) {
     const reviewed = r.reviewed_contacts ? ` · +${plural(r.reviewed_contacts, "contact")} via reviewed records` : "";
     if (!r.company_id) return "Not linked to a CRM company" + reviewed;
-    const parts = [plural(r.contacts, "direct contact"), plural(r.emailable, "email")];
+    // No contacts: say whether Apollo was searched, rather than a bare "0".
+    const dv = window.xoDiscovery.discoveryView(r, state.discovery);
+    if (dv.summary) return dv.summary + reviewed;
+    const parts = [plural(r.contacts, "direct contact"),
+      r.emailable ? plural(r.emailable, "revealed email") : "emails not revealed"];
     if (r.drafted) parts.push(`${r.drafted} drafted`);
     if (r.sent) parts.push(`${r.sent} sent`);
     return parts.join(" · ") + reviewed;
@@ -246,6 +252,7 @@
     list.querySelectorAll("[data-xo-crm]").forEach((b) => { b.onclick = () => openInCrm(b.dataset.xoCrm); });
     for (const id of state.expanded) renderDetail(id);
     renderPager();
+    schedulePoll();
     localize(list); localize($("xo-chips")); localize($("xo-pager"));
   }
 
@@ -266,6 +273,7 @@
             <span class="xo-name-wrap">
               <span class="xo-name" data-no-i18n>${esc(r.display_name)}</span>${zh}${withdrawn}
               <span class="xo-sum">${esc(summaryLine(r))}</span>
+              ${discoveryLineHtml(r)}
               ${cls ? `<span class="xo-class-inline"><span class="xo-class">${esc(cls)}</span></span>` : ""}
             </span>
           </span>
@@ -286,6 +294,84 @@
         </div>
         <div class="xo-detail" id="xo-detail-${r.exhibitor_id}" ${open ? "" : "hidden"}></div>
       </div>`;
+  }
+
+  /* ── Automatic contact discovery ───────────────────────────────────── */
+
+  function discoveryLineHtml(r) {
+    const dv = window.xoDiscovery.discoveryView(r, state.discovery);
+    return dv.line ? `<span class="xo-disc xo-disc-${dv.tone}">${esc(dv.line)}</span>` : "";
+  }
+
+  /* Whether the worker is on, and whether this user may queue. Read once per
+     visit; a read, never a search. */
+  async function loadDiscoveryStatus() {
+    try {
+      const d = await getJson("/api/contact-discovery/status");
+      const s = d.settings || {};
+      state.discovery = {
+        enabled: Boolean(s.worker_enabled && !s.paused_reason && !s.env_forced_off && d.apollo_configured),
+        canManage: Boolean(d.can_manage), pausedReason: s.paused_reason || null,
+      };
+    } catch (e) {
+      state.discovery = { enabled: false, canManage: false, pausedReason: null };
+    }
+    if (state.rows.length) renderList();
+  }
+
+  /* The discovery block in an expanded row: the state, held organisations and
+     the queue actions. Queuing asks the worker to SEARCH; it never reveals. */
+  function discoveryBlockHtml(d) {
+    const emailable = d.contacts.filter((c) => c.has_email).length;
+    const row = { company_id: d.exhibitor.company_id, contacts: d.contacts.length, emailable, discovery: d.discovery };
+    const dv = window.xoDiscovery.discoveryView(row, state.discovery);
+    const disc = d.discovery;
+    const text = dv.summary || dv.line
+      || (disc ? `${window.xoDiscovery.contactsText(row.contacts, emailable)}` : "");
+    if (!text && !dv.actions.length) return "";
+    const held = window.xoDiscovery.heldText(disc);
+    const when = disc && disc.last_searched_at ? ` · last searched ${esc(fmtDate(disc.last_searched_at))}` : "";
+    const err = disc && disc.status === "failed" && disc.last_error ? `<div class="xo-muted" data-no-i18n>${esc(disc.last_error)}</div>` : "";
+    return `<div class="xo-disc-box">
+        <span class="xo-disc xo-disc-${dv.tone}">${esc(text)}</span><span class="xo-muted">${when}</span>
+        ${held ? `<div class="xo-muted">Held for review (not saved): <span data-no-i18n>${esc(held)}</span></div>` : ""}
+        ${err}
+        ${dv.actions.length ? `<span class="xo-disc-acts">${dv.actions.map((a) =>
+          `<button type="button" class="btn-sm btn-ghost" data-disc="${a.kind}">${esc(a.label)}</button>`).join("")}</span>` : ""}
+      </div>`;
+  }
+
+  async function discoveryAction(exId, kind, btnEl) {
+    if (btnEl) btnEl.disabled = true;
+    try {
+      const r = await postJson(`/api/outreach/exhibitors/${exId}/discovery`, { action: kind });
+      if (!r.ok) throw new Error((r.j && r.j.message) || "Couldn't queue contact discovery.");
+      const outcome = r.j.result && r.j.result.outcome;
+      if (typeof showMessage === "function") {
+        showMessage(outcome === "queued"
+          ? (state.discovery.enabled ? "Queued for contact discovery." : "Queued. Discovery is paused, so it will run once it is switched on.")
+          : "Nothing to do: already queued or searched.", "info");
+      }
+      await refreshExhibitor(exId);
+      schedulePoll();
+    } catch (e) {
+      if (btnEl) btnEl.disabled = false;
+      if (typeof showMessage === "function") showMessage(e.message, "error");
+    }
+  }
+
+  /* While a visible row is queued or searching, re-read those rows now and
+     then. Reads only — the worker does the searching, not this page. */
+  function schedulePoll() {
+    clearTimeout(state.pollTimer);
+    if (!state.discovery.enabled) return;
+    const active = state.rows.filter((r) => r.discovery && ["queued", "searching"].includes(r.discovery.status));
+    if (!active.length) return;
+    state.pollTimer = setTimeout(async () => {
+      if (document.hidden) { schedulePoll(); return; }
+      for (const r of active.slice(0, 10)) await refreshExhibitor(r.exhibitor_id);
+      schedulePoll();
+    }, 20000);
   }
 
   function renderPager() {
@@ -399,13 +485,14 @@
     const reviewedSec = reviewed
       ? `<div class="xo-sec-head xo-sec-rev"><b>From reviewed related records</b> <span class="xo-muted">Separate CRM companies a reviewer marked as the same company. Their contacts keep their own company.</span></div>${reviewed}`
       : "";
-    box.innerHTML = errNote + directHead + direct + reviewedSec +
+    box.innerHTML = errNote + discoveryBlockHtml(d) + directHead + direct + reviewedSec +
       `<div class="xo-detail-foot"><button class="btn-ghost btn-sm" data-xo-rel="${id}">Find contacts in CRM</button></div>`;
     const r = box.querySelector("[data-retry]"); if (r) r.onclick = () => loadDetail(id);
     box.querySelectorAll("[data-xo-crm]").forEach((b) => { b.onclick = () => openInCrm(b.dataset.xoCrm); });
     box.querySelectorAll("[data-act]").forEach((b) => {
       b.onclick = () => contactAction(id, Number(b.dataset.cid), b.dataset.act, b);
     });
+    box.querySelectorAll("[data-disc]").forEach((b) => { b.onclick = () => discoveryAction(id, b.dataset.disc, b); });
     localize(box);
   }
 
@@ -976,6 +1063,7 @@
     init();
     loadSummary();
     loadList();
+    loadDiscoveryStatus();
   };
 
   /* app.js restores the last-open view while it loads, before this file

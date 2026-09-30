@@ -1532,6 +1532,76 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_ecr_company
     ON exhibitor_company_relations (related_company_id) WHERE revoked_at IS NULL`);
 
+  /* ── Automatic Apollo contact discovery (contactDiscovery.js) ─────────────
+     One row per CRM company that discovery has been asked to search. It holds
+     the search STATE only — the people found are canonical contacts, saved
+     through the same path as Find Contacts. No row = "Apollo not searched".
+     Additive: nothing here is queued by creating it. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS company_contact_discovery (
+      company_id        INTEGER PRIMARY KEY REFERENCES companies(id) ON DELETE CASCADE,
+      status            TEXT NOT NULL DEFAULT 'queued'
+                        CHECK (status IN ('queued','searching','found','no_results','needs_review','failed')),
+      request_kind      TEXT NOT NULL DEFAULT 'search'
+                        CHECK (request_kind IN ('search','refresh','more','retry','policy')),
+      requested_by      TEXT,
+      priority          INTEGER NOT NULL DEFAULT 0,
+      run_no            INTEGER NOT NULL DEFAULT 1,
+      -- identity used for the search
+      search_mode       TEXT CHECK (search_mode IN ('domain','name')),
+      domain_used       TEXT,
+      name_used         TEXT,
+      -- Apollo pagination: what Apollo reported, and how far we have read
+      apollo_total      INTEGER,
+      pages_fetched     INTEGER NOT NULL DEFAULT 0,
+      next_page         INTEGER NOT NULL DEFAULT 1,
+      page_limit        INTEGER NOT NULL DEFAULT 1,
+      -- outcome counts for the current run (the people are in contacts)
+      people_seen       INTEGER NOT NULL DEFAULT 0,
+      contacts_saved    INTEGER NOT NULL DEFAULT 0,
+      contacts_matched  INTEGER NOT NULL DEFAULT 0,
+      held_count        INTEGER NOT NULL DEFAULT 0,
+      rejected_count    INTEGER NOT NULL DEFAULT 0,
+      not_leadership    INTEGER NOT NULL DEFAULT 0,
+      held_orgs         JSONB NOT NULL DEFAULT '[]'::jsonb,
+      -- failures and retry timing
+      attempts          INTEGER NOT NULL DEFAULT 0,
+      last_error        TEXT,
+      last_error_code   TEXT,
+      next_attempt_at   TIMESTAMPTZ,
+      -- lease for crash recovery
+      worker_id         TEXT,
+      lease_expires_at  TIMESTAMPTZ,
+      heartbeat_at      TIMESTAMPTZ,
+      queued_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      started_at        TIMESTAMPTZ,
+      finished_at       TIMESTAMPTZ,
+      last_searched_at  TIMESTAMPTZ,
+      updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ccd_claimable
+    ON company_contact_discovery (priority DESC, queued_at) WHERE status IN ('queued','searching')`);
+  /* Worker switch, pacing and budget. Created DISABLED with auto-queue OFF:
+     deploying this code queues nothing and sends nothing to Apollo. The
+     request slot and daily counter are shared by every worker process. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS contact_discovery_settings (
+      id                   INTEGER PRIMARY KEY CHECK (id = 1),
+      worker_enabled       BOOLEAN NOT NULL DEFAULT FALSE,
+      auto_queue_enabled   BOOLEAN NOT NULL DEFAULT FALSE,
+      requests_per_minute  INTEGER NOT NULL DEFAULT 20 CHECK (requests_per_minute BETWEEN 1 AND 120),
+      daily_request_cap    INTEGER NOT NULL DEFAULT 300 CHECK (daily_request_cap BETWEEN 0 AND 20000),
+      pages_per_company    INTEGER NOT NULL DEFAULT 1 CHECK (pages_per_company BETWEEN 1 AND 20),
+      max_attempts         INTEGER NOT NULL DEFAULT 5 CHECK (max_attempts BETWEEN 1 AND 20),
+      next_slot_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      requests_day         DATE,
+      requests_today       INTEGER NOT NULL DEFAULT 0,
+      paused_reason        TEXT,
+      updated_by           TEXT,
+      updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+  await pool.query(`INSERT INTO contact_discovery_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+
   await seedTagTaxonomy();
   await seedSkqSystems();
 }

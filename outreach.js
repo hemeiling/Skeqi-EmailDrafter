@@ -21,6 +21,8 @@
 const ExcelJS = require('exceljs');
 const { listDraftModes } = require('./claude');
 const relations = require('./outreachRelations');
+// Loaded on first use: this module stays loadable without a database.
+const discovery = { statesFor: (...a) => require('./contactDiscovery').statesFor(...a) };
 
 /* ── What counts as what ─────────────────────────────────────────────────────
 
@@ -332,6 +334,7 @@ async function listExhibitors(pool, eventId, input = {}, paging = {}) {
      ${limitSql}`, params);
   const total = rows.length ? rows[0].total_count : (page > 1 ? await countOnly(pool, eventId, f) : 0);
   for (const r of rows) { delete r.total_count; delete r.booth_sort; }
+  await attachDiscovery(pool, rows);
   return { rows, total, page, page_size: pageSize, filters: f };
 }
 
@@ -505,6 +508,13 @@ function pickBestContact(contacts) {
   };
 }
 
+/* Automatic contact discovery state for each row's company (display only —
+   no count or KPI reads it). Absent = Apollo not searched by discovery. */
+async function attachDiscovery(pool, rows) {
+  const states = await discovery.statesFor(rows.map((r) => r.company_id), pool);
+  for (const r of rows) r.discovery = (r.company_id && states.get(r.company_id)) || null;
+}
+
 /* One exhibitor with its contacts, for the expanded row. */
 async function exhibitorDetail(pool, exhibitorId) {
   const { rows: [ex] } = await pool.query(
@@ -527,8 +537,10 @@ async function exhibitorDetail(pool, exhibitorId) {
     contacts: relContacts.filter((c) => c.company_id === r.related_company_id)
       .map((c) => ({ ...publicContact(c), link_type: 'reviewed', relation_id: r.relation_id })),
   }));
+  const disc = ex.company_id ? (await discovery.statesFor([ex.company_id], pool)).get(ex.company_id) : null;
   return {
     exhibitor: ex,
+    discovery: disc || null,
     contacts: contacts.map((c) => ({ ...publicContact(c), link_type: 'direct' })),
     best_contact: best,
     // Said, not implied: two or more candidates and still no pick.
