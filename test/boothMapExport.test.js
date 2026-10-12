@@ -42,6 +42,13 @@ test('mapCheck: match, different occupant, available, off-map and no booth are a
   assert.equal(xp.mapCheck({ source_name: 'Acme Corp', booths: [] }, map).code, 'no_booth');
 });
 
+test('a "website" that is really an email address is not exported', () => {
+  assert.equal(xp.publicWebsite('http://jane.doe@acme.example'), '');
+  assert.equal(xp.publicWebsite('jane@acme.example'), '');
+  assert.equal(xp.publicWebsite('https://acme.example/en'), 'https://acme.example/en');
+  assert.equal(xp.publicWebsite(null), '');
+});
+
 test('the export columns carry no contact or credential fields', () => {
   const keys = xp.COLUMNS.map((c) => c.key).join(' ');
   assert.doesNotMatch(keys, /email|phone|contact|linkedin|apollo|token|password|note/i);

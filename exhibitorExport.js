@@ -201,6 +201,15 @@ function mapCheck(ex, mapByBooth) {
   return { code: ok ? 'partial' : 'differs', text: notes.join('; ') };
 }
 
+/* A website column is a company field, but CRM data has addresses typed into
+   it ("http://name@company.com"). Anything carrying an @ is a person, not a
+   site, and is left out rather than published in a show directory. */
+function publicWebsite(v) {
+  const s = String(v || '').trim();
+  if (!s || s.includes('@') || /\s/.test(s)) return '';
+  return s;
+}
+
 function targetLabel(ex) {
   if (ex.kinds.includes('target_customer')) return 'Yes — SKQ curated 是（精选）';
   if (ex.map_category === 'customer') return 'Yes — SKQ map category 是（展位图类别）';
@@ -294,7 +303,7 @@ async function buildSnapshot(pool, input = {}) {
       chinese_name: e.chinese_name || '',
       crm_company_id: e.company_id || null,
       link: e.company_id ? `Direct link 直接关联 (${e.match_confidence || 'matched'})` : 'Not linked to CRM 未关联CRM',
-      website: e.website || '',
+      website: publicWebsite(e.website),
       industry: e.industry || '',
     });
     for (const r of relsByEx.get(e.id) || []) {
@@ -305,7 +314,7 @@ async function buildSnapshot(pool, input = {}) {
         chinese_name: c.chinese_name || '',
         crm_company_id: r.related_company_id,
         link: `Reviewed same company 人工确认同一公司 (relation #${r.relation_id})`,
-        website: c.website || '',
+        website: publicWebsite(c.website),
         industry: c.industry || '',
       });
     }
@@ -560,6 +569,6 @@ function manifest(snapshot) {
 }
 
 module.exports = {
-  buildSnapshot, toCsv, toXlsx, filename, manifest, normalizeOptions, mapCheck, servedMapVersion,
+  buildSnapshot, toCsv, toXlsx, filename, manifest, normalizeOptions, mapCheck, servedMapVersion, publicWebsite,
   ExportError, FILTERS, COLUMNS, BOOTH_COLUMNS, KIND_LABELS, OFFICIAL_FLOOR_PLAN_URL,
 };
