@@ -2872,6 +2872,304 @@ async function loadBoothMapStatus() {
   } catch (e) { /* the strip is informational; a failure must not break the view */ }
 }
 
+/* ══ Booth Map downloads · 展位图下载 ═══════════════════════════════════════
+   Floor plan (PDF/PNG) and exhibitor list (Excel/CSV).
+
+   Two sources, never blended: the floor plan is the SKQ map, drawn by the
+   map's own code through window.skqFloorPlan (an additive hook in the iframe);
+   the exhibitor list and the booth index come from the server, which reads
+   what the last successful refresh verified. Every file states both versions
+   and how far apart they are. Nothing here refreshes or writes anything. */
+
+const BM_EVENT_SLUG = "battery-show-2026";
+
+function bmMapApi() {
+  const f = document.getElementById("bm-frame");
+  try { return (f && f.contentWindow && f.contentWindow.skqFloorPlan) || null; } catch (e) { return null; }
+}
+
+function bmScope() {
+  const el = document.querySelector('input[name="bm-dl-scope"]:checked');
+  return el && el.value === "filter" ? "filter" : "all";
+}
+
+function bmStatus(text, kind) {
+  const el = document.getElementById("bm-dl-status");
+  if (!el) return;
+  el.hidden = !text;
+  el.textContent = text || "";
+  el.className = "bm-dl-status" + (kind ? " is-" + kind : "");
+}
+
+function bmCloseDl() {
+  const m = document.getElementById("bm-dl-menu");
+  if (m) m.hidden = true;
+  document.getElementById("bm-dl-btn")?.setAttribute("aria-expanded", "false");
+}
+
+/* The scope radio mirrors whatever filter the map currently shows. Read when
+   the menu opens, so it is never a stale copy of the map's state. */
+function bmSyncScope() {
+  const api = bmMapApi();
+  const st = api ? api.state() : null;
+  const radio = document.getElementById("bm-dl-scope-filter");
+  const label = document.getElementById("bm-dl-filter-label");
+  const filtered = st && st.filter && st.filter !== "all";
+  radio.disabled = !filtered;
+  label.textContent = filtered ? `Current map filter: ${st.filterLabel}` : "Current map filter · 当前筛选 (none selected 未选择)";
+  if (!filtered) document.querySelector('input[name="bm-dl-scope"][value="all"]').checked = true;
+  // "Available" is booths without exhibitors: a floor plan of it is fine, a list of it is empty by definition.
+  const exDisabled = filtered && st.filter === "available" && bmScope() === "filter";
+  document.querySelectorAll('[data-bm-dl^="ex-"]').forEach((b) => {
+    b.disabled = exDisabled;
+    b.title = exDisabled ? "Available booths have no exhibitors 可用展位没有展商" : "";
+  });
+  return st;
+}
+
+function bmSaveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name; a.rel = "noopener";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+async function bmErrorText(r) {
+  try { const d = await r.json(); return d.message || d.error || `HTTP ${r.status}`; } catch (e) { return `HTTP ${r.status}`; }
+}
+
+function bmFilterParam() {
+  if (bmScope() !== "filter") return "all";
+  const api = bmMapApi();
+  return (api && api.state().filter) || "all";
+}
+
+async function bmExportExhibitors(format) {
+  const qs = new URLSearchParams({ format, filter: bmFilterParam() });
+  bmStatus("Preparing exhibitor export… 正在生成展商文件…");
+  const r = await fetch(`/api/booth-map/export/exhibitors?${qs}`, { cache: "no-store" });
+  if (!r.ok) throw new Error(await bmErrorText(r));
+  const cd = r.headers.get("Content-Disposition") || "";
+  const m = cd.match(/filename="([^"]+)"/);
+  bmSaveBlob(await r.blob(), m ? m[1] : `${BM_EVENT_SLUG}_exhibitors.${format}`);
+  const at = r.headers.get("X-Exhibitors-Verified-At");
+  bmStatus(`Exhibitor list downloaded — data as last verified ${bmWhen(at)}. 展商信息已下载。`);
+}
+
+/* ── Floor plan ─────────────────────────────────────────────────────────── */
+
+const BM_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif';
+
+function bmProvenanceLines(man, st, scope) {
+  const o = man.official, mp = man.map, d = man.differences;
+  const lines = [
+    { text: `Exhibitor list last verified 展商数据最后核实: ${bmWhen(o.verified_at)} · ${o.listed} listed, ${o.with_booth} with a booth, ${o.without_booth} without`
+      + (o.run_id ? ` · run #${o.run_id}` : "") },
+    { text: `SKQ map snapshot 展位图快照: imported ${bmWhen(mp.imported_at)} · version ${mp.import_version || "unknown"}`
+      + (mp.in_sync === false ? " · ⚠ served map differs from imported snapshot" : "")
+      + ` · ${d.booths_different_occupant + d.booths_official_not_on_map} booths differ from the official list 与官方名单不一致 (see exhibitor export)` },
+    { text: `Scope 范围: ${scope === "filter" && st.filter !== "all" ? "Filter: " + st.filterLabel + " (other booths dimmed)" : "All booths 全部展位"}`
+      + ` · Generated 生成: ${bmWhen(new Date().toISOString())}` },
+    { text: "SKQ custom map — not the organizer’s official floor plan 非主办方官方展位图 · Official: tbsm26.mapyourshow.com/8_0/floorplan/", muted: true },
+  ];
+  if (o.verified_age_hours !== null && o.verified_age_hours > 24) {
+    lines.splice(1, 0, { text: `⚠ Official list last verified ${Math.round(o.verified_age_hours / 24)} day(s) ago — it may have changed since. 官方名单可能已有变化。`, warn: true });
+  }
+  return lines;
+}
+
+/* Header band + legend + the map, on one canvas. Drawn at the map's export
+   resolution so the PNG and the PDF's first page are the same image. */
+function bmComposeSheet(map, man, st, scope, legend) {
+  const W = map.width;
+  const u = W / 1600;                    // layout unit: 1px on a 1600px-wide sheet
+  const pad = Math.round(28 * u);
+  const lines = bmProvenanceLines(man, st, scope);
+  const titleH = 34 * u, lineH = 22 * u, legendH = 30 * u;
+  const headH = Math.round(pad + titleH + lines.length * lineH + 10 * u + legendH + pad * 0.6);
+  const c = document.createElement("canvas");
+  c.width = W; c.height = headH + map.height;
+  const g = c.getContext("2d");
+  g.fillStyle = "#ffffff"; g.fillRect(0, 0, W, headH);
+  g.fillStyle = "#4E2A84"; g.fillRect(0, 0, W, Math.max(3, Math.round(5 * u)));
+  g.textBaseline = "top";
+  let y = pad;
+  g.fillStyle = "#1F2937"; g.font = `700 ${Math.round(26 * u)}px ${BM_FONT}`;
+  g.fillText(`${man.event.name || "The Battery Show North America 2026"} — SKQ Booth Map 思客琦展位图`, pad, y);
+  y += titleH;
+  g.font = `500 ${Math.round(15 * u)}px ${BM_FONT}`;
+  for (const l of lines) {
+    g.fillStyle = l.warn ? "#A21D2A" : (l.muted ? "#6B7280" : "#374151");
+    g.fillText(l.text, pad, y, W - pad * 2);
+    y += lineH;
+  }
+  y += 10 * u;
+  let x = pad;
+  g.font = `600 ${Math.round(14 * u)}px ${BM_FONT}`;
+  for (const [color, label] of legend) {
+    const sw = Math.round(14 * u);
+    g.fillStyle = color; g.fillRect(x, y + 2 * u, sw, sw);
+    g.fillStyle = "#374151"; g.fillText(label, x + sw + 7 * u, y);
+    x += sw + 7 * u + g.measureText(label).width + 24 * u;
+  }
+  g.drawImage(map, 0, headH);
+  return c;
+}
+
+// The map's booths are 8 world units; at 8× a booth number is ~16px bold.
+// Touch devices get 6× to stay under mobile Safari's ~16.7 MP canvas ceiling.
+function bmExportScale() {
+  return (navigator.maxTouchPoints > 0 || window.innerWidth < 1024) ? 6 : 8;
+}
+
+let _bmJsPdf = null;
+function bmLoadJsPdf() {
+  if (window.jspdf && window.jspdf.jsPDF) return Promise.resolve(window.jspdf.jsPDF);
+  if (_bmJsPdf) return _bmJsPdf;
+  _bmJsPdf = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "/account-research/vendor/jspdf/jspdf.umd.min.js";   // vendored, no CDN
+    s.onload = () => (window.jspdf && window.jspdf.jsPDF) ? resolve(window.jspdf.jsPDF) : reject(new Error("PDF library failed to load"));
+    s.onerror = () => { _bmJsPdf = null; reject(new Error("PDF library failed to load")); };
+    document.head.appendChild(s);
+  });
+  return _bmJsPdf;
+}
+
+/* The PDF's built-in fonts are WinAnsi only. Rather than print mojibake for a
+   character they cannot draw, it is shown as "?" — the index stays readable
+   and the exhibitor export carries the exact spelling. */
+function bmPdfText(s) {
+  return String(s || "").normalize("NFC")
+    .replace(/[^\x20-\x7E -ÿ–—‘’“”•…€™]/g, "?");
+}
+
+function bmPdfIndex(doc, man) {
+  const pageW = doc.internal.pageSize.getWidth(), pageH = doc.internal.pageSize.getHeight();
+  const m = 40, colX = [m, m + 52, m + 292, m + 452], colW = [48, 232, 152, pageW - m - (m + 452)];
+  const o = man.official, d = man.differences;
+  let y = m;
+  const header = (first) => {
+    doc.setFont("helvetica", "bold"); doc.setFontSize(first ? 15 : 11); doc.setTextColor(31, 41, 55);
+    doc.text(bmPdfText(`Booth index — ${man.event.name || ""}`), m, y); y += first ? 18 : 14;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(8.5); doc.setTextColor(75, 85, 99);
+    doc.text(bmPdfText(`Official exhibitor list verified ${bmWhen(o.verified_at)}${o.run_id ? " (run #" + o.run_id + ")" : ""} · `
+      + `SKQ map snapshot ${man.map.import_version || "unknown"}`), m, y); y += 12;
+    if (first) {
+      const notes = [
+        `${o.listed} listed exhibitors: ${o.with_booth} with a booth, ${o.without_booth} without.`,
+        `Map vs official list: ${d.booths_matching} booths match, ${d.booths_different_occupant} show a different occupant, `
+          + `${d.booths_official_not_on_map} official booths are not on the SKQ map, ${d.booths_on_map_not_official} map booths have no official exhibitor.`,
+        "Booths are listed from the official list; the SKQ map label is shown where the map says something different.",
+        `Official organizer floor plan (interactive): ${o.floor_plan_url}`,
+      ];
+      for (const n of notes) { for (const l of doc.splitTextToSize(bmPdfText(n), pageW - 2 * m)) { doc.text(l, m, y); y += 11; } }
+      y += 4;
+    }
+    doc.setFont("helvetica", "bold"); doc.setFontSize(8.5); doc.setTextColor(61, 30, 110);
+    ["Booth", "Official exhibitor(s)", "SKQ map label", "Map vs official"].forEach((h, i) => doc.text(h, colX[i], y));
+    y += 4; doc.setDrawColor(207, 196, 232); doc.line(m, y, pageW - m, y); y += 10;
+    doc.setFont("helvetica", "normal"); doc.setTextColor(31, 41, 55);
+  };
+  doc.addPage("letter", "portrait");
+  header(true);
+  const rows = man.booths.filter((b) => b.status !== "available")
+    .map((b) => [b.booth, b.exhibitors.join("; ") || "—", b.status === "match" ? "" : b.map_name, b.status_label.replace(/[\u3000-\u9fff].*$/, "").trim()]);
+  rows.push(...man.no_booth.map((n) => ["None", n, "", "No booth assigned"]));
+  for (const r of rows) {
+    const cells = r.map((v, i) => doc.splitTextToSize(bmPdfText(v), colW[i]));
+    const h = Math.max(...cells.map((c) => c.length)) * 10 + 3;
+    if (y + h > pageH - m) { doc.addPage("letter", "portrait"); y = m; header(false); }
+    cells.forEach((c, i) => {
+      if (i === 3 && r[3] && r[3] !== "Matches") doc.setTextColor(162, 29, 42);
+      doc.text(c, colX[i], y);
+      doc.setTextColor(31, 41, 55);
+    });
+    y += h;
+  }
+  const n = doc.getNumberOfPages();
+  for (let i = 1; i <= n; i++) {
+    doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(107, 114, 128);
+    const w = doc.internal.pageSize.getWidth(), h = doc.internal.pageSize.getHeight();
+    doc.text(`SKQ CRM · page ${i} of ${n}`, w - 40, h - 18, { align: "right" });
+  }
+}
+
+async function bmExportFloorPlan(format) {
+  const api = bmMapApi();
+  if (!api) throw new Error("The booth map has not finished loading. Please try again in a moment. 展位图尚未加载完成。");
+  bmStatus("Rendering the full floor plan… 正在生成完整展位图…");
+  const scope = bmScope();
+  const st = api.state();
+  const r = await fetch(`/api/booth-map/export/manifest?format=${format}`, { cache: "no-store" });
+  if (!r.ok) throw new Error(await bmErrorText(r));
+  const man = await r.json();
+  // Yield once so the status line paints before the synchronous render.
+  await new Promise((res) => setTimeout(res, 30));
+  const map = api.render(bmExportScale(), { allBooths: scope !== "filter" });
+  const sheet = bmComposeSheet(map, man, st, scope, api.legend());
+  const scopeSlug = scope === "filter" && st.filter !== "all" ? st.filter : "all";
+  const stamp = new Date().toISOString().slice(0, 10);
+  const base = `${BM_EVENT_SLUG}_skq-floor-plan_${scopeSlug}_${stamp}`;
+  if (format === "png") {
+    const blob = await new Promise((res) => sheet.toBlob(res, "image/png"));
+    if (!blob) throw new Error("This device could not encode an image that large.");
+    bmSaveBlob(blob, `${base}.png`);
+  } else {
+    const JsPDF = await bmLoadJsPdf();
+    const pw = 1224, ph = Math.round(pw * sheet.height / sheet.width);   // 17 in wide (tabloid)
+    const doc = new JsPDF({ orientation: pw > ph ? "landscape" : "portrait", unit: "pt", format: [pw, ph], compress: true });
+    doc.setProperties({ title: `${man.event.name || "Battery Show"} — SKQ Booth Map`, creator: "SKQ CRM" });
+    doc.addImage(sheet, "PNG", 0, 0, pw, ph, undefined, "FAST");
+    bmPdfIndex(doc, man);
+    bmSaveBlob(doc.output("blob"), `${base}.pdf`);
+  }
+  const stale = man.official.verified_age_hours !== null && man.official.verified_age_hours > 24;
+  bmStatus(`Floor plan downloaded — exhibitor data as last verified ${bmWhen(man.official.verified_at)}.`
+    + (stale ? " The official list may have changed since. 官方名单可能已有变化。" : " 展位图已下载。"), stale ? "warn" : "");
+}
+
+let _bmDlBusy = false;
+async function bmRunDownload(kind) {
+  if (_bmDlBusy) return;
+  _bmDlBusy = true;
+  bmCloseDl();
+  const btn = document.getElementById("bm-dl-btn");
+  if (btn) btn.disabled = true;
+  try {
+    if (kind === "floor-pdf") await bmExportFloorPlan("pdf");
+    else if (kind === "floor-png") await bmExportFloorPlan("png");
+    else if (kind === "ex-xlsx") await bmExportExhibitors("xlsx");
+    else if (kind === "ex-csv") await bmExportExhibitors("csv");
+  } catch (e) {
+    bmStatus(`Download failed 下载失败: ${e.message || e}`, "error");
+  } finally {
+    _bmDlBusy = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+(function bmWireDownloads() {
+  const btn = document.getElementById("bm-dl-btn");
+  const menu = document.getElementById("bm-dl-menu");
+  if (!btn || !menu) return;
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = menu.hidden;
+    if (open) bmSyncScope();
+    menu.hidden = !open;
+    btn.setAttribute("aria-expanded", String(open));
+  });
+  menu.querySelectorAll("[data-bm-dl]").forEach((b) => b.addEventListener("click", () => bmRunDownload(b.dataset.bmDl)));
+  menu.querySelectorAll('input[name="bm-dl-scope"]').forEach((r) => r.addEventListener("change", bmSyncScope));
+  menu.querySelector(".bm-dl-link")?.addEventListener("click", bmCloseDl);
+  document.addEventListener("click", (e) => { if (!e.target.closest(".bm-dl")) bmCloseDl(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") bmCloseDl(); });
+  // A click inside the map iframe never reaches this document; focus leaving it does.
+  window.addEventListener("blur", bmCloseDl);
+})();
+
 function bmFoot(buttons) {
   const foot = document.getElementById("bm-refresh-foot");
   foot.innerHTML = "";

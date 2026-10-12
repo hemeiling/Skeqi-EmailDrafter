@@ -2491,6 +2491,33 @@
   .xo-dl-head { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; color: var(--color-text-tertiary); padding: 6px 10px 2px; }
   .xo-dl-foot { font-size: 0.7rem; color: var(--color-text-tertiary); padding: 6px 10px 2px; border-top: 1px solid var(--color-border-soft); margin-top: 4px; }
 
+  /* Booth Map download menu — the Outreach menu's vocabulary, plus a scope
+     choice and a link out to the organizer's own plan. */
+  .bm-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .bm-dl-menu { min-width: 300px; max-height: min(70vh, 560px); overflow-y: auto; }
+  .bm-dl-menu button:disabled { color: var(--color-text-tertiary); cursor: not-allowed; background: none; }
+  .bm-dl-menu .bm-zh, .bm-dl-sub { opacity: .7; font-weight: 500; }
+  .bm-dl-menu .bm-zh { margin-left: .35em; }
+  .bm-dl-sub { text-transform: none; }
+  .bm-dl-scope { display: flex; flex-direction: column; gap: 2px; padding: 2px 10px 4px; }
+  .bm-dl-scope label { display: flex; align-items: center; gap: 8px; font-size: 0.82rem; padding: 4px 0; cursor: pointer; }
+  .bm-dl-scope input:disabled + span { color: var(--color-text-tertiary); }
+  .bm-dl-link { display: block; padding: 8px 10px; border-radius: var(--radius-sm); font-size: 0.84rem; color: var(--color-accent); text-decoration: none; }
+  .bm-dl-link:hover, .bm-dl-link:focus-visible { background: var(--color-primary-soft); }
+  .bm-dl-status { padding: 7px 14px; font-size: 0.78rem; border-bottom: 1px solid var(--color-border); background: var(--color-surface-alt); color: var(--color-text-secondary); }
+  .bm-dl-status.is-error { background: var(--color-danger-soft, #FCEBED); color: var(--color-danger-text, #A21D2A); }
+  .bm-dl-status.is-warn { background: #FEF6E0; color: #6B4E00; }
+  @media (max-width: 767px) {
+    /* The menu spans the whole action row, not just the Download button,
+       whether the two buttons share a row or stack. */
+    .bm-actions { margin-left: 0; width: 100%; position: relative; }
+    .bm-actions > button, .bm-dl { flex: 1; }
+    .bm-dl { position: static; }
+    .bm-dl #bm-dl-btn, .bm-actions > button { width: 100%; min-height: 44px; }
+    .bm-dl-menu { min-width: 0; }
+    .bm-dl-menu button, .bm-dl-link, .bm-dl-scope label { min-height: 44px; display: flex; align-items: center; }
+  }
+
   /* Drafter: why this contact is being written to (reviewed related record). */
   .modal-provenance { margin: 6px 0 0; font-size: 0.78rem; color: var(--color-primary-text); background: var(--color-primary-soft);
     border: 1px solid var(--color-primary-border); border-radius: var(--radius-sm); padding: 6px 10px; }
@@ -3714,10 +3741,37 @@
       <span style="font-size:0.76rem;color:var(--color-text-tertiary);">
         Last verified <span style="opacity:.7">最后核实</span>: <b id="bm-verified-at">—</b></span>
       <span id="bm-listed" style="font-size:0.76rem;color:var(--color-text-tertiary);"></span>
-      <button id="bm-refresh" class="btn-sm" style="margin-left:auto;display:none;">
-        🔄 Refresh Exhibitor Data <span style="opacity:.7;font-weight:500;">更新展商数据</span>
-      </button>
+      <div class="bm-actions">
+        <button id="bm-refresh" class="btn-sm" style="display:none;">
+          🔄 Refresh Exhibitor Data <span style="opacity:.7;font-weight:500;">更新展商数据</span>
+        </button>
+        <!-- Downloads. Read-only: every item builds a file from what the last
+             refresh verified and never triggers a refresh itself. -->
+        <div class="xo-dl bm-dl" data-no-i18n>
+          <button id="bm-dl-btn" class="btn-sm btn-primary" aria-haspopup="menu" aria-expanded="false" aria-controls="bm-dl-menu">
+            ⬇ Download <span style="opacity:.8;font-weight:500;">下载</span>
+          </button>
+          <div class="xo-dl-menu bm-dl-menu" id="bm-dl-menu" role="menu" hidden>
+            <div class="xo-dl-head">Scope 范围</div>
+            <div class="bm-dl-scope" role="radiogroup" aria-label="Download scope">
+              <label><input type="radio" name="bm-dl-scope" value="all" checked> All exhibitors · 全部展商</label>
+              <label><input type="radio" name="bm-dl-scope" value="filter" id="bm-dl-scope-filter" disabled>
+                <span id="bm-dl-filter-label">Current map filter · 当前筛选</span></label>
+            </div>
+            <div class="xo-dl-head">Floor plan · 展位图 <span class="bm-dl-sub">(SKQ map 思客琦展位图)</span></div>
+            <button type="button" role="menuitem" data-bm-dl="floor-pdf">Download Floor Plan (PDF) <span class="bm-zh">下载展位图</span></button>
+            <button type="button" role="menuitem" data-bm-dl="floor-png">Download Floor Plan (PNG) <span class="bm-zh">下载展位图</span></button>
+            <div class="xo-dl-head">Exhibitor list · 展商信息</div>
+            <button type="button" role="menuitem" data-bm-dl="ex-xlsx">Export Exhibitors (Excel) <span class="bm-zh">导出展商信息</span></button>
+            <button type="button" role="menuitem" data-bm-dl="ex-csv">Export Exhibitors (CSV) <span class="bm-zh">导出展商信息</span></button>
+            <div class="xo-dl-head">Organizer · 主办方</div>
+            <a role="menuitem" class="bm-dl-link" href="https://tbsm26.mapyourshow.com/8_0/floorplan/" target="_blank" rel="noopener noreferrer">Official floor plan (interactive) ↗ <span class="bm-zh">官方展位图</span></a>
+            <div class="xo-dl-foot" id="bm-dl-foot">Exhibitor data as last verified. Downloads never refresh or change data. 导出不会更新或修改数据。</div>
+          </div>
+        </div>
+      </div>
     </div>
+    <div id="bm-dl-status" class="bm-dl-status" role="status" aria-live="polite" hidden></div>
     <iframe id="bm-frame" title="Battery Show 2026 Booth Map"
             style="display:block;width:100%;height:calc(100vh - 176px);border:0;"
             referrerpolicy="same-origin"></iframe>

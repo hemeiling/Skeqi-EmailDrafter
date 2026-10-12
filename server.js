@@ -1841,6 +1841,55 @@ app.get('/api/booth-map/unmatched', async (req, res) => {
   }
 });
 
+/* ── Booth Map downloads · 展位图下载 ───────────────────────────────────────
+   Read-only. Both routes export what the last successful refresh verified and
+   say so; neither re-reads the official source nor writes to any CRM table.
+   The only write is the audit line, as every other export does. */
+const exhibitorExport = require('./exhibitorExport');
+
+function boothExportFail(res, where, err) {
+  if (err instanceof exhibitorExport.ExportError) {
+    return res.status(err.status).json({ error: err.code, message: err.message });
+  }
+  if (err && err.code === '42P01') {
+    return res.status(503).json({ error: 'not_ready', message: 'Exhibitor data has not been imported yet.' });
+  }
+  console.error(`[booth-map/export] ${where} failed:`, err && err.message);
+  res.status(500).json({ error: 'export_failed', message: 'Could not build the export. Nothing was changed.' });
+}
+
+// Provenance, map-vs-official differences and the booth index for the floor plan.
+app.get('/api/booth-map/export/manifest', async (req, res) => {
+  try {
+    const snap = await exhibitorExport.buildSnapshot(pool, req.query);
+    logCrmActivity({ actor: reqUser(req), action: 'booth_map.export',
+      metadata: { kind: 'floor_plan', format: String(req.query.format || '').slice(0, 8), filter: snap.filter.id } });
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true, ...exhibitorExport.manifest(snap) });
+  } catch (err) { boothExportFail(res, 'manifest', err); }
+});
+
+app.get('/api/booth-map/export/exhibitors', async (req, res) => {
+  try {
+    const format = req.query.format === 'csv' ? 'csv' : 'xlsx';
+    const snap = await exhibitorExport.buildSnapshot(pool, req.query);
+    logCrmActivity({ actor: reqUser(req), action: 'booth_map.export',
+      metadata: { kind: 'exhibitors', format, filter: snap.filter.id, rows: snap.rows.length,
+        include_withdrawn: snap.include_withdrawn, run_id: snap.official.run_id } });
+    res.set('Cache-Control', 'no-store');
+    res.set('Content-Disposition', `attachment; filename="${exhibitorExport.filename(snap, format)}"`);
+    // Lets the page confirm, after the fact, which verification the file carries.
+    if (snap.official.verified_at) res.set('X-Exhibitors-Verified-At', new Date(snap.official.verified_at).toISOString());
+    if (format === 'csv') {
+      res.set('Content-Type', 'text/csv; charset=utf-8');
+      return res.send(exhibitorExport.toCsv(snap));
+    }
+    const buf = await exhibitorExport.toXlsx(snap);
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(Buffer.from(buf));
+  } catch (err) { boothExportFail(res, 'exhibitors', err); }
+});
+
 /* GET /api/analytics/overview — adoption and platform value.
 
    Aggregates only. No message bodies, no subject lines, no per-message

@@ -1249,6 +1249,45 @@ function toggleTheme(){
   applyTheme(nowLight);
 }
 window.addEventListener('load',initCanvas);
+
+/* ── Export hook for the CRM shell's Download menu ────────────────────────
+   Additive only. The shell asks for the WHOLE map at print resolution; this
+   answers by running the map's own draw() into an offscreen canvas, so the
+   export is this map — its geometry, colours and booth numbers — rather than a
+   second rendering of it. The on-screen view is restored synchronously before
+   returning, so nothing visible moves. Hover and search highlights are left
+   out; the active category filter is kept, because that is what the user is
+   looking at, and its label is returned so the export can say so. */
+window.skqFloorPlan = {
+  state: function(){
+    var c = CMAP[activeF];
+    return { filter: activeF, filterLabel: c ? c.label.replace(/^[^\w(]+\s*/,'') : activeF,
+             booths: ALL_BOOTHS_DATA.length };
+  },
+  legend: function(){
+    return [['#58a6ff','Available 可用展位'],['#f85149','Direct competitor 直接竞品'],
+      ['#f0883e','Indirect competitor 间接竞品'],['#ffa657','Highly recommended 强烈推荐'],
+      ['#3fb950','Target customer 目标客户'],['#d2a8ff','ESS/EV project ESS/EV 项目'],['#9198a1','Other 其他']];
+  },
+  render: function(s, opts){
+    var xs=ALL_BOOTHS_DATA.map(function(b){return b.x;}),ys=ALL_BOOTHS_DATA.map(function(b){return b.y;});
+    var mnX=Math.min.apply(null,xs)-10,mxX=Math.max.apply(null,xs)+BW+10;
+    var mnY=Math.min.apply(null,ys)-10,mxY=Math.max.apply(null,ys)+BH+10;
+    var off=document.createElement('canvas');
+    off.width=Math.ceil((mxX-mnX)*s); off.height=Math.ceil((mxY-mnY)*s);
+    var saved={cv:cv,ctx:ctx,scale:scale,ox:ox,oy:oy,hovered:hovered,searchT:searchT,activeF:activeF};
+    try{
+      cv=off; ctx=off.getContext('2d'); scale=s; ox=-mnX*s; oy=-mnY*s; hovered=null; searchT='';
+      if(opts&&opts.allBooths) activeF='all';
+      draw();
+    } finally {
+      cv=saved.cv; ctx=saved.ctx; scale=saved.scale; ox=saved.ox; oy=saved.oy;
+      hovered=saved.hovered; searchT=saved.searchT; activeF=saved.activeF;
+      draw();
+    }
+    return off;
+  }
+};
 </script>
 
 
