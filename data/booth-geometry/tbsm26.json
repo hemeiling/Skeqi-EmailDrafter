@@ -1,6 +1,6 @@
 {
- "version": "b6df1245176ce2d9",
- "generated_at": "2026-10-13T04:05:48.295Z",
+ "version": "ac1727b9fdc4840c",
+ "generated_at": "2026-10-13T04:52:38.696Z",
  "source": {
   "url": "https://tbsm26.mapyourshow.com/8_0/exhview/02/exh-remote-proxy.cfm?showid=TBSM26&selectedbooth=&hallid=A&action=GetBoothByHall&method=GetBoothByHall&regid=0",
   "fetched_at": "2026-10-13T02:34:08Z",
@@ -35,8 +35,7 @@
  "counts": {
   "new": 52,
   "kept": 945,
-  "relocated": 22,
-  "kept_ambiguous": 1,
+  "relocated": 23,
   "placeholder": 1,
   "historical": 160
  },
@@ -8605,11 +8604,13 @@
     "x": 464,
     "y": 0
    },
-   "decision": "kept_ambiguous",
-   "x": 464,
-   "y": 0,
-   "note": "Kept at the original SKQ coordinates; flagged for manual review against the official organizer map (official position is 144 map units away).",
-   "decided_at": "2026-10-13"
+   "decision": "relocated",
+   "x": 608,
+   "y": 24,
+   "note": "Approved move to the organizer's official position. Organizer floor-plan data (GetBoothByHall CAD outline) places the 50'x50' island 'Exhibitor Suite' in the top row above booths 5142-5442; the earlier SKQ position above 4043 is empty in the official plan. Original SKQ coordinates (464,0) kept for rollback.",
+   "decided_at": "2026-10-13",
+   "approved": true,
+   "evidence": "data/booth-geometry/evidence/booth4050-organizer-vs-skq.png"
   },
   {
    "n": "4115",
@@ -16406,7 +16407,10 @@
    "n": "513",
    "x": 24,
    "y": 272,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "514"
+   ]
   },
   {
    "n": "622",
@@ -16544,7 +16548,10 @@
    "n": "1225",
    "x": 112,
    "y": 176,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "1227"
+   ]
   },
   {
    "n": "1233",
@@ -16700,7 +16707,10 @@
    "n": "3705",
    "x": 424,
    "y": 336,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "3706"
+   ]
   },
   {
    "n": "3743",
@@ -16748,7 +16758,10 @@
    "n": "4202",
    "x": 488,
    "y": 360,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "4203"
+   ]
   },
   {
    "n": "4244",
@@ -16760,7 +16773,10 @@
    "n": "4342",
    "x": 496,
    "y": 40,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "4344"
+   ]
   },
   {
    "n": "4345",
@@ -16790,7 +16806,10 @@
    "n": "4542",
    "x": 520,
    "y": 40,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "4545"
+   ]
   },
   {
    "n": "4544",
@@ -16904,13 +16923,19 @@
    "n": "5242",
    "x": 608,
    "y": 40,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "5245"
+   ]
   },
   {
    "n": "5244",
    "x": 608,
    "y": 24,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "4050"
+   ]
   },
   {
    "n": "5344",
@@ -16934,7 +16959,10 @@
    "n": "5541",
    "x": 640,
    "y": 48,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "5542"
+   ]
   },
   {
    "n": "5544",
@@ -16952,7 +16980,10 @@
    "n": "5642",
    "x": 656,
    "y": 40,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "5645"
+   ]
   },
   {
    "n": "5644",
@@ -16988,7 +17019,10 @@
    "n": "5933",
    "x": 688,
    "y": 112,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "5932"
+   ]
   },
   {
    "n": "5943",
@@ -17006,7 +17040,10 @@
    "n": "6041",
    "x": 704,
    "y": 48,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "6044"
+   ]
   },
   {
    "n": "6112",
@@ -17018,7 +17055,10 @@
    "n": "6127",
    "x": 712,
    "y": 160,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "6126"
+   ]
   },
   {
    "n": "6244",
@@ -17030,19 +17070,28 @@
    "n": "6307",
    "x": 736,
    "y": 312,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "6308"
+   ]
   },
   {
    "n": "6330",
    "x": 736,
    "y": 136,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "6331"
+   ]
   },
   {
    "n": "6334",
    "x": 736,
    "y": 96,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "6335"
+   ]
   },
   {
    "n": "6344",
@@ -17144,7 +17193,10 @@
    "n": "6609",
    "x": 776,
    "y": 304,
-   "decision": "historical"
+   "decision": "historical",
+   "covered_by": [
+    "6608"
+   ]
   },
   {
    "n": "6622",

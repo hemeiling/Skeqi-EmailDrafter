@@ -1848,6 +1848,13 @@ app.get('/api/booth-map/unmatched', async (req, res) => {
 const exhibitorExport = require('./exhibitorExport');
 const boothMapModel = require('./boothMapModel');
 const boothMapPreview = require('./boothMapPreview');
+const researchCt = require('./researchCt');
+
+/* Battery CT research filter: the server flag turns it on for everyone; with
+   the flag off an admin may preview it with ?ct=preview. */
+function batteryCtEnabled(req) {
+  return config.BATTERY_CT_FILTER === 'on' || (req.query.ct === 'preview' && isAdmin(req));
+}
 
 /* Which occupancy the Booth Map shows. The server flag decides for everyone;
    with the flag off, an ADMIN may preview the live map with ?map_mode=live.
@@ -1918,7 +1925,7 @@ app.get('/api/booth-map/model', async (req, res) => {
   if (mode !== 'live') return res.json({ ok: true, mode });
   try {
     const model = await boothMapModel.buildModel(pool);
-    const { profiles, ...forMap } = model;
+    const { profiles, identity_queue: identityQueue, ...forMap } = model;
     res.json({ ok: true, mode, preview: config.BOOTH_MAP_MODE !== 'live', ...forMap,
       // Review detail is admin business; everyone else gets the count.
       review: isAdmin(req) ? model.review : undefined, review_count: model.review.length });
@@ -1928,6 +1935,49 @@ app.get('/api/booth-map/model', async (req, res) => {
     res.status(status).json({ ok: false, mode, error: (err && err.code) || 'model_failed',
       message: 'Live booth data is unavailable.' });
   }
+});
+
+/* Identity confirmation (admin). GET: the queue with full history. POST:
+   record confirmed / rejected / deferred for one queued pair. The server
+   decides who may write (isAdmin) and which pairs are eligible; it never
+   merges or links CRM records. Every write is also on the CRM activity spine. */
+const boothMapIdentity = require('./boothMapIdentity');
+function identityFail(res, err) {
+  if (err instanceof boothMapIdentity.IdentityError) return res.status(err.status).json({ error: err.code, message: err.message });
+  boothExportFail(res, 'identity-review', err);
+}
+app.get('/api/booth-map/identity-review', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try { res.json({ ok: true, ...(await boothMapIdentity.listQueue(pool, { isAdmin: isAdmin(req) })) }); }
+  catch (err) { identityFail(res, err); }
+});
+app.post('/api/booth-map/identity-review', async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(403).json({ error: 'admin_only', message: 'Admin only' });
+    if (!requireJson(req, res)) return;
+    const out = await boothMapIdentity.recordDecision(pool, req.body || {}, { isAdmin: isAdmin(req), user: reqUser(req) });
+    logCrmActivity({ actor: reqUser(req), action: 'booth_map.identity_decision', objectType: 'booth_map_identity_decision',
+      objectId: out.decision.id, metadata: { decision: out.decision.decision, map_booth_id: out.decision.map_booth_id,
+        exhibitor_id: out.decision.exhibitor_id, superseded: out.superseded } });
+    res.json({ ok: true, ...out });
+  } catch (err) { identityFail(res, err); }
+});
+
+// Battery CT · 电池CT检测 research overlay (read-only). JSON for the map, or ?format=xlsx.
+app.get('/api/booth-map/research/battery-ct', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!batteryCtEnabled(req)) return res.json({ ok: true, enabled: false });
+  try {
+    const view = await researchCt.buildView(pool, { model: await boothModelFor(req) });
+    if (req.query.format === 'xlsx') {
+      logCrmActivity({ actor: reqUser(req), action: 'booth_map.export',
+        metadata: { kind: 'battery_ct_research', dataset: view.version, run_id: view.official && view.official.run_id } });
+      res.set('Content-Disposition', `attachment; filename="battery-ct-research_${view.version}.xlsx"`);
+      res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      return res.send(Buffer.from(await researchCt.toXlsx(view)));
+    }
+    res.json({ ok: true, enabled: true, preview: config.BATTERY_CT_FILTER !== 'on', ...view });
+  } catch (err) { boothExportFail(res, 'battery-ct', err); }
 });
 
 /* Read-only discrepancy preview (admin): the snapshot map vs the verified
@@ -4601,6 +4651,7 @@ app.get('/api/exhibitors/status', async (req, res) => {
       ok: true,
       is_admin: isAdmin(req),
       map_mode: config.BOOTH_MAP_MODE,
+      battery_ct: config.BATTERY_CT_FILTER,
       source_configured: Boolean(process.env.MYS_COOKIE),
       last_verified_at: run ? run.finished_at : null,
       last_run: run || null,

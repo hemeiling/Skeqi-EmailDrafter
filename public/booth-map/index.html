@@ -69,6 +69,42 @@ body{
 .bm-mode.is-fallback{background:#FCEBED;border-color:#F3B7BE;color:#A21D2A;font-weight:600}
 .bm-hist{display:inline-flex;align-items:center;gap:6px;cursor:pointer;min-height:32px}
 .bm-hist input{width:16px;height:16px}
+/* Battery CT panel: a side sheet over the canvas on wide screens, a bottom
+   sheet on phones that can be collapsed to see the map while it stays open. */
+.ctp{position:absolute;top:12px;right:12px;bottom:12px;width:min(400px,calc(100% - 24px));z-index:30;display:flex;flex-direction:column;
+  background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-lg);box-shadow:var(--shadow-lg);overflow:hidden}
+.ctp[hidden]{display:none}
+.ctp-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--color-border)}
+.ctp-title{flex:1;min-width:0;font-size:0.84rem;line-height:1.35}.ctp-title span{display:block;font-size:0.72rem;color:var(--color-text-tertiary)}
+.ctp-x{width:36px;height:36px;border-radius:50%;border:1px solid var(--color-border);background:var(--color-surface-alt);cursor:pointer;font-size:14px}
+.ctp-grip{display:none}
+.ctp-body{overflow-y:auto;padding:10px 12px 16px;-webkit-overflow-scrolling:touch}
+.ctp-legend{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:0.7rem;color:var(--color-text-secondary);margin-bottom:6px}
+.ctp-legend i{display:inline-block;width:12px;height:12px;border:2px solid #8b949e;border-radius:3px;margin-right:4px;vertical-align:-2px}
+.ct-meta{font-size:0.7rem;color:var(--color-text-tertiary);margin-bottom:8px;line-height:1.5}
+.ct-h{font-size:0.74rem;font-weight:700;margin:12px 0 6px;display:flex;align-items:center;gap:6px;color:var(--color-text)}
+.ct-h i{width:10px;height:10px;border-radius:3px;display:inline-block}.ct-h span{font-weight:500;color:var(--color-text-tertiary)}
+.ct-card{border:1px solid var(--color-border-soft);border-left:4px solid #8b949e;border-radius:var(--radius-md);padding:9px 10px;margin-bottom:8px;font-size:0.76rem;line-height:1.5;overflow-wrap:anywhere}
+.ct-head{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
+.ct-name{font-weight:700;font-size:0.82rem;color:var(--color-text)}.ct-zh{color:var(--color-text-tertiary);font-size:0.72rem}
+.ct-badges{display:flex;flex-direction:column;gap:4px;align-items:flex-end;flex-shrink:0}
+.ctb{font-size:0.64rem;font-weight:700;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.ctb-ok{background:#E8F3EE;color:#0F5132}.ctb-low{background:#FEF6E0;color:#6B4E00}.ctb-ind{background:#EDE9F7;color:#3D1E6E}.ctb-no{background:#F0F0F3;color:#4B5563}
+.ct-booths{margin:6px 0}.ct-booth{font:inherit;font-weight:700;font-size:0.76rem;padding:4px 10px;min-height:32px;border-radius:999px;border:1px solid var(--color-primary-border);background:var(--color-primary-soft);color:var(--color-primary-hover);cursor:pointer;margin:0 4px 4px 0}
+.ct-booth.is-off{display:inline-block;border-style:dashed;background:none;color:var(--color-text-tertiary);cursor:default}
+.ct-row{margin-top:3px;color:var(--color-text-secondary)}.ct-row b{color:var(--color-text);font-weight:650}
+.ct-opp{background:var(--color-surface-alt);border-radius:var(--radius-sm);padding:5px 7px;margin-top:6px}
+.ct-note{font-size:0.7rem;color:var(--color-text-tertiary)}.ct-src a{color:var(--color-accent);font-size:0.7rem}
+.ct-more{margin-top:10px;border-top:1px solid var(--color-border-soft);padding-top:8px}.ct-more summary{cursor:pointer;font-size:0.76rem;font-weight:650;min-height:32px;display:flex;align-items:center}
+.ct-dl{margin-top:12px;width:100%;min-height:40px;border-radius:var(--radius-md);border:1px solid var(--color-border);background:var(--color-surface-alt);font:inherit;font-size:0.78rem;font-weight:600;cursor:pointer}
+@media (max-width:640px){
+  .ctp{position:fixed;left:0;right:0;top:auto;bottom:0;width:auto;height:min(68vh,560px);border-radius:16px 16px 0 0;transition:height .18s ease}
+  .ctp.is-min{height:64px}.ctp.is-min .ctp-body{display:none}
+  .ctp-grip{display:block;width:44px;height:36px;border:0;background:transparent;cursor:pointer;position:relative;flex-shrink:0}
+  .ctp-grip::before{content:"";position:absolute;left:8px;right:8px;top:16px;height:4px;border-radius:2px;background:#D0D0D8}
+  .ctp-x{width:44px;height:44px}.ct-booth{min-height:40px}
+  body.ct-open .filterbar{display:none}
+}
 .bm-pill{
   display:inline-flex; align-items:center; gap:6px; padding:5px 11px;
   border-radius:var(--radius-full); font-size:0.74rem; font-weight:600;
@@ -375,6 +411,8 @@ function isVis(b){
     if(!ESS_EV[b.n])return false;
   } else if(activeF==='chinese'){
     if(!CNM[b.n])return false;
+  } else if(activeF==='battery_ct'){
+    if(!CT_BOOTH.has(String(b.n)))return false;
   } else if(activeF!=='all'&&b.c!==activeF){
     return false;
   }
@@ -465,7 +503,11 @@ function draw(){
     const isH=hovered&&hovered.n===b.n;
     const isDC=DCM[b.n],isIC=ICM[b.n];
     const edge=Math.max(0.5,Math.min(1,scale*0.7));
-    if(b.c==='unclassified'||b.c==='unverified'){
+    if(b.c==='pending'){
+      ctx.fillStyle=isH?'rgba(227,179,65,0.45)':'rgba(227,179,65,0.16)';ctx.fillRect(sx,sy,bw,bh);
+      ctx.strokeStyle='#e3b341';ctx.lineWidth=Math.max(0.75,Math.min(1.5,scale*0.6));
+      ctx.setLineDash([3,2]);ctx.strokeRect(sx+0.5,sy+0.5,bw-1,bh-1);ctx.setLineDash([]);
+    } else if(b.c==='unclassified'||b.c==='unverified'){
       // Live map only: an official occupant SKQ has not classified yet, or a
       // reserved booth whose occupant is not in the verified list.
       const un=b.c==='unclassified';
@@ -512,6 +554,17 @@ function draw(){
       }
     }
   });
+  // Battery CT research filter: a ring per group around the booth; the booth's own
+  // fill (its SKQ classification colour) is untouched. Dashed = low-confidence / indirect.
+  if(activeF==='battery_ct'){
+    vis.forEach(b=>{
+      const e=(CT_BOOTH.get(String(b.n))||[])[0];if(!e)return;
+      const[sx,sy]=w2s(b.x,b.y);
+      ctx.strokeStyle=CT_COLORS[e.group]||'#ffffff';ctx.lineWidth=Math.max(1.5,Math.min(4,scale*1.2));
+      ctx.setLineDash(e.confidence==='confirmed'?[]:[4,3]);
+      const pad=Math.max(2,scale*1.2);ctx.strokeRect(sx-pad,sy-pad,bw+pad*2,bh+pad*2);ctx.setLineDash([]);
+    });
+  }
   // search highlight ring
   if(searchT){
     vis.forEach(b=>{
@@ -556,8 +609,9 @@ function showTip(b,cx,cy){
   else if(isAv) extra='<div style="font-size:12px;color:#58a6ff;margin-top:4px">点击查看选址分析</div>';
   const intro = b.intro ? `<div class="ti">${escT(b.intro.slice(0,80))}${b.intro.length>80?'…':''}</div>` : '';
   // Shared booth (live map): every official occupant, each with its own classification.
+  const pend = b.pending&&b.pending.length ? `<div class="ti">Classification pending admin identity review 分类待身份审核<br>${b.pending.map(p=>`SKQ map previously showed “${escT(p.company)}” at ${escT(p.snapshot_booth)}${p.kinds.length?` (${escT(p.kinds.map(k=>({target_customer:'Target customer',competitor_direct:'Direct competitor',competitor_indirect:'Indirect competitor',ess_ev:'ESS/EV',chinese_company:'Chinese company'})[k]||k).join(', '))})`:''} — unconfirmed 未确认`).join('<br>')}</div>` : '';
   const occ = b.occ&&b.occ.length>1 ? `<div class="ti">Shared booth 共用展位：<br>${b.occ.map(o=>`• ${escT(o.name)} — ${escT(CLABELS[o.category]||CLABELS.unclassified||'')}`).join('<br>')}</div>` : '';
-  t.innerHTML=`<div class="tn">展位 ${escT(b.n)}</div><div class="tm">${escT(b.nm)}</div>${b.zh?`<div class="tz">${escT(b.zh)}</div>`:''}<span class="tc" style="background:${color}22;color:${color}">${escT(CLABELS[b.c]||b.c)}</span>${extra}${occ}${intro}`;
+  t.innerHTML=`<div class="tn">展位 ${escT(b.n)}</div><div class="tm">${escT(b.nm)}</div>${b.zh?`<div class="tz">${escT(b.zh)}</div>`:''}<span class="tc" style="background:${color}22;color:${color}">${escT(CLABELS[b.c]||b.c)}</span>${extra}${pend}${occ}${intro}`;
   let tx=cx+12,ty=cy;
   if(tx+250>cv.width)tx=cx-255;
   if(ty<60)ty=cy+30;
@@ -598,6 +652,7 @@ function buildFB(){
     if(ESS_EV[b.n])counts.ess_ev++;
     if(CNM[b.n])counts.chinese++;
   });
+  if(CT_VIEW)counts.battery_ct=CT_VIEW.on_map.length;
   document.getElementById('fb').innerHTML=CATS.map(c=>{
     const on=activeF===c.id;
     const cnt=counts[c.id]||0;
@@ -614,6 +669,8 @@ function buildFB(){
   }).join('');
 }
 function setF(c){
+  if(c==='battery_ct'){activeF=c;buildFB();updateStats();draw();closeRP();openCtPanel();return;}
+  closeCtPanel();
   activeF=c;buildFB();updateStats();draw();
   // Open right panel for non-'all' filters
   if(c!=='all'){
@@ -677,6 +734,7 @@ function openCompModal(b){
   let body='';
   if(b.occ&&b.occ.length>1) body+=`<div style="font-size:13px;line-height:1.8;margin-bottom:12px"><b>Shared booth 共用展位</b><br>${b.occ.map(o=>`${escT(o.name)} — ${escT(CLABELS[o.category]||CLABELS.unclassified)}`).join('<br>')}</div>`;
   if(b.c==='unclassified') body+='<div style="font-size:13px;line-height:1.8;margin-bottom:12px">Official exhibitor, not yet classified by SKQ. 官方展商，思客琦尚未分类。</div>';
+  if(b.c==='pending') body+=`<div style="font-size:13px;line-height:1.8;margin-bottom:12px"><b>Pending admin identity review 待身份审核</b><br>${b.pending.map(p=>`The earlier SKQ map showed “${escT(p.company)}” at booth ${escT(p.snapshot_booth)}. Its classification is not applied until an admin confirms it is the same company. 确认为同一公司前不套用其分类。`).join('<br>')}</div>`;
   if(b.c==='unverified') body+='<div style="font-size:13px;line-height:1.8;margin-bottom:12px">Reserved in the official floor plan, but no exhibitor for this booth is in the verified list. 官方平面图显示已预订，但核实名单中无对应展商。</div>';
   if(b.intro) body+=`<div style="font-size:14px;line-height:1.8;color:#c9d1d9;margin-bottom:14px">${b.intro}</div>`;
   if(ev&&!dc&&!ic){
@@ -1334,7 +1392,10 @@ function applyLive(d){
     b.zh=occ.map(o=>o.zh).filter(Boolean).join(' / ');
     b.shared=occ.length>1;
     const lead=occ.find(o=>o.category||(o.kinds&&o.kinds.length))||occ[0];
-    b.c=lead.category||'unclassified';
+    // A likely-renamed classified company awaiting admin identity review is
+    // "pending", not "unclassified": nothing is attached, nothing is denied.
+    b.c=lead.category||(occ.some(o=>o.pending&&o.pending.length)?'pending':'unclassified');
+    if(b.c==='pending')b.pending=occ.flatMap(o=>o.pending||[]);
     const src=lead.from&&lead.from.length?ORIG[String(lead.from[0])]:null;
     if(src){if(src.intro)b.intro=src.intro;if(src.p)b.p=src.p;if(src.edition)b.edition=src.edition;}
     // Each occupant's own judgements, re-keyed from its snapshot booth to this booth.
@@ -1344,7 +1405,8 @@ function applyLive(d){
     })));
     return b;
   });
-  const hist=d.historical.map(h=>{const o=ORIG[String(h.n)]||{};return {n:h.n,x:h.x,y:h.y,hist:true,c:'historical',
+  // A historical booth under an active official booth is never drawn, so it cannot hide that booth.
+  const hist=d.historical.filter(h=>!h.covered_by).map(h=>{const o=ORIG[String(h.n)]||{};return {n:h.n,x:h.x,y:h.y,hist:true,c:'historical',
     nm:o.nm&&!/^available$/i.test(o.nm)?o.nm:'Former booth 原展位',zh:o.zh||''};});
   const vacant=new Set(live.filter(b=>b.c==='available').map(b=>b.n));
 
@@ -1363,10 +1425,11 @@ function applyLive(d){
     const at=CATS.findIndex(c=>c.id==='other');
     CATS.splice(at<0?CATS.length:at,0,
       {id:'unclassified',label:'❔ Unclassified · 未分类',color:'#c9d1d9'},
+      {id:'pending',label:'⏸ Pending identity review · 待身份审核',color:'#e3b341'},
       {id:'unverified',label:'⏳ Reserved, unverified · 待核实',color:'#6e7681'});
     CATS.forEach(c=>CMAP[c.id]=c);
-    CCOLS.unclassified='#c9d1d9';CCOLS.unverified='#6e7681';
-    CLABELS.unclassified='未分类';CLABELS.unverified='待核实';
+    CCOLS.unclassified='#c9d1d9';CCOLS.unverified='#6e7681';CCOLS.pending='#e3b341';
+    CLABELS.unclassified='未分类';CLABELS.unverified='待核实';CLABELS.pending='待身份审核';
   }
   Object.assign(MAP_STATE,{mode:'live',version:d.version,official:d.official,geometry:d.geometry,
     snapshot:d.snapshot,preview:!!d.preview,reviewCount:d.review_count||0});
@@ -1393,6 +1456,7 @@ function renderModeBanner(){
     const add=(html)=>{const d=document.createElement('div');d.className='li';d.innerHTML=html;sb.insertBefore(d,hint);return d;};
     add('<div class="ld" style="background:rgba(201,209,217,.25);border:1px solid #c9d1d9"></div>未分类 Unclassified').id='sb-live';
     add('<div class="ld" style="border:1px dashed #6e7681"></div>待核实 Unverified');
+    add('<div class="ld" style="background:rgba(227,179,65,.25);border:1px dashed #e3b341"></div>待身份审核 Pending review');
     add('<div class="ld" style="background:linear-gradient(225deg,#fff 30%,#484f58 30%)"></div>共用展位 Shared');
   }
   const o=MAP_STATE.official||{};
@@ -1405,7 +1469,7 @@ function renderModeBanner(){
 function bootMap(){
   MAP_STATE.expected=wantLive();
   let done=false;
-  const finish=()=>{if(done)return;done=true;initCanvas();renderModeBanner();};
+  const finish=()=>{if(done)return;done=true;initCanvas();renderModeBanner();loadCt();};
   const ctl=window.AbortController?new AbortController():null;
   const timer=setTimeout(()=>{if(ctl)ctl.abort();if(MAP_STATE.expected)MAP_STATE.fallback='timeout';finish();},10000);
   fetch('/api/booth-map/model'+(MAP_STATE.expected?'?map_mode=live':''),{cache:'no-store',signal:ctl?ctl.signal:undefined})
@@ -1419,6 +1483,117 @@ function bootMap(){
       finish();
     })
     .catch(()=>{clearTimeout(timer);if(MAP_STATE.expected)MAP_STATE.fallback='unreachable';finish();});
+}
+
+
+/* ══ Battery CT · 电池CT检测 research filter ══════════════════════════════
+   Off unless the server enables it. A research OVERLAY: it adds a filter and
+   a panel, draws a ring around the exhibitors' official booths and never
+   touches classifications, occupancy or geometry. Exhibitors come with the
+   booths of the latest verified run; companies not exhibiting, and 2D X-ray
+   suppliers, are listed in the panel only — never drawn. */
+var CT_VIEW=null;const CT_BOOTH=new Map();
+const CT_COLORS={A:'#79c0ff',B:'#56d364',C:'#e3b341',D:'#a5d6ff',E:'#d2a8ff',F:'#ff7b72'};
+const CT_GROUP_ORDER=['A','B','C','D','E','F'];
+
+function ctParams(){
+  const q=new URLSearchParams();
+  try{const u=new URLSearchParams(location.search);if(u.get('ct')==='preview')q.set('ct','preview');}catch(e){}
+  if(MAP_STATE.mode==='live')q.set('map_mode','live');
+  return q.toString();
+}
+function loadCt(){
+  fetch('/api/booth-map/research/battery-ct?'+ctParams(),{cache:'no-store'})
+    .then(r=>r.ok?r.json():null).then(d=>{
+      if(!d||!d.ok||!d.enabled||!Array.isArray(d.on_map))return;
+      CT_VIEW=d;CT_BOOTH.clear();
+      d.on_map.forEach(e=>e.booths.forEach(n=>{const k=String(n);if(!CT_BOOTH.has(k))CT_BOOTH.set(k,[]);CT_BOOTH.get(k).push(e);}));
+      if(!CMAP.battery_ct){
+        CATS.splice(1,0,{id:'battery_ct',label:'🔬 Battery CT · 电池CT检测',color:'#56d364'});
+        CMAP.battery_ct=CATS[1];
+      }
+      buildFB();
+    }).catch(()=>{/* research overlay is optional; the map is unaffected */});
+}
+
+function ctLink(u){return /^https?:\/\//i.test(u)?`<a href="${escT(u)}" target="_blank" rel="noopener noreferrer">${escT(u.replace(/^https?:\/\/(www\.)?/,'').slice(0,48))}</a>`:'';}
+function ctBadge(e){
+  const cls={confirmed:'ok',low:'low',indirect:'ind',not_ct:'no'}[e.confidence]||'low';
+  return `<span class="ctb ctb-${cls}">${escT(e.confidence_label)}</span>`;
+}
+function ctCard(e,onMap){
+  const g=CT_VIEW.groups[e.group]||{en:'',zh:''};
+  const booths=onMap?e.booths.map(n=>{
+    const m=ALL_BOOTHS_DATA.find(b=>String(b.n)===String(n));
+    const note=m&&m.nm&&!/^available$/i.test(m.nm)&&m.nm.toLowerCase().indexOf(e.official_name.toLowerCase().slice(0,6))<0
+      ?` <span class="ct-note">map label: ${escT(m.nm)}</span>`:'';
+    return m?`<button type="button" class="ct-booth" data-booth="${escT(n)}">📍 ${escT(n)}</button>${note}`
+            :`<span class="ct-booth is-off">${escT(n)} · not on current map</span>`;
+  }).join(' '):'<span class="ct-note">No booth — not on the map 未参展，不在地图上</span>';
+  const ex=onMap&&e.existing_classification;
+  const existing=ex&&(ex.labels.length||ex.pending)
+    ?`<div class="ct-row"><b>Existing SKQ classification 现有分类</b> ${escT(ex.labels.join(' · ')||'Pending identity review 待身份审核')} <span class="ct-note">(unchanged 保持不变)</span></div>`:'';
+  const status=!onMap?`<span class="ctb ctb-no">${escT({withdrawn:'Withdrawn 已撤展',no_longer_listed:'No longer listed 已不在名单'}[e.status_now]||'Not exhibiting 未参展')}</span>`:'';
+  return `<article class="ct-card" style="border-left-color:${CT_COLORS[e.group]||'#8b949e'}">
+    <div class="ct-head"><div><div class="ct-name">${escT(e.name)}</div>${e.name_zh?`<div class="ct-zh">${escT(e.name_zh)}</div>`:''}</div>
+      <div class="ct-badges">${ctBadge(e)}${status}</div></div>
+    <div class="ct-booths">${booths}</div>
+    <div class="ct-row"><b>${escT(e.ct_type_label)}</b> · ${escT(e.technology)}</div>
+    <div class="ct-row"><b>Battery 电池</b> ${escT(e.battery_application)}</div>
+    <div class="ct-row"><b>Level 层级</b> ${escT(e.levels)} · <b>Use 场景</b> ${escT(e.mode)}</div>
+    ${existing}
+    <div class="ct-row ct-opp"><b>SKQ 相关性</b> ${escT(e.skq_opportunity)}${e.skq_opportunity_zh?`<br>${escT(e.skq_opportunity_zh)}`:''}</div>
+    ${e.notes?`<div class="ct-row ct-note">${escT(e.notes)}</div>`:''}
+    ${e.sources&&e.sources.length?`<div class="ct-row ct-src">${e.sources.map(ctLink).join('<br>')}</div>`:''}
+  </article>`;
+}
+function openCtPanel(){
+  if(!CT_VIEW)return;
+  let p=document.getElementById('ctpanel');
+  if(!p){p=document.createElement('section');p.id='ctpanel';p.className='ctp';p.setAttribute('aria-label','Battery CT 电池CT检测');document.getElementById('wrap').appendChild(p);}
+  const v=CT_VIEW,byG={};v.on_map.forEach(e=>{(byG[e.group]=byG[e.group]||[]).push(e);});
+  const research=v.research.filter(e=>e.group!=='X'),xray=v.research.filter(e=>e.group==='X');
+  const o=v.official||{};
+  p.innerHTML=`<header class="ctp-head">
+      <button type="button" class="ctp-grip" aria-label="Expand or collapse 展开/收起"></button>
+      <div class="ctp-title"><b>Battery CT Inspection · 电池CT检测</b>
+        <span>${v.on_map.length} exhibitors on the map 参展 · ${research.length} research only 研究名单${v.preview?' · admin preview 管理员预览':''}</span></div>
+      <button type="button" class="ctp-x" aria-label="Close 关闭">✕</button></header>
+    <div class="ctp-body">
+      <div class="ctp-legend">${CT_GROUP_ORDER.map(gk=>`<span><i style="border-color:${CT_COLORS[gk]}"></i>${gk} ${escT(v.groups[gk].en)} ${escT(v.groups[gk].zh)}</span>`).join('')}
+        <span><i style="border-style:dashed"></i>Dashed: low-confidence / indirect 虚线：待确认/间接</span></div>
+      <div class="ct-meta">Booths from official run #${escT(o.run_id||'')} · dataset ${escT(v.version)} (reviewed ${escT(v.reviewed_at)}). Research overlay — SKQ classifications are not changed. 仅研究叠加，不修改分类。</div>
+      ${CT_GROUP_ORDER.filter(gk=>byG[gk]).map(gk=>`<h3 class="ct-h"><i style="background:${CT_COLORS[gk]}"></i>${gk} · ${escT(v.groups[gk].en)} <span>${escT(v.groups[gk].zh)}</span></h3>${byG[gk].map(e=>ctCard(e,true)).join('')}`).join('')}
+      <details class="ct-more"><summary>Not exhibiting — research list (${research.length}) 未参展研究名单（不在地图上）</summary>
+        ${CT_GROUP_ORDER.filter(gk=>research.some(e=>e.group===gk)).map(gk=>`<h3 class="ct-h"><i style="background:${CT_COLORS[gk]}"></i>${gk} · ${escT(v.groups[gk].en)} <span>${escT(v.groups[gk].zh)}</span></h3>${research.filter(e=>e.group===gk).map(e=>ctCard(e,false)).join('')}`).join('')}</details>
+      <details class="ct-more"><summary>2D X-ray only — not CT (${xray.length}) 仅二维X射线（非CT）</summary>${xray.map(e=>ctCard(e,false)).join('')}</details>
+      <button type="button" class="ct-dl">⬇ Download CT research list (Excel) 下载电池CT研究名单</button>
+    </div>`;
+  p.querySelector('.ctp-x').onclick=()=>setF('all');
+  p.querySelector('.ctp-grip').onclick=()=>{p.classList.toggle('is-min');ctRevealOnPhone();};
+  p.querySelectorAll('.ct-booth[data-booth]').forEach(bn=>bn.onclick=()=>{jumpTo(bn.dataset.booth);if(window.matchMedia('(max-width: 640px)').matches)p.classList.add('is-min');});
+  p.querySelector('.ct-dl').onclick=ctDownload;
+  p.classList.remove('is-min');p.hidden=false;
+  // On a phone the filter list would leave the map ~140px wide; while the CT
+  // panel is open the map takes the full width (restored on close).
+  document.body.classList.add('ct-open');if(typeof resize==='function')resize();
+  ctRevealOnPhone();
+}
+/* On a phone the map frame starts below the CRM header, so a sheet pinned to
+   the frame's bottom would open off-screen. Bring the whole frame into view. */
+function ctRevealOnPhone(){
+  if(!window.matchMedia('(max-width: 640px)').matches)return;
+  try{if(window.frameElement)window.frameElement.scrollIntoView({block:'end'});}catch(e){/* standalone map: nothing to scroll */}
+}
+function closeCtPanel(){
+  const p=document.getElementById('ctpanel');if(p)p.hidden=true;
+  if(document.body.classList.contains('ct-open')){document.body.classList.remove('ct-open');if(typeof resize==='function')resize();}
+}
+function ctDownload(){
+  const q=ctParams();
+  fetch('/api/booth-map/research/battery-ct?format=xlsx'+(q?'&'+q:''),{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.blob();})
+    .then(b=>{const u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=`battery-ct-research_${CT_VIEW.version}.xlsx`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),30000);})
+    .catch(e=>alert('Download failed 下载失败: '+e.message));
 }
 
 /* ── Export hook for the CRM shell's Download menu ────────────────────────
@@ -1441,8 +1616,9 @@ window.skqFloorPlan = {
     return [['#58a6ff','Available 可用展位'],['#f85149','Direct competitor 直接竞品'],
       ['#f0883e','Indirect competitor 间接竞品'],['#ffa657','Highly recommended 强烈推荐'],
       ['#3fb950','Target customer 目标客户'],['#d2a8ff','ESS/EV project ESS/EV 项目'],['#9198a1','Other 其他']]
-      .concat(MAP_STATE.mode==='live'?[['#c9d1d9','Unclassified 未分类'],['#6e7681','Reserved, unverified 待核实'],['#ffffff','◥ Shared booth 共用展位']]:[])
-      .concat(SHOW_HIST?[['#3a3f46','Historical 历史展位']]:[]);
+      .concat(MAP_STATE.mode==='live'?[['#c9d1d9','Unclassified 未分类'],['#e3b341','Pending identity review 待身份审核'],['#6e7681','Reserved, unverified 待核实'],['#ffffff','◥ Shared booth 共用展位']]:[])
+      .concat(SHOW_HIST?[['#3a3f46','Historical 历史展位']]:[])
+      .concat(activeF==='battery_ct'&&CT_VIEW?CT_GROUP_ORDER.map(g=>[CT_COLORS[g],`CT ${g} ${CT_VIEW.groups[g].en} ${CT_VIEW.groups[g].zh}`]):[]);
   },
   render: function(s, opts){
     var xs=ALL_BOOTHS_DATA.map(function(b){return b.x;}),ys=ALL_BOOTHS_DATA.map(function(b){return b.y;});

@@ -183,6 +183,10 @@ function buildPlan(mapBooths, official, meta = {}) {
     if (!e) continue;
     if (d.decision === 'kept_ambiguous' && e.orig) {
       Object.assign(e, { decision: 'kept_ambiguous', x: e.orig.x, y: e.orig.y, note: d.note, decided_at: d.decided_at });
+    } else if (d.decision === 'official_position' && e.official) {
+      // An approved move. The original stays in `orig`, so rollback is a decision change, not data repair.
+      Object.assign(e, { decision: 'relocated', x: e.official.x, y: e.official.y, note: d.note, decided_at: d.decided_at,
+        approved: true, evidence: d.evidence || null });
     } else if (d.decision === 'placeholder') {
       Object.assign(e, { decision: 'placeholder', x: null, y: null, note: d.note, decided_at: d.decided_at });
     } else {
@@ -190,9 +194,24 @@ function buildPlan(mapBooths, official, meta = {}) {
     }
   }
 
+  // A human decision must not create a collision either: refuse rather than draw two booths in one place.
+  const drawnNow = entries.filter((e) => e.x !== null && e.x !== undefined && e.decision !== 'placeholder');
+  for (const e of drawnNow) {
+    if (!e.decided_at) continue;
+    const hit = drawnNow.filter((o) => o !== e && overlaps(e, o));
+    if (hit.length) throw new Error(`review decision for ${e.n} collides with booth ${hit.map((o) => o.n).join(', ')}`);
+  }
+
+  /* Historical booths are drawn only on request, dimmed — and never on top of
+     an active official booth. One that would overlap is marked covered_by and
+     is not drawn even when historical booths are shown; its record is kept. */
   const historical = [...ours.keys()].filter((n) => !official.has(n))
     .sort((p, q) => p.localeCompare(q, 'en', { numeric: true }))
-    .map((n) => ({ n, x: ours.get(n).x, y: ours.get(n).y, decision: 'historical' }));
+    .map((n) => {
+      const h = { n, x: ours.get(n).x, y: ours.get(n).y, decision: 'historical' };
+      const under = drawnNow.filter((e) => overlaps(e, h)).map((e) => e.n);
+      return under.length ? { ...h, covered_by: under } : h;
+    });
 
   const counts = {};
   for (const e of [...entries, ...historical]) counts[e.decision] = (counts[e.decision] || 0) + 1;

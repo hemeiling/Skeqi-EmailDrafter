@@ -1,9 +1,12 @@
 {
- "_about": "Human geometry decisions, applied on top of the computed plan by scripts/booth-geometry-plan.js. Only 'kept_ambiguous' (draw at the original SKQ coordinates) and 'placeholder' (do not draw; keep the record) are accepted.",
+ "_about": "Human geometry decisions, applied on top of the computed plan by scripts/booth-geometry-plan.js. Accepted: 'kept_ambiguous' (draw at the original SKQ coordinates), 'placeholder' (do not draw; keep the record), 'official_position' (approved move to the converted official position; original kept as orig for rollback).",
  "4050": {
-  "decision": "kept_ambiguous",
-  "note": "Kept at the original SKQ coordinates; flagged for manual review against the official organizer map (official position is 144 map units away).",
-  "decided_at": "2026-10-13"
+  "decision": "official_position",
+  "note": "Approved move to the organizer's official position. Organizer floor-plan data (GetBoothByHall CAD outline) places the 50'x50' island 'Exhibitor Suite' in the top row above booths 5142-5442; the earlier SKQ position above 4043 is empty in the official plan. Original SKQ coordinates (464,0) kept for rollback.",
+  "evidence": "data/booth-geometry/evidence/booth4050-organizer-vs-skq.png",
+  "previous_decision": "kept_ambiguous (2026-10-13, pending manual review)",
+  "decided_at": "2026-10-13",
+  "approved_by": "user approval in rollout instruction of 2026-10-13"
  },
  "TEMP_3446": {
   "decision": "placeholder",

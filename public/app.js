@@ -2850,8 +2850,14 @@ function bmWhen(iso) {
    may additionally preview the live map in this browser tab only. */
 var _bmServerMode = null, _bmIsAdmin = false;
 function bmPreviewLive() { try { return sessionStorage.getItem("bm_preview_live") === "1"; } catch (e) { return false; } }
+function bmPreviewCt() { try { return sessionStorage.getItem("bm_preview_ct") === "1"; } catch (e) { return false; } }
+var _bmCtServer = "off";
 function bmFrameSrc() {
-  return _bmServerMode === "live" || (_bmIsAdmin && bmPreviewLive()) ? "/booth-map/?map_mode=live" : "/booth-map/";
+  const q = new URLSearchParams();
+  if (_bmServerMode === "live" || (_bmIsAdmin && bmPreviewLive())) q.set("map_mode", "live");
+  if (_bmCtServer !== "on" && _bmIsAdmin && bmPreviewCt()) q.set("ct", "preview");
+  const s = q.toString();
+  return "/booth-map/" + (s ? "?" + s : "");
 }
 function bmReloadFrame() {
   const f = document.getElementById("bm-frame");
@@ -2870,6 +2876,12 @@ async function loadBoothMapStatus() {
       // Only offered while the live map is off for everyone; once on, there is nothing to preview.
       toggle.hidden = !(_bmIsAdmin && _bmServerMode !== "live");
       document.getElementById("bm-live-preview").checked = bmPreviewLive();
+    }
+    _bmCtServer = d.battery_ct || "off";
+    const ctToggle = document.getElementById("bm-ct-toggle");
+    if (ctToggle) {
+      ctToggle.hidden = !(_bmIsAdmin && _bmCtServer !== "on");
+      document.getElementById("bm-ct-preview").checked = bmPreviewCt();
     }
     const sync = document.getElementById("bm-sync-btn");
     if (sync) sync.hidden = !_bmIsAdmin;
@@ -2943,10 +2955,13 @@ function bmSyncScope() {
   label.textContent = filtered ? `Current map filter: ${st.filterLabel}` : "Current map filter · 当前筛选 (none selected 未选择)";
   if (!filtered) document.querySelector('input[name="bm-dl-scope"][value="all"]').checked = true;
   // "Available" is booths without exhibitors: a floor plan of it is fine, a list of it is empty by definition.
-  const exDisabled = filtered && st.filter === "available" && bmScope() === "filter";
+  // Booth-only views and the CT research overlay have no exhibitor-list scope of their own.
+  const exDisabled = filtered && ["available", "unverified", "battery_ct"].includes(st.filter) && bmScope() === "filter";
   document.querySelectorAll('[data-bm-dl^="ex-"]').forEach((b) => {
     b.disabled = exDisabled;
-    b.title = exDisabled ? "Available booths have no exhibitors 可用展位没有展商" : "";
+    b.title = !exDisabled ? "" : st.filter === "battery_ct"
+      ? "Use “Download CT research list” in the Battery CT panel 请在电池CT面板中下载"
+      : "Available booths have no exhibitors 可用展位没有展商";
   });
   return st;
 }
@@ -3262,15 +3277,89 @@ async function bmOpenSyncPreview() {
       <div class="bm-sync-h">Classifications 分类</div>
       <div style="font-size:0.82rem;">${p.classifications.followed_company} companies keep their classification at a new booth ·
         ${p.classifications.unclassified} official exhibitors unclassified ·
-        review: ${rc.possible_rename || 0} possible renames, ${rc.left_show || 0} not in the verified list, ${rc.ambiguous || 0} ambiguous identities</div>`;
+        ${p.classifications.pending_identity_review || 0} shown as pending identity review ·
+        review: ${rc.possible_rename || 0} possible renames, ${rc.left_show || 0} not in the verified list, ${rc.ambiguous || 0} ambiguous identities</div>
+      <div class="bm-sync-h">Identity confirmations 身份确认 (admin)</div>
+      <div id="bm-idq" class="bm-idq"><span class="spinner"></span> Loading… 加载中…</div>`;
+    bmLoadIdentityQueue();
   } catch (e) {
     body.innerHTML = `<div class="xo-error">Could not build the preview 无法生成预览: ${escapeHtml(e.message || String(e))}</div>`;
+  }
+}
+
+/* ── Identity confirmation (admin) ── one card per queued pair. Decisions are
+   recorded server-side; nothing here changes a CRM record. */
+const BM_KIND_LABELS = { target_customer: "Target customer 目标客户", competitor_direct: "Direct competitor 直接竞品",
+  competitor_indirect: "Indirect competitor 间接竞品", ess_ev: "ESS/EV 储能电动", chinese_company: "Chinese company 中国企业" };
+const BM_DECISION_LABELS = { confirmed: "Confirmed 已确认", rejected: "Rejected 已否决", deferred: "Deferred 暂缓" };
+
+async function bmLoadIdentityQueue() {
+  const box = document.getElementById("bm-idq");
+  if (!box) return;
+  try {
+    const r = await fetch("/api/booth-map/identity-review", { cache: "no-store" });
+    if (!r.ok) throw new Error(await bmErrorText(r));
+    const q = await r.json();
+    const c = q.counts || {};
+    box.innerHTML = `<div class="bm-idq-sum">${q.items.length} pairs · ${c.undecided || 0} undecided 未决定 · ${c.confirmed || 0} confirmed · ${c.rejected || 0} rejected · ${c.deferred || 0} deferred.
+        Confirming shows SKQ's earlier classification on the official exhibitor in the live map only. CRM records are never merged or changed. 仅影响实时展位图显示，不合并或修改CRM记录。</div>`
+      + q.items.map((it) => {
+        const h = it.historical, o = it.official, ev = it.evidence, d = it.decision;
+        const cls = (h.kinds || []).map((k) => BM_KIND_LABELS[k] || k).join(" · ") || (h.category ? `Map category: ${h.category}` : "—");
+        const evid = [ev.same_booth ? `Same booth ${escapeHtml(h.booth)} 同一展位` : `Different booth 不同展位`,
+          ev.shared_name_words.length ? `Shared name words 共同名称词: ${escapeHtml(ev.shared_name_words.join(", "))}` : "No shared distinctive name words",
+          `CRM: earlier entry ${h.crm_company_id ? "#" + h.crm_company_id + (h.crm_link_method ? " (" + escapeHtml(h.crm_link_method) + ")" : "") : "none"} · exhibitor ${o.crm_company_id ? "#" + o.crm_company_id : "none"}${ev.same_crm_record ? " (same record)" : " (separate records — not merged)"}`];
+        const hist = (it.history || []).map((x) => `<li>${escapeHtml(BM_DECISION_LABELS[x.decision] || x.decision)} · ${escapeHtml(x.decided_by)} · ${escapeHtml(bmWhen(x.decided_at))}${x.reason ? " — " + escapeHtml(x.reason) : ""}${x.revoked_at ? ` <span class="bm-idq-rev">(superseded ${escapeHtml(bmWhen(x.revoked_at))})</span>` : ""}</li>`).join("");
+        return `<div class="bm-idq-card" data-mb="${it.map_booth_id}" data-ex="${it.exhibitor_id}">
+          <div class="bm-idq-pair">
+            <div><div class="bm-idq-l">Official exhibitor 官方展商</div><b>${escapeHtml(o.name)}</b><div class="bm-idq-m">Booth ${escapeHtml(o.booths.join(", "))} · ID ${escapeHtml(String(o.exhibitor_source_id || ""))}</div></div>
+            <div><div class="bm-idq-l">Earlier SKQ map entry 原展位图记录</div><b>${escapeHtml(h.company)}</b><div class="bm-idq-m">Booth ${escapeHtml(h.booth)} · ${escapeHtml(cls)}</div></div>
+          </div>
+          <ul class="bm-idq-ev">${evid.map((x) => `<li>${x}</li>`).join("")}</ul>
+          <div class="bm-idq-status">${d ? `Current 当前: <b>${escapeHtml(BM_DECISION_LABELS[d.decision])}</b> by ${escapeHtml(d.decided_by)}, ${escapeHtml(bmWhen(d.decided_at))}${it.applied ? " · applied on the live map 已应用" : ""}` : "Undecided 未决定 — shown as “pending identity review” on the live map"}</div>
+          <textarea class="bm-idq-reason" rows="2" maxlength="500" placeholder="Reason (required to confirm or reject) 理由（确认/否决必填）"></textarea>
+          <div class="bm-idq-acts">
+            <button type="button" class="btn-sm btn-primary" data-act="confirmed">Confirm same company 确认同一公司</button>
+            <button type="button" class="btn-sm" data-act="rejected">Reject 否决</button>
+            <button type="button" class="btn-sm" data-act="deferred">Defer 暂缓</button>
+          </div>
+          <div class="bm-idq-msg" role="status" aria-live="polite"></div>
+          ${hist ? `<details class="bm-idq-hist"><summary>History 记录 (${it.history.length})</summary><ul>${hist}</ul></details>` : ""}
+        </div>`;
+      }).join("");
+    box.querySelectorAll(".bm-idq-card").forEach((card) => card.querySelectorAll("[data-act]").forEach((btn) => {
+      btn.addEventListener("click", () => bmDecideIdentity(card, btn.dataset.act));
+    }));
+  } catch (e) {
+    box.innerHTML = `<div class="xo-error">Could not load identity confirmations 无法加载: ${escapeHtml(e.message || String(e))}</div>`;
+  }
+}
+
+async function bmDecideIdentity(card, decision) {
+  const msg = card.querySelector(".bm-idq-msg");
+  const reason = card.querySelector(".bm-idq-reason").value.trim();
+  if (decision === "confirmed" && !window.confirm("Confirm these are the same company? SKQ's earlier classification will be shown on this exhibitor in the live map. No CRM record is merged or changed.\n确认为同一公司？仅影响实时展位图显示。")) return;
+  card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+  msg.textContent = "Saving… 保存中…";
+  try {
+    const r = await fetch("/api/booth-map/identity-review", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ map_booth_id: Number(card.dataset.mb), exhibitor_id: Number(card.dataset.ex), decision, reason }) });
+    if (!r.ok) throw new Error(await bmErrorText(r));
+    msg.textContent = "Saved 已保存.";
+    await bmLoadIdentityQueue();
+  } catch (e) {
+    msg.textContent = `Not saved 未保存: ${e.message || e}`;
+    card.querySelectorAll("button").forEach((b) => { b.disabled = false; });
   }
 }
 
 (function bmWireLiveControls() {
   document.getElementById("bm-live-preview")?.addEventListener("change", (e) => {
     try { sessionStorage.setItem("bm_preview_live", e.target.checked ? "1" : "0"); } catch (err) { /* private mode: one-off */ }
+    bmReloadFrame();
+  });
+  document.getElementById("bm-ct-preview")?.addEventListener("change", (e) => {
+    try { sessionStorage.setItem("bm_preview_ct", e.target.checked ? "1" : "0"); } catch (err) { /* one-off */ }
     bmReloadFrame();
   });
   document.getElementById("bm-sync-btn")?.addEventListener("click", bmOpenSyncPreview);

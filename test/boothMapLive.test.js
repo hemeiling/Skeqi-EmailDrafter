@@ -91,9 +91,28 @@ test('plan: human review decisions can only keep a booth in place or leave a pla
 test('the committed plan carries the reviewed decisions for 4050 and TEMP_3446', () => {
   const p = JSON.parse(fs.readFileSync(M.PLAN_PATH, 'utf8'));
   const by = Object.fromEntries(p.booths.map((b) => [b.n, b]));
-  assert.equal(by['4050'].decision, 'kept_ambiguous');
+  // 4050: approved move to the organizer position; the original is kept for rollback.
+  assert.equal(by['4050'].decision, 'relocated');
+  assert.equal(by['4050'].approved, true);
+  assert.deepEqual([by['4050'].x, by['4050'].y], [by['4050'].official.x, by['4050'].official.y]);
+  assert.deepEqual(by['4050'].orig, { x: 464, y: 0 });
+  assert.ok(fs.existsSync(path.join(__dirname, '..', by['4050'].evidence)), 'the decision evidence is filed');
+  // Historical 5244 sat where 4050 now is: it is marked and never drawn over it.
+  const h5244 = p.historical.find((h) => h.n === '5244');
+  assert.deepEqual(h5244.covered_by, ['4050']);
+  // TEMP_3446: placeholder, not drawn, record kept.
   assert.equal(by.TEMP_3446.decision, 'placeholder');
   assert.equal(by.TEMP_3446.x, null);
+});
+
+test('no historical booth that is drawn overlaps an active booth', () => {
+  const p = JSON.parse(fs.readFileSync(M.PLAN_PATH, 'utf8'));
+  const active = p.booths.filter((b) => b.x !== null);
+  for (const h of p.historical.filter((x) => !x.covered_by)) {
+    for (const a of active) assert.ok(Math.abs(a.x - h.x) >= plan.CELL || Math.abs(a.y - h.y) >= plan.CELL, `historical ${h.n} overlaps ${a.n}`);
+  }
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'booth-map', 'index.html'), 'utf8');
+  assert.match(html, /d\.historical\.filter\(h=>!h\.covered_by\)/, 'the map skips covered historical booths');
 });
 
 test('plan: refuses a conversion that does not reproduce the existing map', () => {

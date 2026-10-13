@@ -1532,6 +1532,35 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_ecr_company
     ON exhibitor_company_relations (related_company_id) WHERE revoked_at IS NULL`);
 
+  /* ── Booth Map identity decisions (boothMapIdentity.js) ────────────────────
+     Reviewed migration: docs/migrations/2026-10-13_booth_map_identity_decisions.sql
+     — keep the two identical. Additive and idempotent; written only by an
+     admin action; append-only (revoke + insert, never edit or delete). Read by
+     the live Booth Map only, to decide whether SKQ's classification of an
+     earlier map entry may be shown on an official exhibitor. Never merges or
+     edits any CRM record. */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS booth_map_identity_decisions (
+      id SERIAL PRIMARY KEY,
+      event_id INTEGER NOT NULL REFERENCES events(id),
+      map_booth_id INTEGER NOT NULL REFERENCES booth_map_booths(id),
+      exhibitor_id INTEGER NOT NULL REFERENCES event_exhibitors(id),
+      decision TEXT NOT NULL CHECK (decision IN ('confirmed', 'rejected', 'deferred')),
+      reason TEXT,
+      evidence JSONB NOT NULL,
+      decided_by TEXT NOT NULL,
+      decided_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      revoked_by TEXT,
+      revoked_at TIMESTAMPTZ,
+      revoke_reason TEXT,
+      CHECK ((revoked_at IS NULL) = (revoked_by IS NULL))
+    )
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_bmid_live
+    ON booth_map_identity_decisions (map_booth_id, exhibitor_id) WHERE revoked_at IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_bmid_event
+    ON booth_map_identity_decisions (event_id) WHERE revoked_at IS NULL`);
+
   /* ── Automatic Apollo contact discovery (contactDiscovery.js) ─────────────
      One row per CRM company that discovery has been asked to search. It holds
      the search STATE only — the people found are canonical contacts, saved

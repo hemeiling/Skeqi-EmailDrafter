@@ -16,6 +16,8 @@ const APOLLO_API_KEY = process.env.APOLLO_API_KEY || '';
    exhibitor run on the reviewed geometry plan. Anything else reads as snapshot,
    so a typo can never switch the live map on. */
 const BOOTH_MAP_MODE = process.env.BOOTH_MAP_MODE === 'live' ? 'live' : 'snapshot';
+/* Battery CT research filter on the Booth Map. Off unless exactly 'on'. */
+const BATTERY_CT_FILTER = process.env.BATTERY_CT_FILTER === 'on' ? 'on' : 'off';
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const BAILIAN_API_KEY = process.env.BAILIAN_API_KEY || process.env.DASHSCOPE_API_KEY || '';
@@ -344,6 +346,7 @@ module.exports = {
 
   APOLLO_API_KEY,
   BOOTH_MAP_MODE,
+  BATTERY_CT_FILTER,
   CLAUDE_API_KEY,
   OPENAI_API_KEY,
   APP_USERNAME,

@@ -37,7 +37,8 @@ const boothImport = require('./boothImport');
 
 const PLAN_PATH = path.join(__dirname, 'data', 'booth-geometry', 'tbsm26.json');
 const INTEL_KINDS = outreach.INTEL_KINDS;     // the five company judgements
-const TIERS = ['sync_anchor', 'exact_name', 'crm_company', 'reviewed_relation'];
+const TIERS = ['admin_confirmed', 'sync_anchor', 'exact_name', 'crm_company', 'reviewed_relation'];
+const pairKey = (mapBoothId, exhibitorId) => `${mapBoothId}:${exhibitorId}`;
 
 class ModelError extends Error {
   constructor(code, message, status = 503) { super(message); this.code = code; this.status = status; }
@@ -89,7 +90,7 @@ function similarNames(a, b, df = null) {
  * belongs to. Each tier must name exactly one exhibitor; two candidates in a
  * tier is ambiguity, and ambiguity is a review item, not a pick.
  */
-function resolveProfiles(profiles, exhibitors, reviewedByCompany = new Map()) {
+function resolveProfiles(profiles, exhibitors, reviewedByCompany = new Map(), decisions = new Map()) {
   const byId = new Map(exhibitors.map((e) => [e.id, e]));
   const byKey = new Map();
   const byCompany = new Map();
@@ -101,7 +102,13 @@ function resolveProfiles(profiles, exhibitors, reviewedByCompany = new Map()) {
   const df = documentFrequency(exhibitors.map((e) => e.source_name));
   const out = [];
   for (const p of profiles) {
+    /* An admin's explicit decision about THIS map entry and THIS exhibitor.
+       Confirmed is an identity; rejected removes the pair from every
+       suggestion; deferred changes nothing. */
+    const mine = [...decisions.values()].filter((d) => d.map_booth_id === p.map_booth_id);
+    const rejected = new Set(mine.filter((d) => d.decision === 'rejected').map((d) => d.exhibitor_id));
     const candidates = {
+      admin_confirmed: mine.filter((d) => d.decision === 'confirmed').map((d) => byId.get(d.exhibitor_id)).filter(Boolean),
       sync_anchor: p.exhibitor_id && byId.has(p.exhibitor_id) ? [byId.get(p.exhibitor_id)] : [],
       exact_name: byKey.get(normalizeNameKey(p.name)) || [],
       crm_company: p.company_id ? (byCompany.get(p.company_id) || []) : [],
@@ -113,16 +120,18 @@ function resolveProfiles(profiles, exhibitors, reviewedByCompany = new Map()) {
     for (const tier of TIERS) {
       const c = [...new Map(candidates[tier].map((e) => [e.id, e])).values()];
       if (c.length === 1) { resolved = { exhibitor: c[0], tier }; break; }
-      if (c.length > 1) { ambiguous = { tier, candidates: c.map((e) => e.source_name) }; break; }
+      if (c.length > 1) { ambiguous = { tier, candidates: c }; break; }
     }
-    if (resolved) { out.push({ profile: p, ...resolved }); continue; }
+    if (resolved) { out.push({ profile: p, ...resolved, decided: mine }); continue; }
     if (ambiguous) {
-      out.push({ profile: p, review: 'ambiguous', detail: `${ambiguous.tier}: ${ambiguous.candidates.join(' | ')}` });
+      out.push({ profile: p, review: 'ambiguous', candidate_ids: ambiguous.candidates.map((e) => e.id),
+        detail: `${ambiguous.tier}: ${ambiguous.candidates.map((e) => e.source_name).join(' | ')}` });
       continue;
     }
-    const similar = exhibitors.filter((e) => similarNames(e.source_name, p.name, df)).map((e) => e.source_name);
+    const similar = exhibitors.filter((e) => !rejected.has(e.id) && similarNames(e.source_name, p.name, df));
     out.push({ profile: p, review: similar.length ? 'possible_rename' : 'left_show',
-      detail: similar.slice(0, 5).join(' | ') });
+      candidate_ids: similar.slice(0, 5).map((e) => e.id),
+      detail: similar.slice(0, 5).map((e) => e.source_name).join(' | '), decided: mine });
   }
   return out;
 }
@@ -157,8 +166,8 @@ async function loadExhibitors(pool, eventId) {
    company, and following the company is exactly what resolves that. */
 async function loadProfiles(pool, eventId) {
   const { rows } = await pool.query(
-    `SELECT b.booth_number, b.source_company_name AS name, b.source_company_name_zh AS name_zh,
-            b.category, b.exhibitor_id, b.occupant_status,
+    `SELECT b.id AS map_booth_id, b.booth_number, b.source_company_name AS name, b.source_company_name_zh AS name_zh,
+            b.category, b.exhibitor_id, b.occupant_status, b.match_method, b.company_id AS crm_link_any,
             /* A CRM link the importer made BY BOOTH NUMBER is a statement about
                the booth, not the company, so it is not an identity here. */
             CASE WHEN b.match_method IN ('name_exact', 'name_key') THEN b.company_id END AS company_id,
@@ -178,6 +187,19 @@ async function loadReviewed(pool, exhibitorIds) {
     byCompany.set(r.related_company_id, [...(byCompany.get(r.related_company_id) || []), r.exhibitor_id]);
   }
   return byCompany;
+}
+
+/* Live admin identity decisions. A database that predates the table has none. */
+async function loadDecisions(pool, eventId) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, map_booth_id, exhibitor_id, decision, reason, decided_by, decided_at
+         FROM booth_map_identity_decisions WHERE event_id = $1 AND revoked_at IS NULL`, [eventId]);
+    return new Map(rows.map((d) => [pairKey(d.map_booth_id, d.exhibitor_id), d]));
+  } catch (e) {
+    if (e.code === '42P01') return new Map();
+    throw e;
+  }
 }
 
 async function loadMapImport(pool, eventId) {
@@ -214,6 +236,7 @@ function assemble({ run, plan, exhibitors, resolutions, mapImport, event }) {
     const c = cls.get(e.id);
     exhibitorOut[e.id] = {
       name: e.source_name,
+      source_id: e.exhibitor_source_id,
       zh: (c && c.zh) || e.chinese_name || '',
       company_id: e.company_id || null,
       kinds: c ? INTEL_KINDS.filter((k) => c.kinds.has(k)) : [],
@@ -224,6 +247,62 @@ function assemble({ run, plan, exhibitors, resolutions, mapImport, event }) {
     };
     for (const b of e.booths) byBooth.set(b, [...(byBooth.get(b) || []), e.id]);
   }
+
+  /* Pending identity review. When a classified snapshot company is very
+     probably the same as an exhibitor — a similar name at the SAME booth, or an
+     exact-name tie — the map must not call that exhibitor "unclassified": that
+     would be a false statement about a likely target or competitor. It is
+     shown as pending instead. Nothing is attached: kinds and category stay
+     empty until an admin confirms the identity. */
+  for (const r of resolutions) {
+    if (!r.review || r.review === 'left_show') continue;
+    const judged = r.profile.kinds.length || (r.profile.category && r.profile.category !== 'other');
+    if (!judged) continue;
+    for (const id of r.candidate_ids || []) {
+      const e = exhibitorOut[id];
+      if (!e || e.category || e.kinds.length) continue;
+      const sameBooth = e.booths.includes(r.profile.booth_number);
+      if (r.review === 'ambiguous' || sameBooth) {
+        (e.pending = e.pending || []).push({ snapshot_booth: r.profile.booth_number, company: r.profile.name,
+          kinds: r.profile.kinds, category: r.profile.category, reason: r.review === 'ambiguous' ? 'ambiguous_identity' : 'same_booth_rename' });
+      }
+    }
+  }
+
+  /* The admin identity queue: classified earlier-map entries whose likely
+     match holds the SAME booth (the blocking cases), plus every pair an admin
+     has already decided on, so a decision can be seen and changed. */
+  const identityQueue = [];
+  for (const r of resolutions) {
+    const p = r.profile;
+    const judged = p.kinds.length || (p.category && p.category !== 'other');
+    if (!judged || r.review === 'ambiguous') continue;
+    const decidedIds = new Set((r.decided || []).map((d) => d.exhibitor_id));
+    const ids = new Set([...decidedIds]);
+    if (r.review === 'possible_rename') {
+      for (const id of r.candidate_ids || []) if (exhibitorOut[id] && exhibitorOut[id].booths.includes(p.booth_number)) ids.add(id);
+    }
+    for (const id of ids) {
+      const e = exhibitorOut[id];
+      if (!e) continue;
+      const d = (r.decided || []).find((x) => x.exhibitor_id === id) || null;
+      identityQueue.push({
+        key: pairKey(p.map_booth_id, id),
+        map_booth_id: p.map_booth_id, exhibitor_id: id,
+        historical: { company: p.name, company_zh: p.name_zh || '', booth: p.booth_number, kinds: p.kinds, category: p.category,
+          crm_company_id: p.crm_link_any || null, crm_link_method: p.match_method || null },
+        official: { name: e.name, booths: e.booths, exhibitor_source_id: e.source_id, crm_company_id: e.company_id },
+        evidence: {
+          same_booth: e.booths.includes(p.booth_number),
+          shared_name_words: [...tokens(p.name)].filter((t) => tokens(e.name).has(t)),
+          same_crm_record: Boolean(p.crm_link_any && e.company_id && p.crm_link_any === e.company_id),
+        },
+        decision: d ? { id: d.id, decision: d.decision, reason: d.reason, decided_by: d.decided_by, decided_at: d.decided_at } : null,
+        applied: r.tier === 'admin_confirmed' && r.exhibitor && r.exhibitor.id === id,
+      });
+    }
+  }
+  identityQueue.sort((a, b) => a.official.name.localeCompare(b.official.name));
 
   const booths = [];
   const drawn = new Set();
@@ -239,7 +318,8 @@ function assemble({ run, plan, exhibitors, resolutions, mapImport, event }) {
     booths.push({ n: g.n, x: g.x, y: g.y, dims: g.dims, st: status, geo: g.decision, occ });
     drawn.add(g.n);
   }
-  const historical = plan.historical.map((h) => ({ n: h.n, x: h.x, y: h.y }));
+  // covered_by: an active official booth sits on this spot — never drawn over it.
+  const historical = plan.historical.map((h) => (h.covered_by ? { n: h.n, x: h.x, y: h.y, covered_by: h.covered_by } : { n: h.n, x: h.x, y: h.y }));
   const unplaced = plan.booths.filter((g) => g.decision === 'unplaced')
     .map((g) => ({ n: g.n, dims: g.dims, note: g.note, occ: byBooth.get(g.n) || [] }));
   const notDrawn = [];
@@ -248,12 +328,14 @@ function assemble({ run, plan, exhibitors, resolutions, mapImport, event }) {
   const version = crypto.createHash('sha256').update(JSON.stringify({
     run: run && [run.id, run.source_version], plan: plan.version,
     map: mapImport && mapImport.source_version,
+    decisions: resolutions.flatMap((r) => (r.decided || []).map((d) => [d.id, d.decision])).sort((a, b) => a[0] - b[0]),
     cls: [...cls.entries()].map(([id, c]) => [id, [...c.kinds].sort(), c.category]).sort((a, b) => a[0] - b[0]),
   })).digest('hex').slice(0, 12);
 
   const review = resolutions.filter((r) => r.review).map((r) => ({
     kind: r.review, snapshot_booth: r.profile.booth_number, company: r.profile.name,
     classifications: r.profile.kinds, category: r.profile.category, detail: r.detail,
+    candidate_ids: r.candidate_ids || [],
   }));
   const tierCounts = {};
   for (const r of resolutions) if (r.tier) tierCounts[r.tier] = (tierCounts[r.tier] || 0) + 1;
@@ -272,6 +354,7 @@ function assemble({ run, plan, exhibitors, resolutions, mapImport, event }) {
     exhibitors: exhibitorOut,
     review,
     identity_tiers: tierCounts,
+    identity_queue: identityQueue,
     // Where each snapshot company's classification went. Server-side detail
     // for the preview and tests; the map endpoint does not send it.
     profiles: resolutions.map((r) => ({
@@ -296,7 +379,8 @@ async function buildModel(pool, { planFile } = {}) {
   ]);
   if (!run) throw new ModelError('no_run', 'No successful exhibitor verification has run yet.');
   const reviewed = await loadReviewed(pool, exhibitors.map((e) => e.id));
-  const resolutions = resolveProfiles(profiles, exhibitors, reviewed);
+  const decisions = await loadDecisions(pool, eventId);
+  const resolutions = resolveProfiles(profiles, exhibitors, reviewed, decisions);
   return assemble({ run, plan, exhibitors, resolutions, mapImport, event: { id: event.id, name: event.name } });
 }
 
@@ -348,6 +432,6 @@ function validate(model) {
 }
 
 module.exports = {
-  buildModel, assemble, resolveProfiles, validate, loadPlan, similarNames,
+  buildModel, assemble, resolveProfiles, validate, loadPlan, similarNames, pairKey,
   ModelError, PLAN_PATH, TIERS,
 };

@@ -65,6 +65,7 @@ for (const id of ['line', 'mfg', 'test', 'cert', 'customer', 'elec', 'batmat', '
 }
 // Live map only: official exhibitors SKQ has not classified yet.
 FILTERS.unclassified = { unclassified: true, label: 'Unclassified official exhibitors 未分类展商' };
+FILTERS.pending = { pending: true, label: 'Pending identity review 待身份审核' };
 // Booth-only views of the live map: they hold no exhibitors to list.
 const BOOTH_ONLY_FILTERS = new Set(['available', 'unverified', 'historical']);
 
@@ -221,7 +222,8 @@ function targetLabel(ex) {
 }
 
 function matchesFilter(ex, f) {
-  if (f.unclassified) return !ex.map_category && !ex.kinds.length;
+  if (f.unclassified) return !ex.map_category && !ex.kinds.length && !ex.pending;
+  if (f.pending) return Boolean(ex.pending);
   if (f.kinds) return f.kinds.some((k) => ex.kinds.includes(k));
   if (f.mapCategory) return ex.map_category === f.mapCategory;
   return true;
@@ -253,7 +255,8 @@ function liveBoothIndex(model, occupants) {
     exhibitors: (occupants.get(n) || []).map((o) => o.source_name),
     map_name: occ.map((id) => model.exhibitors[id].name).join(' / ') || (status === 'available' ? 'Available' : ''),
     map_name_zh: occ.map((id) => model.exhibitors[id].zh).filter(Boolean).join(' / '),
-    map_category: occ.map((id) => MAP_CATEGORY_LABELS[model.exhibitors[id].category] || 'Unclassified 未分类').join(' / '),
+    map_category: occ.map((id) => MAP_CATEGORY_LABELS[model.exhibitors[id].category]
+      || ((model.exhibitors[id].pending || []).length ? 'Pending identity review 待身份审核' : 'Unclassified 未分类')).join(' / '),
     status,
   });
   return [
@@ -287,7 +290,7 @@ async function buildSnapshot(pool, input = {}, { model = null } = {}) {
   if (model) {
     for (const e of exhibitors) {
       const m = model.exhibitors[e.id];
-      if (m) { e.kinds = m.kinds; e.map_category = m.category; }
+      if (m) { e.kinds = m.kinds; e.map_category = m.category; e.pending = m.pending && m.pending.length ? m.pending : null; }
     }
   }
   const drawnAt = new Set();
@@ -343,6 +346,7 @@ async function buildSnapshot(pool, input = {}, { model = null } = {}) {
       exhibitor_source_id: e.exhibitor_source_id,
       exhibitor_record_id: e.id,
       map_category: MAP_CATEGORY_LABELS[e.map_category] || e.map_category
+        || (model && e.pending ? `Pending identity review 待身份审核 (was “${e.pending.map((p) => p.company).join('; ')}”)` : '')
         || (model && e.attendance_status === 'listed' ? 'Unclassified 未分类' : ''),
       classification: classification.join('; '),
       target: targetLabel(e),
@@ -648,5 +652,6 @@ function manifest(snapshot) {
 
 module.exports = {
   buildSnapshot, toCsv, toXlsx, filename, manifest, normalizeOptions, mapCheck, servedMapVersion, publicWebsite,
+  loadExhibitors,
   ExportError, FILTERS, COLUMNS, BOOTH_COLUMNS, KIND_LABELS, OFFICIAL_FLOOR_PLAN_URL,
 };

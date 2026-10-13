@@ -54,7 +54,7 @@ async function buildPreview(pool) {
     .filter(([, e]) => e.from.length && e.from.some((f) => !e.booths.includes(f)))
     .map(([id, e]) => ({ exhibitor_id: Number(id), name: e.name, from: e.from, to: e.booths,
       kinds: e.kinds, category: e.category }));
-  const unclassified = Object.values(model.exhibitors).filter((e) => !e.category && !e.kinds.length);
+  const unclassified = Object.values(model.exhibitors).filter((e) => !e.category && !e.kinds.length && !(e.pending || []).length);
 
   const count = (list, f) => list.filter(f).length;
   return {
@@ -106,7 +106,8 @@ function summary(p) {
       unplaced: p.geometry.decisions.filter((g) => g.decision === 'unplaced' || g.decision === 'placeholder'),
       ambiguous: p.geometry.decisions.filter((g) => g.decision === 'kept_ambiguous') },
     classifications: { followed_company: p.classifications.followed_company.length,
-      unclassified: p.classifications.unclassified.length, identity_tiers: p.classifications.identity_tiers },
+      unclassified: p.classifications.unclassified.length, identity_tiers: p.classifications.identity_tiers,
+      pending_identity_review: Object.values(p.model.exhibitors).filter((e) => (e.pending || []).length).length },
     review_counts: rc,
   };
 }

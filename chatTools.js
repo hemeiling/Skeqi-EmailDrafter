@@ -679,7 +679,7 @@ const TOOLS = {
             company_id: e.company_id || undefined,
             crm_link: e.company_id ? undefined : 'not linked to a CRM company',
             classifications: e.kinds.length ? e.kinds : undefined,
-            category: e.category || 'unclassified',
+            category: e.category || (e.pending && e.pending.length ? 'pending_identity_review' : 'unclassified'),
           })),
         };
       }

@@ -2502,6 +2502,18 @@
   .bm-sync-table td.num, .bm-sync-table th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .bm-sync-h { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; color: var(--color-text-tertiary); margin: 10px 0 2px; }
   .bm-sync-ok { color: #0F5132; font-weight: 600; } .bm-sync-bad { color: #A21D2A; font-weight: 600; }
+  .bm-idq-sum { font-size: 0.76rem; color: var(--color-text-tertiary); margin: 4px 0 10px; line-height: 1.5; }
+  .bm-idq-card { border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 10px 12px; margin-bottom: 10px; font-size: 0.8rem; }
+  .bm-idq-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .bm-idq-l { font-size: 0.66rem; font-weight: 700; text-transform: uppercase; color: var(--color-text-tertiary); }
+  .bm-idq-m { font-size: 0.74rem; color: var(--color-text-secondary); }
+  .bm-idq-ev { margin: 6px 0 4px 16px; font-size: 0.74rem; color: var(--color-text-secondary); }
+  .bm-idq-status { font-size: 0.74rem; margin: 4px 0 6px; }
+  .bm-idq-reason { width: 100%; font: inherit; font-size: 0.78rem; padding: 6px 8px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); resize: vertical; }
+  .bm-idq-acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .bm-idq-msg { font-size: 0.74rem; color: var(--color-text-secondary); min-height: 1em; margin-top: 4px; }
+  .bm-idq-hist { font-size: 0.74rem; margin-top: 4px; } .bm-idq-hist ul { margin: 4px 0 0 16px; } .bm-idq-rev { color: var(--color-text-tertiary); }
+  @media (max-width: 767px) { .bm-idq-pair { grid-template-columns: 1fr; } .bm-idq-acts .btn-sm { flex: 1 1 100%; min-height: 44px; } }
   .bm-dl-menu button:disabled { color: var(--color-text-tertiary); cursor: not-allowed; background: none; }
   .bm-dl-menu .bm-zh, .bm-dl-sub { opacity: .7; font-weight: 500; }
   .bm-dl-menu .bm-zh { margin-left: .35em; }
@@ -3755,6 +3767,8 @@
              and inspect what switching it on would change. Both read-only. -->
         <label id="bm-live-toggle" class="bm-live-toggle" hidden>
           <input type="checkbox" id="bm-live-preview"> Preview live map <span style="opacity:.7">实时预览</span></label>
+        <label id="bm-ct-toggle" class="bm-live-toggle" hidden>
+          <input type="checkbox" id="bm-ct-preview"> Preview Battery CT <span style="opacity:.7">电池CT预览</span></label>
         <button id="bm-sync-btn" class="btn-sm" hidden>🔍 Sync preview <span style="opacity:.7;font-weight:500;">同步预览</span></button>
         <button id="bm-refresh" class="btn-sm" style="display:none;">
           🔄 Refresh Exhibitor Data <span style="opacity:.7;font-weight:500;">更新展商数据</span>
