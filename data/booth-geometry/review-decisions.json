@@ -1,0 +1,13 @@
+{
+ "_about": "Human geometry decisions, applied on top of the computed plan by scripts/booth-geometry-plan.js. Only 'kept_ambiguous' (draw at the original SKQ coordinates) and 'placeholder' (do not draw; keep the record) are accepted.",
+ "4050": {
+  "decision": "kept_ambiguous",
+  "note": "Kept at the original SKQ coordinates; flagged for manual review against the official organizer map (official position is 144 map units away).",
+  "decided_at": "2026-10-13"
+ },
+ "TEMP_3446": {
+  "decision": "placeholder",
+  "note": "Empty placeholder booth number in the official plan, positioned outside the hall. Intentionally not drawn; record kept for audit.",
+  "decided_at": "2026-10-13"
+ }
+}

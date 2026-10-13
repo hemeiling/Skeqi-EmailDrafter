@@ -1846,8 +1846,25 @@ app.get('/api/booth-map/unmatched', async (req, res) => {
    say so; neither re-reads the official source nor writes to any CRM table.
    The only write is the audit line, as every other export does. */
 const exhibitorExport = require('./exhibitorExport');
+const boothMapModel = require('./boothMapModel');
+const boothMapPreview = require('./boothMapPreview');
+
+/* Which occupancy the Booth Map shows. The server flag decides for everyone;
+   with the flag off, an ADMIN may preview the live map with ?map_mode=live.
+   Exports and the assistant follow the same answer for the same request, so a
+   download made from a live preview describes the live preview. */
+function boothMapMode(req) {
+  if (config.BOOTH_MAP_MODE === 'live') return 'live';
+  return req.query.map_mode === 'live' && isAdmin(req) ? 'live' : 'snapshot';
+}
+async function boothModelFor(req) {
+  return boothMapMode(req) === 'live' ? boothMapModel.buildModel(pool) : null;
+}
 
 function boothExportFail(res, where, err) {
+  if (err instanceof boothMapModel.ModelError) {
+    return res.status(err.status).json({ error: err.code, message: err.message, mode: 'live' });
+  }
   if (err instanceof exhibitorExport.ExportError) {
     return res.status(err.status).json({ error: err.code, message: err.message });
   }
@@ -1861,9 +1878,9 @@ function boothExportFail(res, where, err) {
 // Provenance, map-vs-official differences and the booth index for the floor plan.
 app.get('/api/booth-map/export/manifest', async (req, res) => {
   try {
-    const snap = await exhibitorExport.buildSnapshot(pool, req.query);
+    const snap = await exhibitorExport.buildSnapshot(pool, req.query, { model: await boothModelFor(req) });
     logCrmActivity({ actor: reqUser(req), action: 'booth_map.export',
-      metadata: { kind: 'floor_plan', format: String(req.query.format || '').slice(0, 8), filter: snap.filter.id } });
+      metadata: { kind: 'floor_plan', mode: snap.map.mode, model: snap.map.model_version, format: String(req.query.format || '').slice(0, 8), filter: snap.filter.id } });
     res.set('Cache-Control', 'no-store');
     res.json({ ok: true, ...exhibitorExport.manifest(snap) });
   } catch (err) { boothExportFail(res, 'manifest', err); }
@@ -1872,14 +1889,15 @@ app.get('/api/booth-map/export/manifest', async (req, res) => {
 app.get('/api/booth-map/export/exhibitors', async (req, res) => {
   try {
     const format = req.query.format === 'csv' ? 'csv' : 'xlsx';
-    const snap = await exhibitorExport.buildSnapshot(pool, req.query);
+    const snap = await exhibitorExport.buildSnapshot(pool, req.query, { model: await boothModelFor(req) });
     logCrmActivity({ actor: reqUser(req), action: 'booth_map.export',
-      metadata: { kind: 'exhibitors', format, filter: snap.filter.id, rows: snap.rows.length,
+      metadata: { kind: 'exhibitors', format, mode: snap.map.mode, model: snap.map.model_version, filter: snap.filter.id, rows: snap.rows.length,
         include_withdrawn: snap.include_withdrawn, run_id: snap.official.run_id } });
     res.set('Cache-Control', 'no-store');
     res.set('Content-Disposition', `attachment; filename="${exhibitorExport.filename(snap, format)}"`);
     // Lets the page confirm, after the fact, which verification the file carries.
     if (snap.official.verified_at) res.set('X-Exhibitors-Verified-At', new Date(snap.official.verified_at).toISOString());
+    if (snap.map.model_version) res.set('X-Booth-Map-Model', snap.map.model_version);
     if (format === 'csv') {
       res.set('Content-Type', 'text/csv; charset=utf-8');
       return res.send(exhibitorExport.toCsv(snap));
@@ -1888,6 +1906,45 @@ app.get('/api/booth-map/export/exhibitors', async (req, res) => {
     res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.send(Buffer.from(buf));
   } catch (err) { boothExportFail(res, 'exhibitors', err); }
+});
+
+/* The map's data. In snapshot mode this is a two-field answer and the map
+   draws its embedded data exactly as before. In live mode it is the model;
+   if the model cannot be built the status is 503 and the map shows its
+   snapshot under an explicit "live data unavailable" banner — never silently. */
+app.get('/api/booth-map/model', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const mode = boothMapMode(req);
+  if (mode !== 'live') return res.json({ ok: true, mode });
+  try {
+    const model = await boothMapModel.buildModel(pool);
+    const { profiles, ...forMap } = model;
+    res.json({ ok: true, mode, preview: config.BOOTH_MAP_MODE !== 'live', ...forMap,
+      // Review detail is admin business; everyone else gets the count.
+      review: isAdmin(req) ? model.review : undefined, review_count: model.review.length });
+  } catch (err) {
+    console.error('[booth-map/model] failed:', err && err.message);
+    const status = err instanceof boothMapModel.ModelError ? err.status : 503;
+    res.status(status).json({ ok: false, mode, error: (err && err.code) || 'model_failed',
+      message: 'Live booth data is unavailable.' });
+  }
+});
+
+/* Read-only discrepancy preview (admin): the snapshot map vs the verified
+   list, what the live map would draw instead, geometry decisions, and the
+   identity/classification review list. JSON, or ?format=xlsx. Writes nothing. */
+app.get('/api/booth-map/sync-preview', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  res.set('Cache-Control', 'no-store');
+  try {
+    const preview = await boothMapPreview.buildPreview(pool);
+    if (req.query.format === 'xlsx') {
+      res.set('Content-Disposition', `attachment; filename="booth-map-sync-preview_${preview.versions.model}.xlsx"`);
+      res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      return res.send(Buffer.from(await boothMapPreview.toXlsx(preview)));
+    }
+    res.json({ ok: true, ...boothMapPreview.summary(preview) });
+  } catch (err) { boothExportFail(res, 'sync-preview', err); }
 });
 
 /* GET /api/analytics/overview — adoption and platform value.
@@ -4543,6 +4600,7 @@ app.get('/api/exhibitors/status', async (req, res) => {
     res.json({
       ok: true,
       is_admin: isAdmin(req),
+      map_mode: config.BOOTH_MAP_MODE,
       source_configured: Boolean(process.env.MYS_COOKIE),
       last_verified_at: run ? run.finished_at : null,
       last_run: run || null,

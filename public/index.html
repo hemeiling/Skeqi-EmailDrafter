@@ -2495,6 +2495,13 @@
      choice and a link out to the organizer's own plan. */
   .bm-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .bm-dl-menu { min-width: 300px; max-height: min(70vh, 560px); overflow-y: auto; }
+  .bm-live-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 0.76rem; color: var(--color-text-secondary); cursor: pointer; min-height: 32px; }
+  .bm-live-toggle[hidden] { display: none; }
+  .bm-sync-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin: 6px 0 14px; }
+  .bm-sync-table th, .bm-sync-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--color-border-soft); vertical-align: top; }
+  .bm-sync-table td.num, .bm-sync-table th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .bm-sync-h { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; color: var(--color-text-tertiary); margin: 10px 0 2px; }
+  .bm-sync-ok { color: #0F5132; font-weight: 600; } .bm-sync-bad { color: #A21D2A; font-weight: 600; }
   .bm-dl-menu button:disabled { color: var(--color-text-tertiary); cursor: not-allowed; background: none; }
   .bm-dl-menu .bm-zh, .bm-dl-sub { opacity: .7; font-weight: 500; }
   .bm-dl-menu .bm-zh { margin-left: .35em; }
@@ -2511,7 +2518,9 @@
     /* The menu spans the whole action row, not just the Download button,
        whether the two buttons share a row or stack. */
     .bm-actions { margin-left: 0; width: 100%; position: relative; }
-    .bm-actions > button, .bm-dl { flex: 1; }
+    .bm-actions > button { flex: 1 1 calc(50% - 4px); font-size: 0.74rem; }
+    .bm-dl { flex: 1 1 100%; }
+    .bm-live-toggle { flex: 1 1 100%; }
     .bm-dl { position: static; }
     .bm-dl #bm-dl-btn, .bm-actions > button { width: 100%; min-height: 44px; }
     .bm-dl-menu { min-width: 0; }
@@ -3742,6 +3751,11 @@
         Last verified <span style="opacity:.7">最后核实</span>: <b id="bm-verified-at">—</b></span>
       <span id="bm-listed" style="font-size:0.76rem;color:var(--color-text-tertiary);"></span>
       <div class="bm-actions">
+        <!-- Admin-only: preview the server-driven live map before it is switched on,
+             and inspect what switching it on would change. Both read-only. -->
+        <label id="bm-live-toggle" class="bm-live-toggle" hidden>
+          <input type="checkbox" id="bm-live-preview"> Preview live map <span style="opacity:.7">实时预览</span></label>
+        <button id="bm-sync-btn" class="btn-sm" hidden>🔍 Sync preview <span style="opacity:.7;font-weight:500;">同步预览</span></button>
         <button id="bm-refresh" class="btn-sm" style="display:none;">
           🔄 Refresh Exhibitor Data <span style="opacity:.7;font-weight:500;">更新展商数据</span>
         </button>
@@ -4534,6 +4548,19 @@
     <h2 style="margin-bottom:4px;">Refresh Exhibitor Data <span style="opacity:.55;font-weight:500;font-size:0.9rem;">更新展商数据</span></h2>
     <div id="bm-refresh-body" style="max-height:62vh;overflow:auto;"></div>
     <div id="bm-refresh-foot" style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:14px;"></div>
+  </div>
+</div>
+
+<!-- ── Booth Map sync preview (admin, read-only) ── -->
+<div class="modal-overlay" id="bm-sync-modal">
+  <div class="modal" style="max-width:860px;">
+    <button class="modal-close" id="bm-sync-close" title="Close">×</button>
+    <h2 style="margin-bottom:4px;">Booth Map sync preview <span style="opacity:.55;font-weight:500;font-size:0.9rem;">展位图同步预览</span></h2>
+    <div id="bm-sync-body" style="max-height:66vh;overflow:auto;" data-no-i18n></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:14px;">
+      <button class="btn-sm" id="bm-sync-xlsx">Download full preview (Excel) 下载完整预览</button>
+      <button class="btn-sm btn-primary" id="bm-sync-done">Close 关闭</button>
+    </div>
   </div>
 </div>
 

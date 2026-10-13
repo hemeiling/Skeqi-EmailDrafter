@@ -33,6 +33,26 @@ const MAX_ROWS = 25;
 const SNIPPET = 400;
 
 const pool = db.pool;
+const config = require('./config');
+const boothMapModel = require('./boothMapModel');
+
+/* With the live Booth Map on, booth and classification questions are answered
+   from the same model the map draws, so the assistant and the map cannot
+   disagree. Cached briefly: one conversation turn may call several tools.
+   Off (the default), every tool behaves exactly as before. */
+let liveModelCache = null;
+async function liveBoothModel() {
+  if (config.BOOTH_MAP_MODE !== 'live') return null;
+  if (liveModelCache && Date.now() - liveModelCache.at < 30000) return liveModelCache.model;
+  const model = await boothMapModel.buildModel(pool);
+  liveModelCache = { at: Date.now(), model };
+  return model;
+}
+const liveSource = (m) => ({
+  source: `live booth map: official exhibitor run #${m.official.run_id} (verified ${new Date(m.official.verified_at).toISOString()}), `
+    + `classifications attached to the company they were made about`,
+  map_version: m.version,
+});
 
 /* ── argument validation ──────────────────────────────────────────────────
    Model-generated arguments are untrusted input, not a function signature.
@@ -634,6 +654,36 @@ const TOOLS = {
       const limit = asLimit(args.limit, 20);
       const eventId = await currentEventId();
 
+      const live = await liveBoothModel();
+      if (live) {
+        const kinds = { competitor: ['competitor_direct', 'competitor_indirect'], direct_competitor: ['competitor_direct'],
+          indirect_competitor: ['competitor_indirect'], ess_ev: ['ess_ev'], chinese_company: ['chinese_company'],
+          target_customer: ['target_customer'] }[raw];
+        const codes = CATEGORY_ALIASES[raw];
+        if (!kinds && !codes) return { error: `unknown category "${raw}"`, valid: Object.keys(CATEGORY_ALIASES) };
+        if (raw === 'available') {
+          const vacant = live.booths.filter((b) => b.st === 'vacant');
+          return { category: raw, ...liveSource(live), ...cardinality(vacant.length, vacant.slice(0, limit)),
+            booths: vacant.slice(0, limit).map((b) => compact({ booth: b.n, size: b.dims })) };
+        }
+        const all = Object.values(live.exhibitors).filter((e) => (kinds
+          ? e.kinds.some((k) => kinds.includes(k)) : codes.includes(e.category)));
+        all.sort((a, b) => a.name.localeCompare(b.name));
+        const page = all.slice(0, limit);
+        return {
+          category: raw, ...liveSource(live), ...cardinality(all.length, page),
+          companies: page.map((e) => compact({
+            booth: e.booths.join(', ') || undefined,
+            no_booth: e.booths.length ? undefined : true,
+            name: e.name,
+            company_id: e.company_id || undefined,
+            crm_link: e.company_id ? undefined : 'not linked to a CRM company',
+            classifications: e.kinds.length ? e.kinds : undefined,
+            category: e.category || 'unclassified',
+          })),
+        };
+      }
+
       // Classifications that live in booth_intel rather than the booth's own
       // category column.
       const INTEL_KINDS = {
@@ -718,6 +768,37 @@ const TOOLS = {
       const limit = asLimit(args.limit, 10);
       const near = asText(args.near_booth, 20);
       const eventId = await currentEventId();
+
+      const live = await liveBoothModel();
+      if (live) {
+        // Officially available booths only; the curated ranking is about the place, so it is joined by booth number.
+        const vacant = live.booths.filter((b) => b.st === 'vacant');
+        const { rows: ranks } = await pool.query(
+          `select b.booth_number, i.score, i.grade, i.analysis from booth_intel i
+             join booth_map_booths b on b.id = i.booth_id
+            where i.kind = 'available_ranked' and i.retired_at is null and b.retired_at is null
+              and b.booth_number = any($1::text[])`, [vacant.map((b) => b.n)]);
+        const rank = new Map(ranks.map((r) => [String(r.booth_number), r]));
+        let list = vacant.filter((b) => !args.ranked_only || rank.has(b.n));
+        let origin = null;
+        if (near) {
+          origin = live.booths.find((b) => b.n === near);
+          if (!origin) return { found: false, near_booth: near, ...liveSource(live) };
+          list = list.map((b) => ({ ...b, dist: Math.hypot(b.x - origin.x, b.y - origin.y) }))
+            .sort((a, b) => a.dist - b.dist);
+        } else {
+          list.sort((a, b) => (Number((rank.get(b.n) || {}).score) || -1) - (Number((rank.get(a.n) || {}).score) || -1)
+            || a.n.localeCompare(b.n, 'en', { numeric: true }));
+        }
+        const page = list.slice(0, limit);
+        return {
+          ...liveSource(live), ...(near ? { near_booth: near, note: 'Ordered by proximity on the floor-plan grid, nearest first.' } : {}),
+          ...cardinality(list.length, page),
+          booths: page.map((b) => { const r = rank.get(b.n) || {}; return compact({
+            booth: b.n, size: b.dims, proximity_rank_units: b.dist === undefined ? undefined : Math.round(b.dist),
+            score: r.score ? Number(r.score) : undefined, grade: r.grade, why: snip(r.analysis, 240) }); }),
+        };
+      }
 
       if (near) {
         const { rows: [origin] } = await pool.query(

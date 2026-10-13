@@ -62,6 +62,13 @@ body{
 }
 /* Header stat pills — same chip vocabulary as the dashboard. */
 .bm-stats{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}
+/* Live-map status line (absent in snapshot mode). */
+.bm-mode{flex-basis:100%;display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:0.74rem;
+  padding:6px 10px;border-radius:var(--radius-md);border:1px solid var(--color-border);color:var(--color-text-secondary)}
+.bm-mode.is-live{background:#E8F3EE;border-color:#A9D5C0;color:#0F5132}
+.bm-mode.is-fallback{background:#FCEBED;border-color:#F3B7BE;color:#A21D2A;font-weight:600}
+.bm-hist{display:inline-flex;align-items:center;gap:6px;cursor:pointer;min-height:32px}
+.bm-hist input{width:16px;height:16px}
 .bm-pill{
   display:inline-flex; align-items:center; gap:6px; padding:5px 11px;
   border-radius:var(--radius-full); font-size:0.74rem; font-weight:600;
@@ -439,6 +446,16 @@ function draw(){
     ctx.lineWidth=0.5;
     ctx.strokeRect(sx+0.5,sy+0.5,bw-1,bh-1);
   });
+  // historical (live map, toggle on): dimmed, dashed, never interactive as a current booth
+  if(SHOW_HIST)HIST_BOOTHS.forEach(b=>{
+    const[sx,sy]=w2s(b.x,b.y);
+    if(sx+bw<0||sx>cv.width||sy+bh<0||sy>cv.height)return;
+    const isH=hovered&&hovered===b;
+    ctx.fillStyle=isH?'rgba(255,255,255,0.16)':'rgba(255,255,255,0.05)';
+    ctx.fillRect(sx,sy,bw,bh);
+    ctx.strokeStyle='rgba(255,255,255,0.28)';ctx.lineWidth=Math.max(0.5,Math.min(1,scale*0.5));
+    ctx.setLineDash([2,2]);ctx.strokeRect(sx+0.5,sy+0.5,bw-1,bh-1);ctx.setLineDash([]);
+  });
   // visible
   vis.forEach(b=>{
     const[sx,sy]=w2s(b.x,b.y);
@@ -448,7 +465,15 @@ function draw(){
     const isH=hovered&&hovered.n===b.n;
     const isDC=DCM[b.n],isIC=ICM[b.n];
     const edge=Math.max(0.5,Math.min(1,scale*0.7));
-    if(isAv){
+    if(b.c==='unclassified'||b.c==='unverified'){
+      // Live map only: an official occupant SKQ has not classified yet, or a
+      // reserved booth whose occupant is not in the verified list.
+      const un=b.c==='unclassified';
+      ctx.fillStyle=isH?'rgba(201,209,217,0.45)':(un?'rgba(201,209,217,0.16)':'rgba(110,118,129,0.10)');
+      ctx.fillRect(sx,sy,bw,bh);
+      ctx.strokeStyle=un?'#c9d1d9':'#6e7681';ctx.lineWidth=Math.max(0.75,Math.min(1.5,scale*0.6));
+      ctx.setLineDash(un?[]:[2,2]);ctx.strokeRect(sx+0.5,sy+0.5,bw-1,bh-1);ctx.setLineDash([]);
+    } else if(isAv){
       ctx.fillStyle=isH?'#388bfd':'rgba(88,166,255,0.22)';
       ctx.fillRect(sx,sy,bw,bh);
       ctx.strokeStyle=isH?'#79c0ff':'#58a6ff';
@@ -469,6 +494,11 @@ function draw(){
       ctx.strokeStyle='rgba(0,0,0,0.4)';
       ctx.lineWidth=edge;
       ctx.strokeRect(sx+edge/2,sy+edge/2,bw-edge,bh-edge);
+    }
+    // shared booth (live map): a corner notch, so one colour never hides a second company
+    if(b.shared){
+      const t=Math.max(2,bw*0.32);
+      ctx.fillStyle='#ffffff';ctx.beginPath();ctx.moveTo(sx+bw-t,sy);ctx.lineTo(sx+bw,sy);ctx.lineTo(sx+bw,sy+t);ctx.closePath();ctx.fill();
     }
     // booth number only at extreme zoom
     if(scale>3){
@@ -498,11 +528,23 @@ function findAt(cx,cy){
   for(let i=ALL_BOOTHS_DATA.length-1;i>=0;i--){
     const b=ALL_BOOTHS_DATA[i];
     if(wx>=b.x&&wx<=b.x+BW&&wy>=b.y&&wy<=b.y+BH)return b;
-  }return null;
+  }
+  if(SHOW_HIST)for(let i=HIST_BOOTHS.length-1;i>=0;i--){
+    const b=HIST_BOOTHS[i];
+    if(wx>=b.x&&wx<=b.x+BW&&wy>=b.y&&wy<=b.y+BH)return b;
+  }
+  return null;
 }
 
+function escT(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function showTip(b,cx,cy){
   const t=document.getElementById('tip');
+  if(b.hist){
+    t.innerHTML=`<div class="tn">展位 ${escT(b.n)} · Historical 历史</div><div class="tm">${escT(b.nm)}</div>`
+      +`<div class="ti">Not in the current official floor plan. Shown from the earlier SKQ map. 当前官方平面图中已无此展位。</div>`;
+    let tx=cx+12,ty=cy;if(tx+250>cv.width)tx=cx-255;if(ty<60)ty=cy+30;
+    t.style.left=tx+'px';t.style.top=ty+'px';t.style.display='block';return;
+  }
   const isAv=b.c==='available'||b.nm.toLowerCase().startsWith('available');
   const dc=DCM[b.n],ic=ICM[b.n];
   const color=getColor(b);
@@ -512,8 +554,10 @@ function showTip(b,cx,cy){
   else if(ic) extra=`<div style="margin-top:4px;font-size:12px;color:#f0883e">⚡ 间接竞品 — ${ic.reason.slice(0,55)}...</div>`;
   else if(ev) extra=`<div style="margin-top:4px;font-size:12px;color:#d2a8ff">⚡ ESS/EV — ${ev.reason.slice(0,60)}</div>`;
   else if(isAv) extra='<div style="font-size:12px;color:#58a6ff;margin-top:4px">点击查看选址分析</div>';
-  const intro = b.intro ? `<div class="ti">${b.intro.slice(0,80)}${b.intro.length>80?'…':''}</div>` : '';
-  t.innerHTML=`<div class="tn">展位 ${b.n}</div><div class="tm">${b.nm}</div>${b.zh?`<div class="tz">${b.zh}</div>`:''}<span class="tc" style="background:${color}22;color:${color}">${CLABELS[b.c]||b.c}</span>${extra}${intro}`;
+  const intro = b.intro ? `<div class="ti">${escT(b.intro.slice(0,80))}${b.intro.length>80?'…':''}</div>` : '';
+  // Shared booth (live map): every official occupant, each with its own classification.
+  const occ = b.occ&&b.occ.length>1 ? `<div class="ti">Shared booth 共用展位：<br>${b.occ.map(o=>`• ${escT(o.name)} — ${escT(CLABELS[o.category]||CLABELS.unclassified||'')}`).join('<br>')}</div>` : '';
+  t.innerHTML=`<div class="tn">展位 ${escT(b.n)}</div><div class="tm">${escT(b.nm)}</div>${b.zh?`<div class="tz">${escT(b.zh)}</div>`:''}<span class="tc" style="background:${color}22;color:${color}">${escT(CLABELS[b.c]||b.c)}</span>${extra}${occ}${intro}`;
   let tx=cx+12,ty=cy;
   if(tx+250>cv.width)tx=cx-255;
   if(ty<60)ty=cy+30;
@@ -533,6 +577,8 @@ function onMM(e){
 function onWheel(e){e.preventDefault();zoom(e.deltaY<0?1.18:1/1.18,e.offsetX,e.offsetY);}
 function onClick(e){
   const b=findAt(e.offsetX,e.offsetY);if(!b)return;
+  if(b.hist){showModal(`展位 ${b.n}`,b.nm,b.zh||'','#8b949e','Historical 历史展位',
+    '<div style="font-size:13px;line-height:1.8">This booth is not in the current official floor plan. It is shown from the earlier SKQ map for reference only; its record is kept.<br>当前官方平面图中已无此展位，仅供参考，记录保留。</div>');return;}
   const isAv=b.c==='available'||b.nm.toLowerCase().startsWith('available');
   if(isAv) openBoothModal(b.n);
   else openCompModal(b);
@@ -592,7 +638,7 @@ function setF(c){
 }
 function filterBooths(){searchT=document.getElementById('sq').value.toLowerCase();updateStats();draw();}
 function updateStats(){
-  document.getElementById('sc1').textContent=ALL_BOOTHS_DATA.filter(b=>b.c!=='available').length;
+  document.getElementById('sc1').textContent=ALL_BOOTHS_DATA.filter(b=>b.c!=='available'&&b.c!=='unverified').length;
   document.getElementById('sc2').textContent=ALL_BOOTHS_DATA.filter(b=>b.c==='available').length;
   document.getElementById('sc3').textContent=ALL_BOOTHS_DATA.filter(b=>DCM[b.n]||ICM[b.n]).length;
   document.getElementById('sc4').textContent=ALL_BOOTHS_DATA.filter(b=>b.c==='customer').length;
@@ -629,6 +675,9 @@ function openCompModal(b){
   const dc=DCM[b.n],ic=ICM[b.n],ev=ESS_EV[b.n];
   const color=getColor(b);
   let body='';
+  if(b.occ&&b.occ.length>1) body+=`<div style="font-size:13px;line-height:1.8;margin-bottom:12px"><b>Shared booth 共用展位</b><br>${b.occ.map(o=>`${escT(o.name)} — ${escT(CLABELS[o.category]||CLABELS.unclassified)}`).join('<br>')}</div>`;
+  if(b.c==='unclassified') body+='<div style="font-size:13px;line-height:1.8;margin-bottom:12px">Official exhibitor, not yet classified by SKQ. 官方展商，思客琦尚未分类。</div>';
+  if(b.c==='unverified') body+='<div style="font-size:13px;line-height:1.8;margin-bottom:12px">Reserved in the official floor plan, but no exhibitor for this booth is in the verified list. 官方平面图显示已预订，但核实名单中无对应展商。</div>';
   if(b.intro) body+=`<div style="font-size:14px;line-height:1.8;color:#c9d1d9;margin-bottom:14px">${b.intro}</div>`;
   if(ev&&!dc&&!ic){
     body+=`<div style="background:#21262d;border-radius:8px;padding:12px;margin-bottom:12px;border-left:3px solid #d2a8ff">
@@ -1248,7 +1297,129 @@ function toggleTheme(){
   try{localStorage.setItem('tbsTheme',nowLight?'light':'dark');}catch(e){}
   applyTheme(nowLight);
 }
-window.addEventListener('load',initCanvas);
+window.addEventListener('load',bootMap);
+
+
+/* ══ Live occupancy ═══════════════════════════════════════════════════════
+   Off unless the server says so. The map asks /api/booth-map/model what to
+   draw: "snapshot" leaves every embedded array exactly as it is; "live"
+   replaces, IN MEMORY ONLY, who stands at each booth with the latest verified
+   official run, on the reviewed geometry plan. SKQ's own judgements (category,
+   competitor/customer/ESS overlays, intro text) are moved with the COMPANY the
+   server resolved them to — copied from that company's snapshot booth to the
+   booth it holds now — so a booth that changed hands never inherits the
+   previous occupant's label. The embedded data is the fallback, and when the
+   map falls back it says so on screen. */
+var MAP_STATE={mode:'snapshot',expected:false,fallback:null,version:null,official:null,geometry:null,snapshot:null,preview:false,reviewCount:0};
+var HIST_BOOTHS=[],SHOW_HIST=false;
+
+function wantLive(){try{return new URLSearchParams(location.search).get('map_mode')==='live';}catch(e){return false;}}
+
+function applyLive(d){
+  const ORIG={};ALL_BOOTHS_DATA.forEach(b=>ORIG[String(b.n)]=b);
+  const O={competitor_direct:Object.assign({},DIRECT_COMP),competitor_indirect:Object.assign({},INDIRECT_COMP),
+           ess_ev:Object.assign({},ESS_EV),target_customer:Object.assign({},COMPANY_DB)};
+  const OCN={};CN_COMPANIES.forEach(c=>{OCN[String(c.booth)]=c;});
+  // Everything is built into fresh objects first and committed at the end, so a
+  // malformed response throws BEFORE the embedded data is touched.
+  const N={competitor_direct:{},competitor_indirect:{},ess_ev:{},target_customer:{}},NCN=[],NCNM={};
+  if(!d||!Array.isArray(d.booths)||!Array.isArray(d.historical)||!d.exhibitors)throw new Error('malformed model');
+
+  const live=d.booths.map(g=>{
+    const occ=g.occ.map(id=>Object.assign({id:id},d.exhibitors[id]));
+    const b={n:g.n,x:g.x,y:g.y,dims:g.dims||'',live:g.st,geo:g.geo,occ:occ,edition:'',p:'ok',zh:'',status:'Reserved'};
+    if(g.st==='vacant'){b.nm='Available';b.c='available';b.status='Available';return b;}
+    if(!occ.length){b.nm=g.st==='on_hold'?'On hold (official) 官方保留':'Reserved — occupant not verified 待核实';b.c='unverified';return b;}
+    b.nm=occ.map(o=>o.name).join(' / ');
+    b.zh=occ.map(o=>o.zh).filter(Boolean).join(' / ');
+    b.shared=occ.length>1;
+    const lead=occ.find(o=>o.category||(o.kinds&&o.kinds.length))||occ[0];
+    b.c=lead.category||'unclassified';
+    const src=lead.from&&lead.from.length?ORIG[String(lead.from[0])]:null;
+    if(src){if(src.intro)b.intro=src.intro;if(src.p)b.p=src.p;if(src.edition)b.edition=src.edition;}
+    // Each occupant's own judgements, re-keyed from its snapshot booth to this booth.
+    occ.forEach(o=>(o.from||[]).forEach(f=>(o.kinds||[]).forEach(k=>{
+      if(k==='chinese_company'){if(OCN[f]&&!NCNM[g.n]){const c=Object.assign({},OCN[f],{booth:g.n});NCN.push(c);NCNM[g.n]=c;}return;}
+      if(N[k]&&O[k][f]&&!N[k][g.n])N[k][g.n]=O[k][f];
+    })));
+    return b;
+  });
+  const hist=d.historical.map(h=>{const o=ORIG[String(h.n)]||{};return {n:h.n,x:h.x,y:h.y,hist:true,c:'historical',
+    nm:o.nm&&!/^available$/i.test(o.nm)?o.nm:'Former booth 原展位',zh:o.zh||''};});
+  const vacant=new Set(live.filter(b=>b.c==='available').map(b=>b.n));
+
+  // ── commit (nothing below can fail on the response's shape) ──
+  const swap=(obj,next)=>{Object.keys(obj).forEach(k=>delete obj[k]);Object.assign(obj,next);};
+  swap(DIRECT_COMP,N.competitor_direct);swap(DCM,N.competitor_direct);
+  swap(INDIRECT_COMP,N.competitor_indirect);swap(ICM,N.competitor_indirect);
+  swap(ESS_EV,N.ess_ev);swap(COMPANY_DB,N.target_customer);swap(CNM,NCNM);
+  CN_COMPANIES.length=0;NCN.forEach(c=>CN_COMPANIES.push(c));
+  // The free-booth ranking is about a PLACE: it stays only where the place is still free.
+  for(let i=AVAILABLE_RANKED.length-1;i>=0;i--)if(!vacant.has(String(AVAILABLE_RANKED[i].booth)))AVAILABLE_RANKED.splice(i,1);
+  HIST_BOOTHS=hist;
+  ALL_BOOTHS_DATA.length=0;live.forEach(b=>ALL_BOOTHS_DATA.push(b));
+
+  if(!CMAP.unclassified){
+    const at=CATS.findIndex(c=>c.id==='other');
+    CATS.splice(at<0?CATS.length:at,0,
+      {id:'unclassified',label:'❔ Unclassified · 未分类',color:'#c9d1d9'},
+      {id:'unverified',label:'⏳ Reserved, unverified · 待核实',color:'#6e7681'});
+    CATS.forEach(c=>CMAP[c.id]=c);
+    CCOLS.unclassified='#c9d1d9';CCOLS.unverified='#6e7681';
+    CLABELS.unclassified='未分类';CLABELS.unverified='待核实';
+  }
+  Object.assign(MAP_STATE,{mode:'live',version:d.version,official:d.official,geometry:d.geometry,
+    snapshot:d.snapshot,preview:!!d.preview,reviewCount:d.review_count||0});
+}
+
+function fmtWhen(iso){try{return new Date(iso).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});}catch(e){return '';}}
+
+/* The banner is the honesty mechanism: live says which run it shows; a failed
+   live load says plainly that the saved snapshot is on screen instead. */
+function renderModeBanner(){
+  const bar=document.querySelector('.topbar');if(!bar)return;
+  let el=document.getElementById('bm-mode');
+  if(MAP_STATE.mode!=='live'&&!MAP_STATE.fallback){if(el)el.remove();return;}
+  if(!el){el=document.createElement('div');el.id='bm-mode';el.setAttribute('role','status');bar.appendChild(el);}
+  if(MAP_STATE.fallback){
+    el.className='bm-mode is-fallback';
+    el.textContent='⚠ Live booth data unavailable — showing the saved map snapshot, which may be out of date. 实时展位数据不可用，当前显示的是可能过期的快照。';
+    return;
+  }
+  // Footer legend: the live map's extra states, once.
+  const sb=document.getElementById('sb');
+  if(sb&&!document.getElementById('sb-live')){
+    const hint=sb.querySelector('.sbar-hint');
+    const add=(html)=>{const d=document.createElement('div');d.className='li';d.innerHTML=html;sb.insertBefore(d,hint);return d;};
+    add('<div class="ld" style="background:rgba(201,209,217,.25);border:1px solid #c9d1d9"></div>未分类 Unclassified').id='sb-live';
+    add('<div class="ld" style="border:1px dashed #6e7681"></div>待核实 Unverified');
+    add('<div class="ld" style="background:linear-gradient(225deg,#fff 30%,#484f58 30%)"></div>共用展位 Shared');
+  }
+  const o=MAP_STATE.official||{};
+  el.className='bm-mode is-live';
+  el.innerHTML=`<span><b>${MAP_STATE.preview?'Live preview (admin) 实时预览':'Live 实时'}</b> · official list run #${escT(o.run_id)}, verified ${escT(fmtWhen(o.verified_at))} · model ${escT(MAP_STATE.version)}</span>`
+    +`<label class="bm-hist"><input type="checkbox" id="bm-hist-toggle"${SHOW_HIST?' checked':''}> Show historical booths 显示历史展位 (${HIST_BOOTHS.length})</label>`;
+  document.getElementById('bm-hist-toggle').addEventListener('change',e=>{SHOW_HIST=e.target.checked;draw();});
+}
+
+function bootMap(){
+  MAP_STATE.expected=wantLive();
+  let done=false;
+  const finish=()=>{if(done)return;done=true;initCanvas();renderModeBanner();};
+  const ctl=window.AbortController?new AbortController():null;
+  const timer=setTimeout(()=>{if(ctl)ctl.abort();if(MAP_STATE.expected)MAP_STATE.fallback='timeout';finish();},10000);
+  fetch('/api/booth-map/model'+(MAP_STATE.expected?'?map_mode=live':''),{cache:'no-store',signal:ctl?ctl.signal:undefined})
+    .then(r=>r.json().then(d=>({ok:r.ok,d:d}),()=>({ok:false,d:null})))
+    .then(x=>{
+      clearTimeout(timer);
+      if(x.ok&&x.d&&x.d.ok&&x.d.mode==='live'){
+        try{applyLive(x.d);}catch(e){console.error('[booth-map] live data rejected',e);MAP_STATE.fallback='bad_data';}
+      }
+      else if((x.d&&x.d.mode==='live')||MAP_STATE.expected)MAP_STATE.fallback=(x.d&&x.d.error)||'unavailable';
+      finish();
+    })
+    .catch(()=>{clearTimeout(timer);if(MAP_STATE.expected)MAP_STATE.fallback='unreachable';finish();});
+}
 
 /* ── Export hook for the CRM shell's Download menu ────────────────────────
    Additive only. The shell asks for the WHOLE map at print resolution; this
@@ -1262,12 +1433,16 @@ window.skqFloorPlan = {
   state: function(){
     var c = CMAP[activeF];
     return { filter: activeF, filterLabel: c ? c.label.replace(/^[^\w(]+\s*/,'') : activeF,
-             booths: ALL_BOOTHS_DATA.length };
+             booths: ALL_BOOTHS_DATA.length, mode: MAP_STATE.mode, fallback: MAP_STATE.fallback,
+             version: MAP_STATE.version, official: MAP_STATE.official, geometry: MAP_STATE.geometry,
+             showHistorical: SHOW_HIST, historical: HIST_BOOTHS.length };
   },
   legend: function(){
     return [['#58a6ff','Available 可用展位'],['#f85149','Direct competitor 直接竞品'],
       ['#f0883e','Indirect competitor 间接竞品'],['#ffa657','Highly recommended 强烈推荐'],
-      ['#3fb950','Target customer 目标客户'],['#d2a8ff','ESS/EV project ESS/EV 项目'],['#9198a1','Other 其他']];
+      ['#3fb950','Target customer 目标客户'],['#d2a8ff','ESS/EV project ESS/EV 项目'],['#9198a1','Other 其他']]
+      .concat(MAP_STATE.mode==='live'?[['#c9d1d9','Unclassified 未分类'],['#6e7681','Reserved, unverified 待核实'],['#ffffff','◥ Shared booth 共用展位']]:[])
+      .concat(SHOW_HIST?[['#3a3f46','Historical 历史展位']]:[]);
   },
   render: function(s, opts){
     var xs=ALL_BOOTHS_DATA.map(function(b){return b.x;}),ys=ALL_BOOTHS_DATA.map(function(b){return b.y;});

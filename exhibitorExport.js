@@ -63,6 +63,10 @@ const FILTERS = {
 for (const id of ['line', 'mfg', 'test', 'cert', 'customer', 'elec', 'batmat', 'recycle', 'gov', 'other']) {
   FILTERS[id] = { mapCategory: id, label: `Map category: ${MAP_CATEGORY_LABELS[id]}` };
 }
+// Live map only: official exhibitors SKQ has not classified yet.
+FILTERS.unclassified = { unclassified: true, label: 'Unclassified official exhibitors 未分类展商' };
+// Booth-only views of the live map: they hold no exhibitors to list.
+const BOOTH_ONLY_FILTERS = new Set(['available', 'unverified', 'historical']);
 
 class ExportError extends Error {
   constructor(code, message, status = 400) { super(message); this.code = code; this.status = status; }
@@ -70,7 +74,7 @@ class ExportError extends Error {
 
 function normalizeOptions(input = {}) {
   const filter = String(input.filter || 'all');
-  if (filter === 'available') {
+  if (BOOTH_ONLY_FILTERS.has(filter)) {
     throw new ExportError('not_applicable',
       'Available booths have no exhibitors. Choose "All exhibitors" or another filter.');
   }
@@ -217,6 +221,7 @@ function targetLabel(ex) {
 }
 
 function matchesFilter(ex, f) {
+  if (f.unclassified) return !ex.map_category && !ex.kinds.length;
   if (f.kinds) return f.kinds.some((k) => ex.kinds.includes(k));
   if (f.mapCategory) return ex.map_category === f.mapCategory;
   return true;
@@ -227,7 +232,45 @@ function matchesFilter(ex, f) {
  * workbook and the CSV generated from one call describe the same moment.
  * Read-only: SELECTs only.
  */
-async function buildSnapshot(pool, input = {}) {
+/* Live mode: is each of this exhibitor's official booths drawn on the map? */
+function liveCheck(ex, drawnAt, unplaced) {
+  if (ex.attendance_status !== 'listed') return { code: 'withdrawn', text: 'Withdrawn — not drawn 已撤展，未绘制' };
+  if (!ex.booths.length) return { code: 'no_booth', text: 'No booth assigned — not placed on SKQ map 未分配展位' };
+  const notes = [];
+  for (const b of ex.booths) {
+    if (drawnAt.has(`${ex.id}@${b}`)) continue;
+    notes.push(unplaced.has(String(b))
+      ? `${b}: position pending manual placement 待人工定位`
+      : `${b}: not drawn 未绘制`);
+  }
+  if (!notes.length) return { code: 'match', text: 'Drawn at official booth 已按官方展位绘制' };
+  return { code: notes.length < ex.booths.length ? 'partial' : 'differs', text: notes.join('; ') };
+}
+
+function liveBoothIndex(model, occupants) {
+  const row = (n, status, occ) => ({
+    booth: n,
+    exhibitors: (occupants.get(n) || []).map((o) => o.source_name),
+    map_name: occ.map((id) => model.exhibitors[id].name).join(' / ') || (status === 'available' ? 'Available' : ''),
+    map_name_zh: occ.map((id) => model.exhibitors[id].zh).filter(Boolean).join(' / '),
+    map_category: occ.map((id) => MAP_CATEGORY_LABELS[model.exhibitors[id].category] || 'Unclassified 未分类').join(' / '),
+    status,
+  });
+  return [
+    ...model.booths.map((b) => row(b.n, LIVE_BOOTH_STATUS[b.st] || b.st, b.occ)),
+    ...model.unplaced.map((u) => row(u.n, 'unplaced', u.occ)),
+  ].sort((a, b) => boothSort(a.booth, b.booth));
+}
+
+const LIVE_BOOTH_STATUS = { assigned: 'match', shared: 'match', vacant: 'available', on_hold: 'on_hold', unverified: 'unverified' };
+
+/**
+ * Everything a download needs. With `model` (the live Booth Map model), the
+ * classification and map position of every listed exhibitor come from that
+ * model — the same object the map draws — so the file and the map cannot
+ * disagree. Without it, the snapshot comparison is used exactly as before.
+ */
+async function buildSnapshot(pool, input = {}, { model = null } = {}) {
   const opts = normalizeOptions(input);
   const eventId = await outreach.resolveEventId(pool);
   if (!eventId) throw new ExportError('no_event', 'No exhibitor list has been imported yet.', 503);
@@ -240,6 +283,17 @@ async function buildSnapshot(pool, input = {}) {
     loadMapBooths(pool, eventId),
   ]);
   const served = servedMapVersion();
+
+  if (model) {
+    for (const e of exhibitors) {
+      const m = model.exhibitors[e.id];
+      if (m) { e.kinds = m.kinds; e.map_category = m.category; }
+    }
+  }
+  const drawnAt = new Set();
+  if (model) for (const b of model.booths) for (const id of b.occ) drawnAt.add(`${id}@${b.n}`);
+  const unplacedSet = new Set(model ? model.unplaced.map((u) => u.n) : []);
+  const checkOf = (e) => (model ? liveCheck(e, drawnAt, unplacedSet) : mapCheck(e, mapByBooth));
 
   const mapByBooth = new Map(mapBooths.map((m) => [String(m.booth_number), m]));
   const listed = exhibitors.filter((e) => e.attendance_status === 'listed');
@@ -278,7 +332,7 @@ async function buildSnapshot(pool, input = {}) {
     for (const b of e.booths) {
       for (const o of occupants.get(String(b)) || []) if (o.id !== e.id) shared.add(`${o.source_name} (${b})`);
     }
-    const check = mapCheck(e, mapByBooth);
+    const check = checkOf(e);
     const classification = KIND_ORDER.filter((k) => e.kinds.includes(k)).map((k) => KIND_LABELS[k]);
     const base = {
       official_name: e.source_name,
@@ -288,7 +342,8 @@ async function buildSnapshot(pool, input = {}) {
       hall: e.hall || '',
       exhibitor_source_id: e.exhibitor_source_id,
       exhibitor_record_id: e.id,
-      map_category: MAP_CATEGORY_LABELS[e.map_category] || e.map_category || '',
+      map_category: MAP_CATEGORY_LABELS[e.map_category] || e.map_category
+        || (model && e.attendance_status === 'listed' ? 'Unclassified 未分类' : ''),
       classification: classification.join('; '),
       target: targetLabel(e),
       attendance: e.attendance_status === 'listed' ? 'Listed 已列入' : 'Withdrawn 已撤展',
@@ -321,9 +376,11 @@ async function buildSnapshot(pool, input = {}) {
   }
 
   /* Booth index: the union of the official booths and the map's booths, so a
-     booth that exists on only one side is visible rather than missing. */
+     booth that exists on only one side is visible rather than missing. In live
+     mode the map IS the official occupancy, so the index is the drawn booths
+     plus any official booth still awaiting a position. */
   const boothNumbers = new Set([...occupants.keys(), ...mapByBooth.keys()]);
-  const booths = [...boothNumbers].sort(boothSort).map((n) => {
+  const booths = model ? liveBoothIndex(model, occupants) : [...boothNumbers].sort(boothSort).map((n) => {
     const occ = occupants.get(n) || [];
     const m = mapByBooth.get(n);
     const mapName = m ? (isMapAvailable(m) ? 'Available' : m.source_company_name) : '';
@@ -344,6 +401,23 @@ async function buildSnapshot(pool, input = {}) {
   });
 
   const count = (s) => booths.filter((b) => b.status === s).length;
+  const differences = model ? {
+    booths_matching: count('match'),
+    booths_different_occupant: 0,
+    booths_official_not_on_map: count('unplaced'),
+    booths_on_map_not_official: 0,
+    exhibitors_not_matching_map: listed.filter((e) => !['match', 'no_booth'].includes(checkOf(e).code)).length,
+    booths_unverified: count('unverified'),
+    historical_booths: model.historical.length,
+    review_items: model.review.length,
+  } : {
+    booths_matching: count('match'),
+    booths_different_occupant: count('differs'),
+    booths_official_not_on_map: count('official_only'),
+    booths_on_map_not_official: count('map_only'),
+    // Exhibitors WITH a booth that the map disagrees about; no-booth ones are counted under without_booth.
+    exhibitors_not_matching_map: listed.filter((e) => !['match', 'no_booth'].includes(checkOf(e).code)).length,
+  };
   const verifiedAt = run ? run.finished_at : event.verified_at;
   const ageHours = verifiedAt ? (Date.now() - new Date(verifiedAt).getTime()) / 36e5 : null;
 
@@ -372,15 +446,13 @@ async function buildSnapshot(pool, input = {}) {
       booths: mapBooths.length,
       company_booths: mapBooths.filter((m) => !isMapAvailable(m)).length,
       available_booths: mapBooths.filter(isMapAvailable).length,
+      mode: model ? 'live' : 'snapshot',
+      model_version: model ? model.version : null,
+      geometry_version: model ? model.geometry.version : null,
+      geometry_fetched_at: model ? model.geometry.fetched_at : null,
+      drawn_booths: model ? model.booths.length : null,
     },
-    differences: {
-      booths_matching: count('match'),
-      booths_different_occupant: count('differs'),
-      booths_official_not_on_map: count('official_only'),
-      booths_on_map_not_official: count('map_only'),
-      // Exhibitors WITH a booth that the map disagrees about; no-booth ones are counted under without_booth.
-      exhibitors_not_matching_map: listed.filter((e) => !['match', 'no_booth'].includes(mapCheck(e, mapByBooth).code)).length,
-    },
+    differences,
     rows,
     exhibitor_count: selected.length,
     booths,
@@ -429,6 +501,9 @@ const BOOTH_STATUS_LABELS = {
   official_only: 'Official only — not on SKQ map 展位图无此展位',
   map_only: 'On SKQ map, no official exhibitor 官方无展商',
   available: 'Available 可用',
+  on_hold: 'On hold (official) 官方保留',
+  unverified: 'Reserved, occupant not in verified list 已预订，展商待核实',
+  unplaced: 'Official booth — position pending manual placement 待人工定位',
 };
 
 const { neutralize } = outreach;
@@ -489,6 +564,9 @@ function metadataRows(s) {
       + 'This download did not re-check the official source; an admin can run Refresh Exhibitor Data 更新展商数据 to check for changes.'],
     [],
     ['SKQ BOOTH MAP 思客琦展位图', ''],
+    ['Map mode 展位图模式', m.mode === 'live'
+      ? `Live — occupancy from verified run #${o.run_id}, geometry plan ${m.geometry_version}, model ${m.model_version} 实时`
+      : 'Snapshot — the map’s embedded data 快照'],
     ['What it is 说明', 'SKQ’s curated floor plan. It is NOT the organizer’s official floor plan and is not updated automatically.'],
     ['Map snapshot imported 展位图快照导入', fmtDate(m.imported_at)],
     ['Map snapshot version 展位图版本', m.import_version || ''],

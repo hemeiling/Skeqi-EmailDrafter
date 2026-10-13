@@ -11,6 +11,11 @@
 require('dotenv').config();
 
 const APOLLO_API_KEY = process.env.APOLLO_API_KEY || '';
+/* Booth Map occupancy source. 'snapshot' (default) draws the map's embedded
+   data exactly as before; 'live' draws occupancy from the latest verified
+   exhibitor run on the reviewed geometry plan. Anything else reads as snapshot,
+   so a typo can never switch the live map on. */
+const BOOTH_MAP_MODE = process.env.BOOTH_MAP_MODE === 'live' ? 'live' : 'snapshot';
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const BAILIAN_API_KEY = process.env.BAILIAN_API_KEY || process.env.DASHSCOPE_API_KEY || '';
@@ -338,6 +343,7 @@ module.exports = {
   isChatModelAvailable, isChatConfigured, chatProviderChain, describeChatChain,
 
   APOLLO_API_KEY,
+  BOOTH_MAP_MODE,
   CLAUDE_API_KEY,
   OPENAI_API_KEY,
   APP_USERNAME,

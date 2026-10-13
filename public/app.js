@@ -79,8 +79,10 @@ function showView(name) {
     try { window.skqSetChatContext(name ? { view: name } : null); } catch (e) { /* widget absent */ }
   }
   if (name === "booth-map") {
-    ensureFrameLoaded("bm-frame", "/booth-map/");
-    loadBoothMapStatus();          // last-verified comes from the audit trail
+    /* The frame is loaded once the status says which map to show. A failed
+       status call still loads the map: the map asks the server itself and
+       says on screen if live data is expected but unavailable. */
+    loadBoothMapStatus().finally(() => ensureFrameLoaded("bm-frame", bmFrameSrc()));
   }
   if (name === "account-research") showAccountResearchTab(accountResearchTab());
   if (name === "home") loadDashboard();
@@ -2844,11 +2846,33 @@ function bmWhen(iso) {
     hour: "2-digit", minute: "2-digit" });
 }
 
+/* Which map the frame shows. The server flag decides for everyone; an admin
+   may additionally preview the live map in this browser tab only. */
+var _bmServerMode = null, _bmIsAdmin = false;
+function bmPreviewLive() { try { return sessionStorage.getItem("bm_preview_live") === "1"; } catch (e) { return false; } }
+function bmFrameSrc() {
+  return _bmServerMode === "live" || (_bmIsAdmin && bmPreviewLive()) ? "/booth-map/?map_mode=live" : "/booth-map/";
+}
+function bmReloadFrame() {
+  const f = document.getElementById("bm-frame");
+  if (f) f.setAttribute("src", bmFrameSrc());
+}
+
 async function loadBoothMapStatus() {
   try {
     const r = await fetch("/api/exhibitors/status");
     const d = await r.json();
     if (!d || !d.ok) return;
+    _bmServerMode = d.map_mode || "snapshot";
+    _bmIsAdmin = Boolean(d.is_admin);
+    const toggle = document.getElementById("bm-live-toggle");
+    if (toggle) {
+      // Only offered while the live map is off for everyone; once on, there is nothing to preview.
+      toggle.hidden = !(_bmIsAdmin && _bmServerMode !== "live");
+      document.getElementById("bm-live-preview").checked = bmPreviewLive();
+    }
+    const sync = document.getElementById("bm-sync-btn");
+    if (sync) sync.hidden = !_bmIsAdmin;
     const at = document.getElementById("bm-verified-at");
     if (at) at.textContent = bmWhen(d.last_verified_at);
     const listed = document.getElementById("bm-listed");
@@ -2939,6 +2963,14 @@ async function bmErrorText(r) {
   try { const d = await r.json(); return d.message || d.error || `HTTP ${r.status}`; } catch (e) { return `HTTP ${r.status}`; }
 }
 
+/* Downloads describe the map on screen: a live map asks for live data, and the
+   server re-checks that the requester may see it. */
+function bmModeParam() {
+  const api = bmMapApi();
+  const st = api ? api.state() : null;
+  return st && st.mode === "live" ? "live" : "";
+}
+
 function bmFilterParam() {
   if (bmScope() !== "filter") return "all";
   const api = bmMapApi();
@@ -2947,6 +2979,7 @@ function bmFilterParam() {
 
 async function bmExportExhibitors(format) {
   const qs = new URLSearchParams({ format, filter: bmFilterParam() });
+  if (bmModeParam()) qs.set("map_mode", "live");
   bmStatus("Preparing exhibitor export… 正在生成展商文件…");
   const r = await fetch(`/api/booth-map/export/exhibitors?${qs}`, { cache: "no-store" });
   if (!r.ok) throw new Error(await bmErrorText(r));
@@ -2963,6 +2996,20 @@ const BM_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "
 
 function bmProvenanceLines(man, st, scope) {
   const o = man.official, mp = man.map, d = man.differences;
+  if (mp.mode === "live") {
+    const lines = [
+      { text: `Exhibitor list last verified 展商数据最后核实: ${bmWhen(o.verified_at)} · ${o.listed} listed, ${o.with_booth} with a booth, ${o.without_booth} without · run #${o.run_id}` },
+      { text: `Live map 实时展位图: occupancy from run #${o.run_id} · geometry plan ${mp.geometry_version} (official floor plan ${bmWhen(mp.geometry_fetched_at)}) · model ${mp.model_version}` },
+      { text: `${d.booths_official_not_on_map} official booths awaiting manual placement 待人工定位 · ${d.historical_booths} historical booths ${st.showHistorical ? "shown dimmed 已淡显" : "hidden 已隐藏"} · ${d.review_items} classifications in admin review 待审核` },
+      { text: `Scope 范围: ${scope === "filter" && st.filter !== "all" ? "Filter: " + st.filterLabel + " (other booths dimmed)" : "All booths 全部展位"}`
+        + ` · Generated 生成: ${bmWhen(new Date().toISOString())}` },
+      { text: "SKQ map drawn from the official list — not the organizer’s own floor plan 非主办方官方展位图 · Official: tbsm26.mapyourshow.com/8_0/floorplan/", muted: true },
+    ];
+    if (o.verified_age_hours !== null && o.verified_age_hours > 24) {
+      lines.splice(1, 0, { text: `⚠ Official list last verified ${Math.round(o.verified_age_hours / 24)} day(s) ago — it may have changed since. 官方名单可能已有变化。`, warn: true });
+    }
+    return lines;
+  }
   const lines = [
     { text: `Exhibitor list last verified 展商数据最后核实: ${bmWhen(o.verified_at)} · ${o.listed} listed, ${o.with_booth} with a booth, ${o.without_booth} without`
       + (o.run_id ? ` · run #${o.run_id}` : "") },
@@ -2986,6 +3033,7 @@ function bmComposeSheet(map, man, st, scope, legend) {
   const u = W / 1600;                    // layout unit: 1px on a 1600px-wide sheet
   const pad = Math.round(28 * u);
   const lines = bmProvenanceLines(man, st, scope);
+  if (st.fallback) lines.unshift({ text: "⚠ Live booth data was unavailable — this is the saved map snapshot, which may be out of date. 实时数据不可用，此为快照。", warn: true });
   const titleH = 34 * u, lineH = 22 * u, legendH = 30 * u;
   const headH = Math.round(pad + titleH + lines.length * lineH + 10 * u + legendH + pad * 0.6);
   const c = document.createElement("canvas");
@@ -3059,7 +3107,10 @@ function bmPdfIndex(doc, man) {
     if (first) {
       const notes = [
         `${o.listed} listed exhibitors: ${o.with_booth} with a booth, ${o.without_booth} without.`,
-        `Map vs official list: ${d.booths_matching} booths match, ${d.booths_different_occupant} show a different occupant, `
+        man.map.mode === "live"
+          ? `Live map (model ${man.map.model_version}): ${d.booths_matching} booths drawn with their official occupant(s); `
+            + `${d.booths_official_not_on_map} official booths await manual placement; historical booths are not listed.`
+          : `Map vs official list: ${d.booths_matching} booths match, ${d.booths_different_occupant} show a different occupant, `
           + `${d.booths_official_not_on_map} official booths are not on the SKQ map, ${d.booths_on_map_not_official} map booths have no official exhibitor.`,
         "Booths are listed from the official list; the SKQ map label is shown where the map says something different.",
         `Official organizer floor plan (interactive): ${o.floor_plan_url}`,
@@ -3102,9 +3153,17 @@ async function bmExportFloorPlan(format) {
   bmStatus("Rendering the full floor plan… 正在生成完整展位图…");
   const scope = bmScope();
   const st = api.state();
-  const r = await fetch(`/api/booth-map/export/manifest?format=${format}`, { cache: "no-store" });
+  const mq = st.mode === "live" ? "&map_mode=live" : "";
+  const r = await fetch(`/api/booth-map/export/manifest?format=${format}${mq}`, { cache: "no-store" });
   if (!r.ok) throw new Error(await bmErrorText(r));
   const man = await r.json();
+  /* The floor plan is drawn by the map, the index comes from the server: they
+     must be the same version. If the data moved since the map loaded, reload
+     the map rather than print a plan and an index that disagree. */
+  if (st.mode === "live" && man.map && man.map.model_version !== st.version) {
+    bmReloadFrame();
+    throw new Error("The live booth data changed since the map loaded. The map has been reloaded — please download again. 展位数据已更新，请重新下载。");
+  }
   // Yield once so the status line paints before the synchronous render.
   await new Promise((res) => setTimeout(res, 30));
   const map = api.render(bmExportScale(), { allBooths: scope !== "filter" });
@@ -3168,6 +3227,63 @@ async function bmRunDownload(kind) {
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") bmCloseDl(); });
   // A click inside the map iframe never reaches this document; focus leaving it does.
   window.addEventListener("blur", bmCloseDl);
+})();
+
+/* ── Sync preview (admin, read-only) ── */
+async function bmOpenSyncPreview() {
+  const body = document.getElementById("bm-sync-body");
+  body.innerHTML = '<div style="padding:24px 0;text-align:center;"><span class="spinner"></span> Building the preview… 正在生成预览…</div>';
+  openModal("bm-sync-modal");
+  try {
+    const r = await fetch("/api/booth-map/sync-preview", { cache: "no-store" });
+    if (!r.ok) throw new Error(await bmErrorText(r));
+    const p = await r.json();
+    const row = (label, k) => `<tr><td>${label}</td><td class="num">${p.before[k] ?? "—"}</td><td class="num">${p.after[k] ?? "—"}</td></tr>`;
+    const v = p.validation, g = p.geometry, rc = p.review_counts || {};
+    const ok = v.failures.length === 0;
+    body.innerHTML = `
+      <div style="font-size:0.78rem;color:var(--color-text-tertiary);">Official run #${escapeHtml(String(p.versions.official_run))} · verified ${escapeHtml(bmWhen(p.versions.official_verified_at))}
+        · geometry ${escapeHtml(p.versions.geometry)} · snapshot ${escapeHtml(p.versions.snapshot || "")} · model ${escapeHtml(p.versions.model)}<br>
+        Read-only — nothing is changed by this preview. 只读预览，不修改任何数据。</div>
+      <table class="bm-sync-table"><thead><tr><th>Metric 指标</th><th class="num">Current map 当前</th><th class="num">Live map 实时</th></tr></thead><tbody>
+        ${row("Official exhibitors drawn at their booth(s) 按官方展位绘制", "official_exhibitors_drawn_correctly")}
+        ${row("Booths showing a different company 显示其他公司", "booths_different_occupant")}
+        ${row("Classifications on the wrong company 分类错配", "classifications_on_wrong_company")}
+        ${row("Official booths not drawn 官方展位未绘制", "booths_official_not_on_map")}
+        ${row("Map booths with no official exhibitor 官方无展商", "booths_on_map_not_official")}
+      </tbody></table>
+      <div class="bm-sync-h">Validation 校验</div>
+      <div class="${ok ? "bm-sync-ok" : "bm-sync-bad"}">${v.drawn_at_every_booth} of ${v.assigned_exhibitors} assigned exhibitors drawn at every booth ·
+        ${v.pending_placement.length} awaiting manual placement · ${v.shared_booths} shared booths · ${v.failures.length} failures</div>
+      <div class="bm-sync-h">Geometry 位置</div>
+      <div style="font-size:0.82rem;">${g.counts.kept} kept · ${g.counts.relocated || 0} relocated · ${g.counts.new || 0} new · ${g.counts.kept_ambiguous || 0} ambiguous (not moved) ·
+        ${g.counts.unplaced || 0} need manual placement · ${g.counts.historical || 0} historical<br>
+        ${g.unplaced.concat(g.ambiguous).map((x) => `<b>${escapeHtml(x.n)}</b> — ${escapeHtml(x.note || "")}`).join("<br>")}</div>
+      <div class="bm-sync-h">Classifications 分类</div>
+      <div style="font-size:0.82rem;">${p.classifications.followed_company} companies keep their classification at a new booth ·
+        ${p.classifications.unclassified} official exhibitors unclassified ·
+        review: ${rc.possible_rename || 0} possible renames, ${rc.left_show || 0} not in the verified list, ${rc.ambiguous || 0} ambiguous identities</div>`;
+  } catch (e) {
+    body.innerHTML = `<div class="xo-error">Could not build the preview 无法生成预览: ${escapeHtml(e.message || String(e))}</div>`;
+  }
+}
+
+(function bmWireLiveControls() {
+  document.getElementById("bm-live-preview")?.addEventListener("change", (e) => {
+    try { sessionStorage.setItem("bm_preview_live", e.target.checked ? "1" : "0"); } catch (err) { /* private mode: one-off */ }
+    bmReloadFrame();
+  });
+  document.getElementById("bm-sync-btn")?.addEventListener("click", bmOpenSyncPreview);
+  document.getElementById("bm-sync-close")?.addEventListener("click", () => closeModal("bm-sync-modal"));
+  document.getElementById("bm-sync-done")?.addEventListener("click", () => closeModal("bm-sync-modal"));
+  document.getElementById("bm-sync-xlsx")?.addEventListener("click", async () => {
+    try {
+      const r = await fetch("/api/booth-map/sync-preview?format=xlsx", { cache: "no-store" });
+      if (!r.ok) throw new Error(await bmErrorText(r));
+      const m = (r.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/);
+      bmSaveBlob(await r.blob(), m ? m[1] : "booth-map-sync-preview.xlsx");
+    } catch (e) { bmStatus(`Download failed 下载失败: ${e.message || e}`, "error"); }
+  });
 })();
 
 function bmFoot(buttons) {
