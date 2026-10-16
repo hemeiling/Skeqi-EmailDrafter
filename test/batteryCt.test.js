@@ -68,7 +68,8 @@ test('dataset: the 14 exhibitors match the official list run #7 by exhibitor ID,
 test('the map only shows the CT filter when the server enables it', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'booth-map', 'index.html'), 'utf8');
   assert.match(html, /if\(!d\|\|!d\.ok\|\|!d\.enabled\|\|!Array\.isArray\(d\.on_map\)\)return;/);
-  assert.equal(require('../config').BATTERY_CT_FILTER, process.env.BATTERY_CT_FILTER === 'on' ? 'on' : 'off');
+  // On by default since the 2026-10-15 cutover; BATTERY_CT_FILTER=off is the rollback.
+  assert.equal(require('../config').BATTERY_CT_FILTER, process.env.BATTERY_CT_FILTER === 'off' ? 'off' : 'on');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /config\.BATTERY_CT_FILTER === 'on' \|\| \(req\.query\.ct === 'preview' && isAdmin\(req\)\)/);
 });

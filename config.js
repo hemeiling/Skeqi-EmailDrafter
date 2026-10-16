@@ -17,8 +17,11 @@ const APOLLO_API_KEY = process.env.APOLLO_API_KEY || '';
    Render — no redeploy), which draws the map's embedded data exactly as
    before; the embedded data itself is never modified. */
 const BOOTH_MAP_MODE = process.env.BOOTH_MAP_MODE === 'snapshot' ? 'snapshot' : 'live';
-/* Battery CT research filter on the Booth Map. Off unless exactly 'on'. */
-const BATTERY_CT_FILTER = process.env.BATTERY_CT_FILTER === 'on' ? 'on' : 'off';
+/* Battery CT research filter on the Booth Map. ON by default since the
+   approved cutover of 2026-10-15; rollback is BATTERY_CT_FILTER=off (an env
+   var on Render — no redeploy). A research overlay only: it never writes or
+   replaces SKQ classifications. */
+const BATTERY_CT_FILTER = process.env.BATTERY_CT_FILTER === 'off' ? 'off' : 'on';
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const BAILIAN_API_KEY = process.env.BAILIAN_API_KEY || process.env.DASHSCOPE_API_KEY || '';
