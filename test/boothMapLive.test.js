@@ -449,5 +449,6 @@ test('the map keeps snapshot behaviour unless the server says live, and falls ba
   assert.match(html, /x\.d\.mode==='live'/, 'live is applied only when the server answers live');
   assert.match(html, /Live booth data unavailable/);
   assert.match(html, /throws BEFORE the embedded data is touched/);
-  assert.equal(require('../config').BOOTH_MAP_MODE, process.env.BOOTH_MAP_MODE === 'live' ? 'live' : 'snapshot');
+  // Live by default since the 2026-10-15 cutover; BOOTH_MAP_MODE=snapshot is the rollback.
+  assert.equal(require('../config').BOOTH_MAP_MODE, process.env.BOOTH_MAP_MODE === 'snapshot' ? 'snapshot' : 'live');
 });

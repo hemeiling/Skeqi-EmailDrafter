@@ -12,6 +12,12 @@
    dropped, because a confident answer built on a silent omission is the worst
    output this feature can produce.
    ═══════════════════════════════════════════════════════════════════════════ */
+/* These fixtures predate the live Booth Map and create no verified exhibitor
+   run, so they describe the snapshot-mode tools. Pinned explicitly (before
+   config.js loads) now that production defaults to live; the live path has
+   its own coverage in boothMapLive.test.js. */
+process.env.BOOTH_MAP_MODE = 'snapshot';
+
 const test = require('node:test');
 const assert = require('node:assert');
 
